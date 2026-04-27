@@ -1,0 +1,7 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/paywalls-js" },
+    { "path": "./packages/paywalls-react" }
+  ]
+}

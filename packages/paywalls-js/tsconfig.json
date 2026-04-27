@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    // DOM types are erased at runtime; included so the optional
+    // browser-only `PaywallOptions.container?: HTMLElement` typechecks
+    // in headless consumers without forcing them to depend on DOM.
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["src/**/*"]
+}

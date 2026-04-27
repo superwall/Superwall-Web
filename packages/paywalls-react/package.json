@@ -1,0 +1,35 @@
+{
+  "name": "@superwall/paywalls-react",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "echo 'no-op for v0; consumers import .ts directly via Bun/Vite/Next ESM'",
+    "clean": "rm -rf node_modules .turbo *.tsbuildinfo"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "@superwall/paywalls-js": "workspace:*"
+  },
+  "dependencies": {
+    "@superwall/paywalls-js": "workspace:*"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^20.0.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/bun": "latest",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

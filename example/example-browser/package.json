@@ -1,0 +1,13 @@
+{
+  "name": "@superwall/example-browser",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "start": "bun src/server.ts"
+  },
+  "dependencies": {
+    "@superwall/paywalls-js": "workspace:*"
+  }
+}

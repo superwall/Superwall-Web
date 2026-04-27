@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Superwall Web SDK — Browser Example</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0b0d10;
+        --panel: #14181d;
+        --panel-2: #1c2128;
+        --border: #2a3038;
+        --text: #e6e9ef;
+        --muted: #8a93a3;
+        --accent: #6ea8fe;
+        --good: #54d489;
+        --warn: #f0b46a;
+        --bad: #f06a6a;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f7f8fa;
+          --panel: #ffffff;
+          --panel-2: #f0f2f5;
+          --border: #d8dde4;
+          --text: #14181d;
+          --muted: #5a6373;
+          --accent: #2563eb;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px;
+        display: grid;
+        gap: 16px;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin: 0 0 8px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 8px 16px;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 6px 0;
+        border-bottom: 1px dashed var(--border);
+      }
+      .row:last-child { border-bottom: 0; }
+      .row .k { color: var(--muted); }
+      .row .v {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        word-break: break-all;
+        text-align: right;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button {
+        appearance: none;
+        background: var(--panel-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 12px;
+        font: inherit;
+        cursor: pointer;
+        transition: background 0.12s;
+      }
+      button:hover { background: var(--border); }
+      button.primary {
+        background: var(--accent);
+        color: white;
+        border-color: transparent;
+      }
+      button.primary:hover { filter: brightness(1.05); }
+      pre#event-log {
+        margin: 0;
+        max-height: 320px;
+        overflow: auto;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      pre#event-log .ev { color: var(--accent); }
+      pre#event-log .ts { color: var(--muted); }
+      #last-result {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        white-space: pre-wrap;
+        min-height: 1.2em;
+      }
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        color: var(--muted);
+      }
+      .badge.active { color: var(--good); border-color: var(--good); }
+      .badge.inactive { color: var(--warn); border-color: var(--warn); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Superwall Web SDK — Browser Example</h1>
+        <div class="badge" id="config-badge">configuring…</div>
+      </header>
+
+      <section class="panel">
+        <h2>Status</h2>
+        <div class="grid">
+          <div class="row"><span class="k">user.id</span><span class="v" id="s-user-id">—</span></div>
+          <div class="row"><span class="k">user.aliasId</span><span class="v" id="s-user-alias">—</span></div>
+          <div class="row"><span class="k">user.effectiveId</span><span class="v" id="s-user-effective">—</span></div>
+          <div class="row"><span class="k">subscriptionStatus</span><span class="v" id="s-sub">—</span></div>
+          <div class="row"><span class="k">isPaywallPresented</span><span class="v" id="s-presented">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Actions</h2>
+        <div class="actions">
+          <button data-act="identify" class="primary">Identify as test_user_42</button>
+          <button data-act="signOut">Sign out</button>
+          <button data-act="subActive">Set subscription ACTIVE</button>
+          <button data-act="subInactive">Set subscription INACTIVE</button>
+          <button data-act="register" class="primary">Register checkout placement</button>
+          <button data-act="dismiss">Dismiss</button>
+          <button data-act="reset">Reset</button>
+        </div>
+        <h2 style="margin-top: 16px;">Last register() result</h2>
+        <div id="last-result">—</div>
+      </section>
+
+      <section class="panel">
+        <h2>Events</h2>
+        <pre id="event-log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./app.ts"></script>
+  </body>
+</html>

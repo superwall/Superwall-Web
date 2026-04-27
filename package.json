@@ -1,0 +1,19 @@
+{
+  "name": "superwall-web",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "example/*"],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^20.9.0",
+    "@types/bun": "latest",
+    "turbo": "^2.0.0",
+    "typescript": "^5.6.0"
+  },
+  "packageManager": "bun@1.1.0"
+}

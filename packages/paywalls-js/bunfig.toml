@@ -1,0 +1,5 @@
+# Browser-package tests need a DOM. Tests named `*.dom.test.ts` get
+# happy-dom registered globally via the preload script; everything else
+# runs in plain Bun.
+[test]
+preload = ["./test-setup-dom.ts"]
