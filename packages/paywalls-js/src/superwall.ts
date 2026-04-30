@@ -5,7 +5,7 @@
 // signals, delegate) is shared across method calls — no per-runPromise
 // re-instantiation. Public methods are thin Promise-returning façades.
 
-import { Effect, Layer, ManagedRuntime, Stream } from "effect";
+import { Effect, Layer, ManagedRuntime, Schedule, Stream } from "effect";
 import { _clearDefault, _registerDefault } from "./default.ts";
 import {
   NoPresenterRegisteredError,
@@ -67,6 +67,7 @@ import {
   type AssignmentServiceImpl,
 } from "./internal/assignments.ts";
 import {
+  IdentityPending,
   IdentityService,
   identityWithStorage,
   type IdentitySnapshot,
@@ -457,37 +458,51 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     // and `confirmAllAssignments` returns a complete snapshot.
     yield* eagerAssign(config, assignments);
 
-    // Enrichment — POST {user, device} → merge response into local state.
-    // Best-effort: a network failure here doesn't block ready (we still
-    // mark configured true; consumers operate on the un-enriched snapshot).
-    // Per API.md §11.6: called on configure() and on every identify().
-    yield* runEnrichment(bus).pipe(Effect.catchAll(() => Effect.void));
-
-    // Static config fetch — best-effort. If network fails OR misses the
-    // deadline, the cached config (if any) stays in place; consumers see
-    // paywallNotAvailable for unknown placements until a successful fetch
-    // lands. Deadline matches Android `ConfigState.kt:86`: 500ms when the
-    // user has an active subscription, 1s otherwise. The deadline only
-    // applies when `enableConfigRefresh` is on AND we already have a
-    // hydrated cache to fall back to (matches Android's gating).
+    // Static config fetch + enrichment run in parallel — neither depends on
+    // the other's response. Mirrors Android `ConfigState.kt:FetchConfig`
+    // (`configDeferred` + `enrichmentDeferred` + `attributesDeferred` via
+    // `scope.async`). Both are best-effort: failures don't block `configured`.
+    //
+    // Fetch deadline: when (a) a hydrated cache exists AND (b) the toggle
+    // `enableConfigRefresh` is on, race the fetch against `cacheLimit`
+    // (500ms on `ACTIVE` sub status, 1s otherwise — Android `ConfigState.kt:86`).
+    // On timeout/error the hydrated cache stays in place. Toggle off →
+    // unbounded fetch (matches Android's gating).
     const hydrated = yield* config.current();
     const refreshEnabled =
       hydrated?.toggles.find((t) => t.key === "enableConfigRefresh")?.enabled ===
       true;
-    const fetchEffect = config.fetch().pipe(Effect.catchAll(() => Effect.void));
-    if (hydrated && refreshEnabled) {
-      const cacheLimit = subStatusSig.value.status === "ACTIVE" ? 500 : 1000;
-      yield* fetchEffect.pipe(
-        Effect.timeout(`${cacheLimit} millis`),
-        Effect.catchAll(() => Effect.void),
-      );
-    } else {
-      yield* fetchEffect;
-    }
+    // Bounded auto-retry — single retry on fetch failure, mirroring
+    // Android `ConfigState.kt:HandleFetchFailure` (`newRetries <= 1`).
+    // Retry attaches to the *raw* fetch error (network / parse), not the
+    // deadline-timeout wrapper below; a deadline miss means "use cache,"
+    // not "config failed."
+    const rawFetch = config
+      .fetch()
+      .pipe(Effect.retry(Schedule.recurs(1)))
+      .pipe(Effect.catchAll(() => Effect.void));
+    const fetchEffect =
+      hydrated && refreshEnabled
+        ? rawFetch.pipe(
+            Effect.timeout(
+              `${subStatusSig.value.status === "ACTIVE" ? 500 : 1000} millis`,
+            ),
+            Effect.catchAll(() => Effect.void),
+          )
+        : rawFetch;
+    const enrichmentEffect = runEnrichment(bus).pipe(
+      Effect.catchAll(() => Effect.void),
+    );
+    yield* Effect.all([fetchEffect, enrichmentEffect], {
+      concurrency: "unbounded",
+    });
     // Re-run eager assignment in case the fresh config introduced new
     // experiments or removed variants from existing ones.
     yield* eagerAssign(config, assignments);
 
+    // Drain the initial `Configuration` pending item — `register()` blocks
+    // on phase=Ready, so this is what unblocks the first registration.
+    yield* IdentityService.endPending(IdentityPending.Configuration);
     configuredSig.set(true);
     statusSig.set("configured");
   });
@@ -563,7 +578,25 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     identify: (userId, _identityOpts) =>
       runPublic(
         Effect.gen(function* () {
-          yield* IdentityService.identify(userId);
+          // Pending-set bracket — `register()` will block on phase=Ready
+          // until both `Identification(id)` and `Seed` clear. Closes the
+          // race where identify() in flight makes audience eval read stale
+          // attributes (Android `IdentityState.Pending.Identification`).
+          yield* IdentityService.beginPending(
+            IdentityPending.Identification(userId),
+          );
+          // Seed pending lands implicitly because identify() may trigger a
+          // userIdSeed resolution downstream; for v0 we just clear it after
+          // identify() returns since seed-resolve isn't a separate effect yet.
+          yield* IdentityService.beginPending(IdentityPending.Seed);
+          try {
+            yield* IdentityService.identify(userId);
+          } finally {
+            yield* IdentityService.endPending(IdentityPending.Seed);
+            yield* IdentityService.endPending(
+              IdentityPending.Identification(userId),
+            );
+          }
         }) as Effect.Effect<void, unknown, never>,
       ),
 
@@ -576,6 +609,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     setAttributes: (next) => {
       attrsSig.update((prev) => ({ ...prev, ...next }) as UserAttributes);
+      // Synchronous — by the time this returns, attrsSig is updated and
+      // any subsequent `register()` reads the new value. No Attributes
+      // pending bracket needed until an async persistence/emit lands.
       // TODO: persist + emit user_attributes event when attribute service lands.
     },
 
@@ -754,6 +790,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     register: async (args) => {
       const { placement, params, handler, feature } = args;
       try {
+        // Block until identity is Ready — closes the race where an
+        // in-flight identify() / reset() / configure() makes audience
+        // evaluation read stale identity / attributes. Mirrors Android
+        // `IdentityState.Phase.Ready`.
+        await runtime.runPromise(IdentityService.awaitReady());
         // Single-paywall invariant — reject before invoking the presenter.
         if (presentedSig.value) {
           const current = latestPaywallSig.value;
@@ -1150,6 +1191,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     reset: () =>
       runPublic(
         Effect.gen(function* () {
+          yield* IdentityService.beginPending(IdentityPending.Reset);
           yield* IdentityService.reset();
           subStatusSig.set({ status: "UNKNOWN" });
           customerSig.set(null);
@@ -1168,6 +1210,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* config.reset();
           const bus = yield* EventBus;
           yield* bus.publish("reset", {});
+          yield* IdentityService.endPending(IdentityPending.Reset);
         }) as Effect.Effect<void, unknown, never>,
       ),
 

@@ -17,7 +17,7 @@
 //
 // Internal-only — not exported from the package barrel.
 
-import { Context, Effect, Layer, Ref } from "effect";
+import { Context, Effect, Layer, SubscriptionRef } from "effect";
 import { STORAGE_KEYS, type JsonValue } from "../types.ts";
 import { asStorageKey } from "./brands.ts";
 import { ConfigParseError } from "./errors.ts";
@@ -252,22 +252,83 @@ export const parseConfig = (input: JsonValue): RawConfig => {
 };
 
 // ---------------------------------------------------------------------------
+// ConfigState — typed actor state machine. Mirrors Android `ConfigState.kt`.
+//
+// Updates are pure reducers (`(s) => s'`); Actions live on the service
+// (fetch / reset / etc.) and dispatch Updates through a SubscriptionRef so
+// callers can observe transitions. Web's previous flat `RawConfig | null`
+// ref is now derivable from this state via `getConfig()`.
+// ---------------------------------------------------------------------------
+
+export type ConfigState =
+  | { readonly _tag: "None" }
+  | { readonly _tag: "Retrieving" }
+  | { readonly _tag: "Retrying" }
+  | { readonly _tag: "Retrieved"; readonly config: RawConfig }
+  | {
+      readonly _tag: "Failed";
+      readonly error: Error;
+      readonly retryCount: number;
+    };
+
+export const ConfigState = {
+  None: { _tag: "None" } as const satisfies ConfigState,
+  Retrieving: { _tag: "Retrieving" } as const satisfies ConfigState,
+  Retrying: { _tag: "Retrying" } as const satisfies ConfigState,
+  Retrieved: (config: RawConfig): ConfigState => ({
+    _tag: "Retrieved",
+    config,
+  }),
+  Failed: (error: Error, retryCount = 0): ConfigState => ({
+    _tag: "Failed",
+    error,
+    retryCount,
+  }),
+};
+
+/** Pure reducers. Match Android `ConfigState.Updates`. */
+export const ConfigUpdates = {
+  SetRetrieving: (_: ConfigState): ConfigState => ConfigState.Retrieving,
+  SetRetrying: (_: ConfigState): ConfigState => ConfigState.Retrying,
+  SetRetrieved:
+    (config: RawConfig) =>
+    (_: ConfigState): ConfigState =>
+      ConfigState.Retrieved(config),
+  SetFailed:
+    (error: Error, retryCount = 0) =>
+    (_: ConfigState): ConfigState =>
+      ConfigState.Failed(error, retryCount),
+};
+
+/** Project the underlying config out of any ConfigState — null unless
+ *  Retrieved. Equivalent to Kotlin's `ConfigState.getConfig()` extension. */
+export const getConfig = (s: ConfigState): RawConfig | null =>
+  s._tag === "Retrieved" ? s.config : null;
+
+const isFetching = (s: ConfigState): boolean =>
+  s._tag === "Retrieving" || s._tag === "Retrying";
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
 export interface ConfigServiceImpl {
   /**
-   * Fetch fresh config from the backend, parse, persist to storage, and
-   * publish on the internal SubscriptionRef. Returns the parsed config or
-   * fails with `ConfigParseError` / network errors (translated to public
-   * errors at the runPromise boundary).
+   * Fetch fresh config from the backend, parse, publish state transitions
+   * (Retrieving → Retrieved | Failed), persist to storage. Concurrent calls
+   * are no-ops while in Retrieving|Retrying (matches Android `FetchConfig`).
+   * Returns the parsed config or fails.
    */
   readonly fetch: () => Effect.Effect<
     RawConfig,
     ConfigParseError | Error
   >;
-  /** Read the current parsed config (null pre-fetch). */
+  /** Read the current parsed config (null unless Retrieved). */
   readonly current: () => Effect.Effect<RawConfig | null>;
+  /** Read the full ConfigState — useful for guarding re-entry. */
+  readonly state: () => Effect.Effect<ConfigState>;
+  /** Subscribe to state transitions. */
+  readonly stateRef: SubscriptionRef.SubscriptionRef<ConfigState>;
   /** Replay cached config from storage. Returns null if no cache. */
   readonly hydrateFromStorage: () => Effect.Effect<RawConfig | null>;
   /** Look up a placement by name. Returns null when not found in the
@@ -289,7 +350,10 @@ export interface ConfigServiceImpl {
 const make = Effect.gen(function* () {
   const network = yield* NetworkService;
   const storage = yield* StorageService;
-  const ref = yield* Ref.make<RawConfig | null>(null);
+  const stateRef = yield* SubscriptionRef.make<ConfigState>(ConfigState.None);
+
+  const update = (reducer: (s: ConfigState) => ConfigState) =>
+    SubscriptionRef.update(stateRef, reducer);
 
   const persist = (cfg: RawConfig) =>
     storage
@@ -299,8 +363,7 @@ const make = Effect.gen(function* () {
   const hydrateFromStorage: ConfigServiceImpl["hydrateFromStorage"] = () =>
     Effect.gen(function* () {
       // Storage failures during hydrate are non-fatal — fresh fetch will
-      // repopulate. Catch to keep the public-facing return type clean
-      // (`Effect<RawConfig | null>` with no error channel).
+      // repopulate. Catch to keep the public-facing return type clean.
       const cached = yield* storage
         .get(CONFIG_KEY)
         .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
@@ -309,52 +372,102 @@ const make = Effect.gen(function* () {
         const decoded = JSON.parse(cached) as { buildId?: string; payload?: JsonValue };
         if (!decoded.payload) return null;
         const parsed = parseConfig(decoded.payload);
-        yield* Ref.set(ref, parsed);
+        // Hydration counts as Retrieved; fresh fetch may transition us to
+        // Retrieving and back. Matches Android: cache replay seeds the
+        // state so consumers see a Retrieved state before network lands.
+        yield* update(ConfigUpdates.SetRetrieved(parsed));
         return parsed;
       } catch {
-        // Corrupt cache — drop silently. Fresh fetch will repopulate.
         return null;
       }
     });
 
   const fetch: ConfigServiceImpl["fetch"] = () =>
     Effect.gen(function* () {
-      const raw = yield* network.getStaticConfig();
-      const parsed = parseConfig(raw);
-      yield* Ref.set(ref, parsed);
-      yield* persist(parsed);
-      return parsed;
+      // Re-entry guard — Android `FetchConfig` returns early if state is
+      // Retrieving|Retrying. Concurrent fetch() calls observe the same
+      // in-flight transition and don't kick another network round-trip.
+      const current = yield* SubscriptionRef.get(stateRef);
+      if (isFetching(current)) {
+        // Wait for the in-flight fetch to settle, then return its outcome.
+        // (Failed callers get the same error; Retrieved callers get the
+        //  fresh config.) We poll the SubscriptionRef rather than wiring a
+        //  proper join so this stays pure data — no extra fiber bookkeeping.
+        return yield* awaitSettle(stateRef);
+      }
+
+      // Capture pre-fetch state so an interrupt (e.g. caller-side
+      // `Effect.timeout`) can restore it. Without this, a timed-out fetch
+      // would leave the actor stuck at Retrieving forever.
+      const prior = current;
+      yield* update(ConfigUpdates.SetRetrieving);
+      const result = yield* network.getStaticConfig().pipe(
+        Effect.flatMap((raw) =>
+          Effect.try({
+            try: () => parseConfig(raw),
+            catch: (e) =>
+              e instanceof ConfigParseError
+                ? e
+                : new ConfigParseError({ reason: String(e) }),
+          }),
+        ),
+        Effect.tap((parsed) => persist(parsed)),
+        Effect.tap((parsed) => update(ConfigUpdates.SetRetrieved(parsed))),
+        Effect.tapError((err) =>
+          update(ConfigUpdates.SetFailed(err as Error)),
+        ),
+        Effect.onInterrupt(() => update(() => prior)),
+      );
+      return result;
     });
 
-  const current: ConfigServiceImpl["current"] = () => Ref.get(ref);
+  /** Block until the state leaves Retrieving|Retrying. Returns the underlying
+   *  config or fails with the captured error. Yields to the scheduler each
+   *  loop iteration so the in-flight fetch fiber can advance. */
+  const awaitSettle = (
+    ref: SubscriptionRef.SubscriptionRef<ConfigState>,
+  ): Effect.Effect<RawConfig, Error> =>
+    Effect.gen(function* () {
+      const s = yield* SubscriptionRef.get(ref);
+      if (s._tag === "Retrieved") return s.config;
+      if (s._tag === "Failed") return yield* Effect.fail(s.error);
+      yield* Effect.yieldNow();
+      return yield* awaitSettle(ref);
+    });
+
+  const current: ConfigServiceImpl["current"] = () =>
+    SubscriptionRef.get(stateRef).pipe(Effect.map(getConfig));
+
+  const state: ConfigServiceImpl["state"] = () => SubscriptionRef.get(stateRef);
 
   const getPlacement: ConfigServiceImpl["getPlacement"] = (placementName) =>
     Effect.gen(function* () {
-      const cfg = yield* Ref.get(ref);
+      const cfg = getConfig(yield* SubscriptionRef.get(stateRef));
       if (!cfg) return null;
-      return cfg.triggerOptions.find(
-        (t) => t.placementName === placementName,
-      ) ?? null;
+      return (
+        cfg.triggerOptions.find((t) => t.placementName === placementName) ??
+        null
+      );
     });
 
   const getPaywall: ConfigServiceImpl["getPaywall"] = (identifier) =>
     Effect.gen(function* () {
-      const cfg = yield* Ref.get(ref);
+      const cfg = getConfig(yield* SubscriptionRef.get(stateRef));
       if (!cfg) return null;
-      return cfg.paywallResponses.find(
-        (p) => p.identifier === identifier,
-      ) ?? null;
+      return (
+        cfg.paywallResponses.find((p) => p.identifier === identifier) ?? null
+      );
     });
 
   const getProducts: ConfigServiceImpl["getProducts"] = () =>
     Effect.gen(function* () {
-      const cfg = yield* Ref.get(ref);
+      const cfg = getConfig(yield* SubscriptionRef.get(stateRef));
       return cfg?.products ?? [];
     });
 
   const reset: ConfigServiceImpl["reset"] = () =>
     Effect.gen(function* () {
-      yield* Ref.set(ref, null);
+      yield* SubscriptionRef.set(stateRef, ConfigState.None);
       yield* storage
         .remove(CONFIG_KEY)
         .pipe(Effect.catchAll(() => Effect.void));
@@ -363,6 +476,8 @@ const make = Effect.gen(function* () {
   return {
     fetch,
     current,
+    state,
+    stateRef,
     hydrateFromStorage,
     getPlacement,
     getPaywall,

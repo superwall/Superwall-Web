@@ -11,7 +11,10 @@ import {
   generateAlias,
   generateVendorId,
   identityWithStorage,
+  IdentityPending,
+  IdentityPhase,
   IdentityService,
+  IdentityUpdates,
   type IdentitySnapshot,
 } from "./identity.ts";
 import { createMemoryStorage, StorageService } from "./storage.ts";
@@ -340,4 +343,94 @@ test("storage failure during hydrate persistence propagates as a tagged StorageS
   );
 
   expect(result._tag).toBe("Failure");
+});
+
+// ---------------------------------------------------------------------------
+// IdentityPhase actor — pure reducers + service-driven transitions
+// ---------------------------------------------------------------------------
+
+test("IdentityPhase.initial: starts Pending with Configuration", () => {
+  const phase = IdentityPhase.initial();
+  expect(phase._tag).toBe("Pending");
+  if (phase._tag === "Pending") {
+    expect(phase.items).toEqual([{ _tag: "Configuration" }]);
+  }
+});
+
+test("IdentityUpdates.begin is set-semantic — duplicate adds are no-ops", () => {
+  let phase: IdentityPhase = IdentityPhase.initial();
+  phase = IdentityUpdates.begin(IdentityPending.Seed)(phase);
+  phase = IdentityUpdates.begin(IdentityPending.Seed)(phase);
+  if (phase._tag !== "Pending") throw new Error("expected Pending");
+  expect(phase.items.filter((p) => p._tag === "Seed")).toHaveLength(1);
+});
+
+test("IdentityUpdates.end of last item flips Pending → Ready", () => {
+  let phase: IdentityPhase = IdentityPhase.Pending([IdentityPending.Configuration]);
+  phase = IdentityUpdates.end(IdentityPending.Configuration)(phase);
+  expect(phase._tag).toBe("Ready");
+});
+
+test("IdentityUpdates.end of one of many keeps Pending with the rest", () => {
+  let phase: IdentityPhase = IdentityPhase.Pending([
+    IdentityPending.Configuration,
+    IdentityPending.Seed,
+  ]);
+  phase = IdentityUpdates.end(IdentityPending.Seed)(phase);
+  expect(phase._tag).toBe("Pending");
+  if (phase._tag === "Pending") {
+    expect(phase.items.map((p) => p._tag)).toEqual(["Configuration"]);
+  }
+});
+
+test("IdentityUpdates.end of a different Identification id leaves the original pending", () => {
+  let phase: IdentityPhase = IdentityPhase.Pending([
+    IdentityPending.Identification("u_1"),
+  ]);
+  phase = IdentityUpdates.end(IdentityPending.Identification("u_2"))(phase);
+  expect(phase._tag).toBe("Pending");
+});
+
+test("IdentityService.awaitReady resolves only after the pending-set drains", async () => {
+  const { stack } = freshStack();
+  // Run a scenario where awaitReady is started while pending, then the
+  // Configuration item is dropped, and the awaitReady fiber settles.
+  const result = await runWith(
+    stack,
+    Effect.gen(function* () {
+      // Start a fiber that races awaitReady against a fixed wall-clock.
+      const readyFiber = yield* Effect.fork(
+        IdentityService.awaitReady().pipe(
+          Effect.timeout("500 millis"),
+          Effect.either,
+        ),
+      );
+      // Briefly yield so awaitReady actually begins polling.
+      yield* Effect.yieldNow();
+      // Drain the initial Configuration.
+      yield* IdentityService.endPending(IdentityPending.Configuration);
+      // Collect the fiber result.
+      const exit = yield* readyFiber;
+      return exit;
+    }),
+  );
+  // No timeout firing — Either.right(undefined).
+  expect(result._tag).toBe("Right");
+});
+
+test("IdentityService.awaitReady stays pending while items remain in the set", async () => {
+  const { stack } = freshStack();
+  const result = await runWith(
+    stack,
+    Effect.gen(function* () {
+      // Add an Identification(id) on top of the initial Configuration.
+      yield* IdentityService.beginPending(IdentityPending.Identification("u_1"));
+      // awaitReady should now timeout because two items remain.
+      return yield* IdentityService.awaitReady().pipe(
+        Effect.timeout("100 millis"),
+        Effect.either,
+      );
+    }),
+  );
+  expect(result._tag).toBe("Left"); // TimeoutException
 });

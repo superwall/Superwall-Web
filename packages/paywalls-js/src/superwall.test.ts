@@ -1219,6 +1219,32 @@ test("paywallWillOpenDeepLink local event is delivered to the delegate", async (
   await sw.dispose();
 });
 
+test("configure: failing static_config fetch retries exactly once before giving up", async () => {
+  // Android `ConfigState.kt:HandleFetchFailure` — single retry max.
+  let configCalls = 0;
+  const failingFetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      configCalls++;
+      return new Response("nope", { status: 500 });
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return new Response(JSON.stringify({ user: {}, device: {} }), { status: 200 });
+    }
+    return new Response("", { status: 204 });
+  }) as unknown as typeof fetch;
+
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: failingFetch,
+    storage: newAdapter(),
+  });
+  await sw.ready;
+  // Initial attempt + 1 retry == 2.
+  expect(configCalls).toBe(2);
+  await sw.dispose();
+});
+
 test("configure: hanging static_config fetch falls back to cached config under enableConfigRefresh deadline", async () => {
   // Pre-seed storage with a cached config carrying the enableConfigRefresh
   // toggle. On configure(), the fetch deadline should fire (1s) and the

@@ -36,6 +36,78 @@ export interface IdentitySnapshot {
   readonly deviceId: DeviceId;
 }
 
+// ---------------------------------------------------------------------------
+// IdentityPhase — typed pending-set actor. Mirrors Android
+// `IdentityState.Phase` (`Pending(Set<Pending>) | Ready`).
+//
+// `register()` blocks until the pending-set drains. Closes the race where
+// an in-flight `identify()` mid-resolves user attributes while a placement
+// rule is being evaluated.
+// ---------------------------------------------------------------------------
+
+export type IdentityPending =
+  | { readonly _tag: "Configuration" }
+  | { readonly _tag: "Identification"; readonly id: string }
+  | { readonly _tag: "Attributes" }
+  | { readonly _tag: "Reset" }
+  | { readonly _tag: "Seed" }
+  | { readonly _tag: "Assignments" };
+
+export const IdentityPending = {
+  Configuration: { _tag: "Configuration" } as const satisfies IdentityPending,
+  Identification: (id: string): IdentityPending => ({
+    _tag: "Identification",
+    id,
+  }),
+  Attributes: { _tag: "Attributes" } as const satisfies IdentityPending,
+  Reset: { _tag: "Reset" } as const satisfies IdentityPending,
+  Seed: { _tag: "Seed" } as const satisfies IdentityPending,
+  Assignments: { _tag: "Assignments" } as const satisfies IdentityPending,
+};
+
+const pendingKey = (p: IdentityPending): string =>
+  p._tag === "Identification" ? `Identification:${p.id}` : p._tag;
+
+export type IdentityPhase =
+  | { readonly _tag: "Pending"; readonly items: ReadonlyArray<IdentityPending> }
+  | { readonly _tag: "Ready" };
+
+export const IdentityPhase = {
+  /** Initial phase — `{Configuration}` pending until the first hydrate
+   *  + configure() pass completes (mirrors Android `Phase.Pending(setOf(Configuration))`). */
+  initial: (): IdentityPhase => ({
+    _tag: "Pending",
+    items: [IdentityPending.Configuration],
+  }),
+  Ready: { _tag: "Ready" } as const satisfies IdentityPhase,
+  Pending: (items: ReadonlyArray<IdentityPending>): IdentityPhase =>
+    items.length === 0 ? IdentityPhase.Ready : { _tag: "Pending", items },
+};
+
+/** Pure reducers. Match Android `IdentityState.Updates`. */
+export const IdentityUpdates = {
+  /** Add a pending item. No-op if already present (set semantics). */
+  begin:
+    (item: IdentityPending) =>
+    (phase: IdentityPhase): IdentityPhase => {
+      const existing = phase._tag === "Pending" ? phase.items : [];
+      const key = pendingKey(item);
+      if (existing.some((p) => pendingKey(p) === key)) return phase;
+      return { _tag: "Pending", items: [...existing, item] };
+    },
+  /** Remove a pending item; flips to Ready when set drains. */
+  end:
+    (item: IdentityPending) =>
+    (phase: IdentityPhase): IdentityPhase => {
+      if (phase._tag !== "Pending") return phase;
+      const key = pendingKey(item);
+      const next = phase.items.filter((p) => pendingKey(p) !== key);
+      return IdentityPhase.Pending(next);
+    },
+};
+
+const isReady = (phase: IdentityPhase): boolean => phase._tag === "Ready";
+
 export interface IdentitySeed {
   readonly aliasId?: string;
   readonly appUserId?: string;
@@ -79,6 +151,12 @@ export const deriveDeviceId = (
 const make = Effect.gen(function* () {
   const storage = yield* StorageService;
   const ref = yield* SubscriptionRef.make<IdentitySnapshot | null>(null);
+  const phaseRef = yield* SubscriptionRef.make<IdentityPhase>(
+    IdentityPhase.initial(),
+  );
+
+  const phaseUpdate = (reducer: (p: IdentityPhase) => IdentityPhase) =>
+    SubscriptionRef.update(phaseRef, reducer);
 
   const persist = Effect.fn("IdentityService.persist")(function* (
     snap: IdentitySnapshot,
@@ -202,7 +280,45 @@ const make = Effect.gen(function* () {
     return ref.changes;
   });
 
-  return { hydrate, current, identify, signOut, reset, observe } as const;
+  // ---------------------------------------------------------------------------
+  // Phase actor — pending-set transitions exposed to superwall.ts.
+  // ---------------------------------------------------------------------------
+
+  /** Add a pending item to the phase set. Idempotent. */
+  const beginPending = (item: IdentityPending) =>
+    phaseUpdate(IdentityUpdates.begin(item));
+
+  /** Drop a pending item; phase flips to Ready when set drains. */
+  const endPending = (item: IdentityPending) =>
+    phaseUpdate(IdentityUpdates.end(item));
+
+  /** Read the current phase. */
+  const currentPhase = () => SubscriptionRef.get(phaseRef);
+
+  /** Block until phase becomes Ready. Polls via SubscriptionRef.changes
+   *  semantics with a yield each iteration (bounded by external pending
+   *  resolutions). */
+  const awaitReady: () => Effect.Effect<void> = () =>
+    Effect.gen(function* () {
+      const phase = yield* SubscriptionRef.get(phaseRef);
+      if (isReady(phase)) return;
+      yield* Effect.yieldNow();
+      yield* awaitReady();
+    });
+
+  return {
+    hydrate,
+    current,
+    identify,
+    signOut,
+    reset,
+    observe,
+    phaseRef,
+    beginPending,
+    endPending,
+    currentPhase,
+    awaitReady,
+  } as const;
 });
 
 export class IdentityService extends Effect.Service<IdentityService>()(
