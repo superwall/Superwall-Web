@@ -1,7 +1,6 @@
 // Each test names the §2 contract clause it enforces.
 
 import { test, expect } from "bun:test";
-import { Effect, Stream } from "effect";
 import { asReadable, createSignal } from "./signal.ts";
 
 const tick = () => new Promise<void>((r) => queueMicrotask(r));
@@ -129,22 +128,3 @@ test("asReadable() strips the writable surface", () => {
   expect(ro.value).toBe(42);
 });
 
-test("Effect-side consumers see the same writes via the underlying SubscriptionRef", async () => {
-  const sig = createSignal(0);
-
-  // Drain the first 4 values (initial + 3 writes) from the SubscriptionRef
-  // as a Stream. This proves the vanilla-side write goes through the same
-  // source of truth future Effect services will subscribe to.
-  const fiber = Effect.runFork(
-    sig.__ref.changes.pipe(Stream.take(4), Stream.runCollect),
-  );
-
-  // Microtask hop so the stream subscription is live before we write.
-  await tick();
-  sig.set(1);
-  sig.set(2);
-  sig.set(3);
-
-  const collected = await Effect.runPromise(Effect.fromFiber(fiber));
-  expect(Array.from(collected)).toEqual([0, 1, 2, 3]);
-});

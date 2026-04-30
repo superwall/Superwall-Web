@@ -24,6 +24,7 @@ import {
   type ConfigurationStatus,
   type ConfirmedAssignment,
   type Entitlement,
+  type Experiment,
   type IdentityOptions,
   type IntegrationAttribute,
   type JsonValue,
@@ -34,6 +35,7 @@ import {
   type PaywallSkippedReason,
   type PlacementParams,
   type PresentationResult,
+  type Product,
   type StorageAdapter,
   type SubscriptionStatus,
   type UserAttributes,
@@ -45,6 +47,25 @@ import {
   eventBusLayerWithTarget,
   type EventBusImpl,
 } from "./internal/eventBus.ts";
+import { Logger, loggerLayer } from "./internal/logger.ts";
+import {
+  ComputedProperties,
+  computedPropertiesLayer,
+} from "./internal/computed.ts";
+import {
+  ConfigService,
+  configServiceLayer,
+  type ConfigServiceImpl,
+} from "./internal/config.ts";
+import {
+  AudienceEvaluator,
+  audienceEvaluatorLayer,
+} from "./internal/audience.ts";
+import {
+  AssignmentService,
+  assignmentServiceLayer,
+  type AssignmentServiceImpl,
+} from "./internal/assignments.ts";
 import {
   IdentityService,
   identityWithStorage,
@@ -217,10 +238,50 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     ...(opts.fetch !== undefined && { fetch: opts.fetch }),
   };
   const networkLayer = networkServiceLayer(networkConfig, identityLayer);
-  const fullLayer = eventBusLayerWithTarget(target, networkLayer);
+  // ComputedProperties is a sibling of identity/network — both depend on
+  // storage. Built directly off `storageLayer` (not networkLayer) so the
+  // type signatures stay tight.
+  const computedLayer = computedPropertiesLayer(storageLayer);
+  // ConfigService needs NetworkService (for the static_config GET) and
+  // StorageService (for the buildId-keyed cache). Build the upstream
+  // explicitly since `networkLayer`'s declared type narrows away
+  // StorageService even though it includes it at runtime.
+  const configUpstream = Layer.merge(networkLayer, storageLayer);
+  const configLayer = configServiceLayer(configUpstream);
+  // AssignmentService caches sticky variant rollouts per (alias, experiment).
+  const assignmentLayer = assignmentServiceLayer(storageLayer);
+  // EventBus needs both NetworkService and ComputedProperties.
+  const upstreamForBus = Layer.merge(networkLayer, computedLayer);
+  const busLayer = eventBusLayerWithTarget(target, upstreamForBus);
+  // Merge ConfigService + AssignmentService into the runtime so configure()
+  // and the public façade can both reach them.
+  const layerWithConfig = Layer.merge(
+    Layer.merge(busLayer, configLayer),
+    assignmentLayer,
+  );
+  const baseLayer = loggerLayer(
+    opts.options?.logging?.level ?? "warn",
+    layerWithConfig,
+  );
+  // AudienceEvaluator depends on Logger + ComputedProperties — both
+  // already in `baseLayer`. Cast through `Layer<ComputedProperties | Logger>`
+  // for the upstream signature; runtime materialization picks them out.
+  const fullLayer = audienceEvaluatorLayer(
+    baseLayer as Layer.Layer<ComputedProperties | Logger>,
+  );
 
   const runtime = ManagedRuntime.make(
-    fullLayer as Layer.Layer<EventBus | NetworkService | IdentityService | StorageService>,
+    fullLayer as Layer.Layer<
+      | Logger
+      | EventBus
+      | NetworkService
+      | ComputedProperties
+      | ConfigService
+      | IdentityService
+      | StorageService
+      | AudienceEvaluator
+      | AssignmentService
+    >,
   );
 
   // Public-facing signals. Internal services drive these via background
@@ -243,9 +304,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const localeSig = createSignal<string | null>(
     opts.options?.localeIdentifier ?? null,
   );
-  /** Cached confirmed-assignment list (offline parity). Replayed from
-   *  storage on configure; rewritten on confirm + cleared on reset. */
-  const assignmentsSig = createSignal<ConfirmedAssignment[]>([]);
   /** ms-since-epoch of the last successful restore. `null` until restore
    *  has been called once. Used to dedupe rapid restore retries + surfaced
    *  to the host app. */
@@ -305,25 +363,68 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       ),
     );
 
-    // Replay cached assignments from offline storage (per parity with
-    // Android's confirmed-assignments cache). Read-only — confirmation +
-    // upload to /confirm_assignments lands when the placement evaluation
-    // engine ships.
-    const storage = yield* StorageService;
-    const cachedAssignments = yield* storage.get(
-      asStorageKey(STORAGE_KEYS.assignments),
-    );
-    if (cachedAssignments !== null) {
-      try {
-        const parsed = JSON.parse(cachedAssignments) as ConfirmedAssignment[];
-        if (Array.isArray(parsed)) assignmentsSig.set(parsed);
-      } catch {
-        // Corrupt cache — drop it. Fresh assignments will repopulate when
-        // the placement engine lands.
-      }
-    }
+    // -----------------------------------------------------------------------
+    // Delegate bridges: signal changes → typed delegate callbacks. Each one
+    // is a vanilla `Readable.subscribe` (not an Effect Stream) since the
+    // public signals are the source of truth and notifications are already
+    // microtask-coalesced. We track previous values to skip the sync-on-
+    // attach fire so consumers only see real transitions.
+    // -----------------------------------------------------------------------
+
+    let prevAttrs = attrsSig.value;
+    attrsSig.subscribe((next) => {
+      if (next === prevAttrs) return;
+      const changed = next;
+      prevAttrs = next;
+      void runtime
+        .runPromise(
+          bus.withDelegate((d) => d.onUserAttributesChange?.(changed)),
+        )
+        .catch(() => {
+          /* swallow — delegate bridge must not break publishers */
+        });
+    });
+
+    // Bridge presenter-emitted URL/deep-link events to the typed delegate.
+    target.addEventListener("paywallWillOpenURL", (e) => {
+      void runtime
+        .runPromise(
+          bus.withDelegate((d) => d.onPaywallWillOpenURL?.(e.detail.url)),
+        )
+        .catch(() => {
+          /* swallow */
+        });
+    });
+    target.addEventListener("paywallWillOpenDeepLink", (e) => {
+      void runtime
+        .runPromise(
+          bus.withDelegate((d) => d.onPaywallWillOpenDeepLink?.(e.detail.url)),
+        )
+        .catch(() => {
+          /* swallow */
+        });
+    });
+
+    let prevCustomerInfo = customerSig.value;
+    customerSig.subscribe((next) => {
+      if (next === prevCustomerInfo) return;
+      const from = prevCustomerInfo;
+      prevCustomerInfo = next;
+      // Skip the initial null → … transition only if we never had data.
+      if (from === null && next === null) return;
+      if (from === null || next === null) return; // partial transition; need both
+      void runtime
+        .runPromise(bus.withDelegate((d) => d.onCustomerInfoChange?.(from, next)))
+        .catch(() => {
+          /* swallow */
+        });
+    });
+
+    // Cached confirmed assignments — `AssignmentService` hydrates from
+    // storage on materialization, so we don't need to replay here.
 
     // Replay last-restore timestamp so consumers can read it pre-restore.
+    const storage = yield* StorageService;
     const cachedRestoreAt = yield* storage.get(
       asStorageKey(STORAGE_KEYS.lastRestoreAt),
     );
@@ -344,15 +445,68 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     yield* bus.publish("session_start", {});
     yield* bus.publish("app_launch", {});
 
+    // Replay cached config from storage so offline-first works (subsequent
+    // network fetch will revalidate). Cache miss / corrupt → null, and
+    // we'll only have the post-fetch result.
+    const config = yield* ConfigService;
+    const assignments = yield* AssignmentService;
+    yield* config.hydrateFromStorage().pipe(Effect.catchAll(() => Effect.void));
+    // Eager assignment pass over the cached config (Android `ApplyConfig →
+    // choosePaywallVariants`). Existing assignments stay sticky; new
+    // experiments get picked + persisted now so first `register()` is fast
+    // and `confirmAllAssignments` returns a complete snapshot.
+    yield* eagerAssign(config, assignments);
+
     // Enrichment — POST {user, device} → merge response into local state.
     // Best-effort: a network failure here doesn't block ready (we still
     // mark configured true; consumers operate on the un-enriched snapshot).
     // Per API.md §11.6: called on configure() and on every identify().
     yield* runEnrichment(bus).pipe(Effect.catchAll(() => Effect.void));
 
+    // Static config fetch — best-effort. If network fails OR misses the
+    // deadline, the cached config (if any) stays in place; consumers see
+    // paywallNotAvailable for unknown placements until a successful fetch
+    // lands. Deadline matches Android `ConfigState.kt:86`: 500ms when the
+    // user has an active subscription, 1s otherwise. The deadline only
+    // applies when `enableConfigRefresh` is on AND we already have a
+    // hydrated cache to fall back to (matches Android's gating).
+    const hydrated = yield* config.current();
+    const refreshEnabled =
+      hydrated?.toggles.find((t) => t.key === "enableConfigRefresh")?.enabled ===
+      true;
+    const fetchEffect = config.fetch().pipe(Effect.catchAll(() => Effect.void));
+    if (hydrated && refreshEnabled) {
+      const cacheLimit = subStatusSig.value.status === "ACTIVE" ? 500 : 1000;
+      yield* fetchEffect.pipe(
+        Effect.timeout(`${cacheLimit} millis`),
+        Effect.catchAll(() => Effect.void),
+      );
+    } else {
+      yield* fetchEffect;
+    }
+    // Re-run eager assignment in case the fresh config introduced new
+    // experiments or removed variants from existing ones.
+    yield* eagerAssign(config, assignments);
+
     configuredSig.set(true);
     statusSig.set("configured");
   });
+
+  /** Collect every experiment ref from the current config's triggers and
+   *  hand them to AssignmentService.chooseAllVariants. No-op if config
+   *  hasn't loaded yet. */
+  const eagerAssign = (
+    config: ConfigServiceImpl,
+    assignments: AssignmentServiceImpl,
+  ) =>
+    Effect.gen(function* () {
+      const cfg = yield* config.current();
+      if (!cfg) return;
+      const experiments = cfg.triggerOptions.flatMap((t) =>
+        t.rules.map((r) => r.experiment),
+      );
+      yield* assignments.chooseAllVariants(experiments);
+    });
 
   /** Build payload from the current user/device attribute signals,
    *  POST it to /api/v1/enrich, merge response into the user signal,
@@ -385,13 +539,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         userEnrichment: result.user,
         deviceEnrichment: result.device,
       });
-    });
-
-  const ready: Promise<void> = runtime
-    .runPromise(configure)
-    .catch((cause: unknown) => {
-      statusSig.set("failed");
-      throw translateInternalError(cause);
     });
 
   // -------------------------------------------------------------------------
@@ -461,8 +608,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     },
   };
 
-  // Build a stub PaywallInfo for v0 alpha. Real config-driven info lands
-  // when static_config processing arrives.
+  // Stub PaywallInfo — used as a fallback when the placement evaluator
+  // returns `paywall` but the variant's `paywallId` doesn't resolve in
+  // the loaded config (transitional: until config processing always
+  // includes paywall responses, or in tests without a real config).
   const stubPaywallInfo = (placement: string): PaywallInfo => ({
     identifier: `stub_${placement}`,
     name: placement,
@@ -470,6 +619,125 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     productIds: [],
     products: [],
   });
+
+  // Convert a parsed `RawPaywallResponse` + matched experiment into the
+  // public `PaywallInfo` shape. Looks up products from the config catalog
+  // and maps to `Product` (entitlements get a default `isActive: false` —
+  // the actual subscription state comes from `sw.subscriptionStatus`, not
+  // from a paywall info snapshot).
+  const buildPaywallInfo = async (
+    paywallId: string,
+    experiment: Experiment,
+    fallbackPlacement: string,
+  ): Promise<PaywallInfo> => {
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const config = yield* ConfigService;
+          const paywall = yield* config.getPaywall(paywallId);
+          const products = yield* config.getProducts();
+          return { paywall, products };
+        }),
+      );
+      if (!result.paywall) return stubPaywallInfo(fallbackPlacement);
+      const productMap = new Map(result.products.map((p) => [p.id, p]));
+      const products: Product[] = [];
+      for (const id of result.paywall.productIds) {
+        const item = productMap.get(id);
+        if (!item) continue;
+        const ents: Entitlement[] = (item.entitlements ?? []).map((e) => ({
+          id: e.id,
+          type: "SERVICE_LEVEL",
+          isActive: false,
+          productIds: [item.id],
+        }));
+        const product: Product = {
+          id: item.id,
+          ...(item.name !== undefined && { name: item.name }),
+          entitlements: ents,
+          store: ((): "appStore" | "stripe" | "paddle" | "playStore" | "superwall" | "other" => {
+            const s = item.store;
+            return s === "appStore" || s === "stripe" || s === "paddle" ||
+              s === "playStore" || s === "superwall" || s === "other"
+              ? s
+              : "stripe";
+          })(),
+        };
+        products.push(product);
+      }
+      const info: PaywallInfo = {
+        identifier: result.paywall.identifier,
+        name: result.paywall.name,
+        url: result.paywall.url,
+        experiment,
+        productIds: [...result.paywall.productIds],
+        products,
+        ...(result.paywall.featureGatingBehavior !== undefined && {
+          featureGatingBehavior: result.paywall.featureGatingBehavior,
+        }),
+      };
+      return info;
+    } catch {
+      return stubPaywallInfo(fallbackPlacement);
+    }
+  };
+
+  // Shared placement decision pipeline — runs `ConfigService.getPlacement`
+  // + `AudienceEvaluator` over the rules and returns a tagged outcome.
+  // `getPresentationResult` and `register` both consume this so the eval
+  // logic stays in one place.
+  type PlacementDecision =
+    | { kind: "placementNotFound" }
+    | { kind: "noAudienceMatch" }
+    | { kind: "holdout"; experiment: Experiment }
+    | { kind: "paywall"; experiment: Experiment };
+
+  const evaluatePlacement = (
+    placementName: string,
+    params: PlacementParams,
+  ): Effect.Effect<
+    PlacementDecision,
+    never,
+    ConfigService | AudienceEvaluator | AssignmentService
+  > =>
+    Effect.gen(function* () {
+      const config = yield* ConfigService;
+      const trigger = yield* config.getPlacement(placementName);
+      if (trigger === null) return { kind: "placementNotFound" } as const;
+
+      const evaluator = yield* AudienceEvaluator;
+      const assignments = yield* AssignmentService;
+      const aliasId = aliasSig.value;
+      const ctx = {
+        user: attrsSig.value as Partial<UserAttributes>,
+        params: params as Record<string, JsonValue>,
+        device: {} as Record<string, JsonValue>,
+      };
+
+      for (const rule of trigger.rules) {
+        const result = yield* evaluator.evaluate(rule.expression, ctx);
+        if (result === "match") {
+          // Sticky variant pick. Hashes (aliasId, experimentId) into a
+          // basis-point bucket and picks the variant whose percentage range
+          // contains it. Subsequent eval for the same (alias, experiment)
+          // returns the cached pick from storage.
+          const confirmed = yield* assignments.getOrAssign(
+            rule.experiment,
+            aliasId,
+          );
+          const experiment: Experiment = {
+            id: rule.experiment.id,
+            groupId: rule.experiment.groupId,
+            variant: confirmed.variant,
+          };
+          if (experiment.variant.type === "holdout") {
+            return { kind: "holdout", experiment } as const;
+          }
+          return { kind: "paywall", experiment } as const;
+        }
+      }
+      return { kind: "noAudienceMatch" } as const;
+    });
 
   const runFeature = async (
     feature: RegisterPlacementArgs["feature"],
@@ -501,23 +769,101 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return { type: "entitled" };
         }
 
-        if (!opts.presenter) {
-          throw new NoPresenterRegisteredError(placement);
-        }
-
-        const info = stubPaywallInfo(placement);
-
-        // Lifecycle: opening
-        latestPaywallSig.set(info);
-        presentedSig.set(true);
-        await runtime.runPromise(
+        // Run the placement evaluation pipeline — same one
+        // `getPresentationResult` uses. Branches on the decision:
+        //   placementNotFound / noAudienceMatch / holdout → skipped
+        //   paywall → look up paywall info from config; present
+        //
+        // Back-compat: if no static config has been loaded at all (offline
+        // first run, fetch failed, or v0 alpha tests without a config
+        // response), fall through to the stub presentation path so
+        // consumers can still test their presenter integration end-to-end
+        // without a backend.
+        let info: PaywallInfo;
+        const configLoaded = await runtime.runPromise(
           Effect.gen(function* () {
-            const bus = yield* EventBus;
-            yield* bus.withDelegate((d) => d.onPaywallWillPresent?.(info));
-            yield* bus.publish("paywall_open", { paywall_info: info });
-            yield* bus.withDelegate((d) => d.onPaywallDidPresent?.(info));
+            const config = yield* ConfigService;
+            return (yield* config.current()) !== null;
           }),
         );
+
+        if (!configLoaded) {
+          // No config → stub presentation. Presenter required.
+          if (!opts.presenter) {
+            throw new NoPresenterRegisteredError(placement);
+          }
+          info = stubPaywallInfo(placement);
+        } else {
+          const decision = await runtime.runPromise(
+            evaluatePlacement(placement, (params ?? {}) as PlacementParams),
+          );
+          if (
+            decision.kind === "placementNotFound" ||
+            decision.kind === "noAudienceMatch" ||
+            decision.kind === "holdout"
+          ) {
+            const reason: PaywallSkippedReason =
+              decision.kind === "holdout"
+                ? { type: "holdout", experiment: decision.experiment }
+                : decision.kind === "noAudienceMatch"
+                  ? { type: "noAudienceMatch" }
+                  : { type: "placementNotFound" };
+            try {
+              handler?.onSkip?.(reason);
+            } catch {
+              /* swallow */
+            }
+            // Per Android: feature runs on skip when no paywall would gate
+            // the user. We don't have featureGating without a paywall, so
+            // run unconditionally on skip.
+            await runFeature(feature);
+            return { type: "skipped", reason };
+          }
+
+          // decision.kind === "paywall" — look up the actual paywall.
+          if (!opts.presenter) {
+            throw new NoPresenterRegisteredError(placement);
+          }
+          const variantPaywallId = decision.experiment.variant.paywallId;
+          info = variantPaywallId
+            ? await buildPaywallInfo(
+                variantPaywallId,
+                decision.experiment,
+                placement,
+              )
+            : stubPaywallInfo(placement);
+        }
+
+        // Suppress wire emission of `paywall_*` lifecycle events for stub
+        // data (Code-review P0-3) — real config-driven paywalls go to the
+        // collector normally.
+        const isStub = info.identifier.startsWith("stub_");
+        const wireOpts = isStub ? { wireEmit: false } : undefined;
+
+        // Lifecycle: opening. Wrap in try/finally so any failure here
+        // (e.g. collector outage during `paywall_open` wire emission)
+        // doesn't leave the SDK stuck with `presentedSig === true` and
+        // every subsequent register() rejecting `PaywallAlreadyPresented`.
+        // (Code-review P0-2.)
+        latestPaywallSig.set(info);
+        presentedSig.set(true);
+        let openSucceeded = false;
+        try {
+          await runtime.runPromise(
+            Effect.gen(function* () {
+              const bus = yield* EventBus;
+              yield* bus.withDelegate((d) => d.onPaywallWillPresent?.(info));
+              yield* bus.publish("paywall_open", { paywall_info: info }, wireOpts);
+              yield* bus.withDelegate((d) => d.onPaywallDidPresent?.(info));
+            }),
+          );
+          openSucceeded = true;
+        } finally {
+          if (!openSucceeded) {
+            presentedSig.set(false);
+            latestPaywallSig.set(null);
+          }
+        }
         try {
           handler?.onPresent?.(info);
         } catch {
@@ -568,7 +914,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             Effect.gen(function* () {
               const bus = yield* EventBus;
               yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
-              yield* bus.publish("paywall_close", { paywall_info: info });
+              yield* bus.publish("paywall_close", { paywall_info: info }, wireOpts);
               yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
             }),
           );
@@ -582,13 +928,18 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           currentAbort = null;
         }
 
-        // Lifecycle: dismissing on result
+        // Lifecycle: dismissing on result. Android emits `paywall_decline`
+        // alongside `paywall_close` when the user explicitly declined
+        // (Code-review P1).
         presentedSig.set(false);
         await runtime.runPromise(
           Effect.gen(function* () {
             const bus = yield* EventBus;
             yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
-            yield* bus.publish("paywall_close", { paywall_info: info });
+            if (result.type === "declined") {
+              yield* bus.publish("paywall_decline", { paywall_info: info }, wireOpts);
+            }
+            yield* bus.publish("paywall_close", { paywall_info: info }, wireOpts);
             yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
           }),
         );
@@ -620,9 +971,33 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       }
     },
 
-    getPresentationResult: async () => ({ type: "paywallNotAvailable" }),
+    getPresentationResult: async (placement, params) => {
+      try {
+        const decision = await runtime.runPromise(
+          evaluatePlacement(placement, (params ?? {}) as PlacementParams),
+        );
+        switch (decision.kind) {
+          case "placementNotFound":
+            return { type: "placementNotFound" };
+          case "noAudienceMatch":
+            return { type: "noAudienceMatch" };
+          case "holdout":
+            return { type: "holdout", experiment: decision.experiment };
+          case "paywall":
+            return { type: "paywall", experiment: decision.experiment };
+        }
+      } catch {
+        return { type: "paywallNotAvailable" };
+      }
+    },
 
-    confirmAllAssignments: async () => assignmentsSig.value,
+    confirmAllAssignments: () =>
+      runPublic(
+        Effect.gen(function* () {
+          const a = yield* AssignmentService;
+          return yield* a.getAll();
+        }) as unknown as Effect.Effect<ConfirmedAssignment[], unknown, never>,
+      ),
 
     preloadAll: async () => {
       // No config → nothing to preload yet.
@@ -704,6 +1079,25 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   })();
 
   let disposed = false;
+
+  const ready: Promise<void> = runtime
+    .runPromise(configure)
+    .catch((cause: unknown) => {
+      // If the consumer disposed before configure completed, the runtime
+      // interrupts the in-flight fiber. Don't surface that as a public
+      // failure — disposal is the consumer's choice.
+      if (disposed) return;
+      statusSig.set("failed");
+      throw translateInternalError(cause);
+    });
+  // Attach a sink for the ready rejection so consumers who don't `await
+  // sw.ready` (e.g. `createSuperwall(...).dispose()` test patterns) don't
+  // produce an unhandled-rejection warning. The throw above still surfaces
+  // for any explicit `await sw.ready`.
+  void ready.catch(() => {
+    /* ready rejection observed; consumer-facing throw still works */
+  });
+
   const sw: Superwall = {
     apiKey: opts.apiKey,
     ready,
@@ -725,7 +1119,20 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     logLevel: asReadable(logLevelSig),
     locale: asReadable(localeSig),
 
-    setLogLevel: (level) => logLevelSig.set(level),
+    setLogLevel: (level) => {
+      logLevelSig.set(level);
+      // Sync the runtime Logger so internal log call sites honor the new level.
+      void runtime
+        .runPromise(
+          Effect.gen(function* () {
+            const logger = yield* Logger;
+            yield* logger.setLevel(level);
+          }),
+        )
+        .catch(() => {
+          /* swallow — log-level update failure must not throw */
+        });
+    },
     setLocale: (locale) => localeSig.set(locale),
     setDelegate: (delegate) => {
       runtime
@@ -750,11 +1157,15 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           presentedSig.set(false);
           attrsSig.set({} as UserAttributes);
           intAttrsSig.set({});
-          assignmentsSig.set([]);
           lastRestoreAtSig.set(null);
+          const assignments = yield* AssignmentService;
+          yield* assignments.reset();
           const storage = yield* StorageService;
-          yield* storage.remove(asStorageKey(STORAGE_KEYS.assignments));
           yield* storage.remove(asStorageKey(STORAGE_KEYS.lastRestoreAt));
+          const computed = yield* ComputedProperties;
+          yield* computed.reset();
+          const config = yield* ConfigService;
+          yield* config.reset();
           const bus = yield* EventBus;
           yield* bus.publish("reset", {});
         }) as Effect.Effect<void, unknown, never>,

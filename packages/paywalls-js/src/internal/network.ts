@@ -143,8 +143,11 @@ const resolveInterfaceStyle = (): "light" | "dark" => {
   return "light";
 };
 
+// Custom environments are typically internal proxies → assume production.
+// Consumers running custom hosts in dev can override via headers if they
+// need to flip the flag. (Code-review P1.)
 const isSandbox = (env: NetworkEnvironment): boolean =>
-  typeof env === "string" ? env !== "release" : true;
+  typeof env === "string" ? env !== "release" : false;
 
 // ---------------------------------------------------------------------------
 // Service

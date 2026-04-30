@@ -44,6 +44,14 @@ export const translateInternalError = (cause: unknown): unknown => {
   if (cause instanceof Internal.IdentityHydrationError) {
     return new ConfigurationFetchError(asError(cause.cause) ?? new Error(cause.message), 1);
   }
+  // Config parse failure is "the BE returned config we couldn't make sense of"
+  // — surface as a ConfigurationFetchError rather than a generic Error.
+  if (cause instanceof Internal.ConfigParseError) {
+    return new ConfigurationFetchError(
+      asError(cause.cause) ?? new Error(cause.message),
+      1,
+    );
+  }
 
   // Already a public SuperwallError? leave it.
   if (cause instanceof SuperwallError) return cause;

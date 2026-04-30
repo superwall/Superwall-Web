@@ -59,15 +59,27 @@ export const writeCookie = (
 
 export const deleteCookie = (
   name: string,
-  options: Pick<CookieWriteOptions, "domain" | "path"> = {},
+  options: Pick<
+    CookieWriteOptions,
+    "domain" | "path" | "secure" | "sameSite"
+  > = {},
 ): void => {
   if (!hasDocument()) return;
+  // Browsers require `Secure` + `SameSite` to MATCH the original Set-Cookie
+  // for the deletion to actually take effect (especially `SameSite=None`).
+  // Pass through whatever the caller wrote with so cookies set by
+  // `BrowserStorage` clean up reliably on Safari + Chrome.
   const parts: string[] = [
     `${name}=`,
     `Path=${options.path ?? "/"}`,
     "Max-Age=0",
     `Expires=${new Date(0).toUTCString()}`,
+    `SameSite=${options.sameSite ?? "Lax"}`,
   ];
   if (options.domain) parts.push(`Domain=${options.domain}`);
+  const secure =
+    options.secure ??
+    (typeof location !== "undefined" && location.protocol === "https:");
+  if (secure) parts.push("Secure");
   document.cookie = parts.join("; ");
 };

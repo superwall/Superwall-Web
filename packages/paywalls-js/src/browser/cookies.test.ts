@@ -44,3 +44,12 @@ test("readCookie handles multiple cookies and trims whitespace", () => {
   expect(readCookie("b")).toBe("2");
   expect(readCookie("c")).toBe("3");
 });
+
+test("deleteCookie accepts secure + sameSite + path attributes (P1)", () => {
+  // Smoke — happy-dom doesn't expose attributes back via document.cookie
+  // so we can only verify the call doesn't throw + the value disappears.
+  writeCookie("strict_cookie", "v", { sameSite: "Strict" });
+  expect(readCookie("strict_cookie")).toBe("v");
+  deleteCookie("strict_cookie", { sameSite: "Strict", path: "/" });
+  expect(readCookie("strict_cookie")).toBeNull();
+});

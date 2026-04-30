@@ -6,6 +6,7 @@
 //
 // v0 alpha intentionally implements a subset of inbound message types:
 //   ping → reply with templates (empty stub for v0)
+//   template_params_and_user_attributes → same templates bundle as ping
 //   close → resolve as { type: "declined" }
 //   restore → resolve as { type: "restored" }
 //   restore_failed → no-op (logged future)
@@ -14,8 +15,7 @@
 //
 // Deferred to v1: request_callback / request_permission correlation,
 // page_view, haptic_feedback, schedule_notification, request_store_review,
-// the full `template_params_and_user_attributes` shape (we only need to
-// satisfy `ping` for v0), and HTML substitutions.
+// HTML substitutions, real product hydration in the templates bundle.
 
 import type {
   PaywallInfo,
@@ -78,13 +78,23 @@ export const createBrowserPresenter = (
     }
 
     return new Promise<PaywallResult>((resolve, reject) => {
-      const a = mount(info, ctx, options, resolve, reject);
+      const onTearDown = (a: ActivePresentation) => {
+        if (active === a) active = null;
+      };
+      const a = mount(
+        info,
+        ctx,
+        options,
+        resolve,
+        reject,
+        onTearDown,
+      );
       active = a;
       // External abort (sw.dismiss / sw.dispose) → tear down + resolve declined.
       const onAbort = () => {
         if (active === a) {
-          tearDown(a);
           active = null;
+          tearDown(a);
           resolve({ type: "declined" });
         }
       };
@@ -157,6 +167,7 @@ const mount = (
   options: BrowserPresenterOptions,
   resolve: (r: PaywallResult) => void,
   _reject: (e: Error) => void,
+  onTearDown: (a: ActivePresentation) => void,
 ): ActivePresentation => {
   const isModal = (options.presentation ?? "modal") === "modal";
   const closeOnBackdrop = options.closeOnBackdrop ?? true;
@@ -188,36 +199,49 @@ const mount = (
   });
   overlay.appendChild(iframe);
 
-  if (isModal && closeOnBackdrop) {
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) {
-        // Equivalent to a `close` postMessage from the paywall.
-        const a = active$;
-        if (a) {
-          tearDown(a);
-          active$ = null;
-          a.resolve({ type: "declined" });
-        }
-      }
-    });
-  }
-
   const container = resolveContainer(options);
   container.appendChild(overlay);
 
   const paywallOrigin = originOf(iframe.src);
 
-  // postMessage bridge — listen for paywall→SDK v1 envelopes.
-  const messageListener = (event: MessageEvent) => {
-    if (event.source !== iframe.contentWindow) return;
-    if (paywallOrigin && event.origin !== paywallOrigin) return;
-    handleInbound(event.data, info, ctx, options, resolve, () => {
-      const a = active$;
-      if (a) {
-        tearDown(a);
-        active$ = null;
+  // We have to allocate `a` after we wire the listeners (they reference
+  // it for cleanup), but `mount` returns it for the factory's own
+  // bookkeeping. Use a forward ref via an object slot.
+  const slot: { a: ActivePresentation | null } = { a: null };
+
+  const cleanupOnce = () => {
+    const a = slot.a;
+    if (!a) return;
+    slot.a = null;
+    onTearDown(a);
+    tearDown(a);
+  };
+
+  if (isModal && closeOnBackdrop) {
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay && slot.a) {
+        // Equivalent to a `close` postMessage from the paywall.
+        const a = slot.a;
+        cleanupOnce();
+        a.resolve({ type: "declined" });
       }
     });
+  }
+
+  // postMessage bridge — listen for paywall→SDK v1 envelopes.
+  const messageListener = (event: MessageEvent) => {
+    if (!slot.a) return;
+    if (event.source !== iframe.contentWindow) return;
+    if (paywallOrigin && event.origin !== paywallOrigin) return;
+    handleInbound(
+      event.data,
+      info,
+      ctx,
+      options,
+      resolve,
+      cleanupOnce,
+      slot.a,
+    );
   };
   // Listen on `globalThis` rather than `window` so this works under
   // happy-dom / Node-with-DOM-polyfill / RN Web. They're the same in browsers.
@@ -234,15 +258,9 @@ const mount = (
     resolve,
     ctx,
   };
-  // Tracked separately so the backdrop click can reach the same tearDown.
-  active$ = a;
+  slot.a = a;
   return a;
 };
-
-/** Module-level handle to whichever presenter call is currently in flight.
- *  The factory tracks its own `active` too — this redundancy lets the
- *  backdrop click handler (created inside `mount`) reach the right entry. */
-let active$: ActivePresentation | null = null;
 
 const tearDown = (a: ActivePresentation) => {
   try {
@@ -276,6 +294,7 @@ const handleInbound = (
   options: BrowserPresenterOptions,
   resolve: (r: PaywallResult) => void,
   cleanup: () => void,
+  active: ActivePresentation,
 ): void => {
   const env = data as V1Envelope;
   if (!env || typeof env !== "object") return;
@@ -290,10 +309,12 @@ const handleInbound = (
     if (typeof name !== "string") continue;
 
     switch (name) {
-      case "ping": {
-        // Real templates land with the placement layer. v0 ack with an
-        // empty templates bundle so the paywall knows the SDK heard it.
-        sendTemplatesStub(ctx);
+      case "ping":
+      case "template_params_and_user_attributes": {
+        // Both messages request the templates bundle (params + user/device
+        // attributes + products). Android answers identically — see
+        // `PaywallMessageHandler.passTemplatesToWebView`.
+        sendTemplatesStub(ctx, active);
         break;
       }
       case "close": {
@@ -345,10 +366,54 @@ const handleInbound = (
         }
         break;
       }
-      // open_url, open_deep_link, custom, custom_placement, paywall_*,
-      // transaction_*, request_*, page_view, haptic_feedback,
-      // schedule_notification, user_attribute_updated, trial_started:
-      // deferred to v1 — drop silently for v0.
+      case "open_url": {
+        const url = typeof evt["url"] === "string" ? (evt["url"] as string) : null;
+        if (!url) break;
+        // Forward via the local-only event so the SDK's delegate-bridge
+        // listener can call `onPaywallWillOpenURL`. The presenter does NOT
+        // navigate the host page — the consumer's delegate decides what to
+        // do (in-app browser sheet, popup, ignore).
+        const browserType =
+          evt["browser_type"] === "payment_sheet" ? "payment_sheet" : undefined;
+        ctx.emit(
+          "paywallWillOpenURL" as never,
+          (browserType !== undefined
+            ? { url, browserType }
+            : { url }) as never,
+        );
+        break;
+      }
+      case "open_deep_link": {
+        // Per Android `PaywallMessage.kt` the payload key is `link`, not `url`.
+        const link = typeof evt["link"] === "string" ? (evt["link"] as string) : null;
+        if (!link) break;
+        ctx.emit(
+          "paywallWillOpenDeepLink" as never,
+          { url: link } as never,
+        );
+        break;
+      }
+      case "custom_placement": {
+        // Forward to the public wire event (consumers listen on
+        // `sw.events.addEventListener("custom_placement", ...)`). The
+        // paywall_info field is the ACTIVE paywall — captured at present()
+        // time. Params come from the postMessage payload.
+        const placementName =
+          typeof evt["name"] === "string" ? (evt["name"] as string) : "";
+        const params =
+          typeof evt["params"] === "object" && evt["params"] !== null
+            ? (evt["params"] as Record<string, never>)
+            : {};
+        ctx.emit("custom_placement", {
+          placementName,
+          paywall_info: info,
+          params: params as never,
+        });
+        break;
+      }
+      // custom, paywall_*, transaction_*, request_*, page_view,
+      // haptic_feedback, schedule_notification, user_attribute_updated,
+      // trial_started: deferred to v1 — drop silently for v0.
       default:
         break;
     }
@@ -415,9 +480,11 @@ const handlePurchase = (
 /** Send an empty templates bundle to the paywall iframe. Real shape per
  *  API.md §7.2 — an array of {event_name, ...} objects. v0 sends a minimal
  *  acknowledgment so the paywall's `ping`-then-wait pattern unblocks. */
-const sendTemplatesStub = (ctx: PresentationContext): void => {
-  const a = active$;
-  if (!a || !a.iframe.contentWindow) return;
+const sendTemplatesStub = (
+  ctx: PresentationContext,
+  a: ActivePresentation,
+): void => {
+  if (!a.iframe.contentWindow) return;
   const payload = [
     { event_name: "products", products: [] },
     {

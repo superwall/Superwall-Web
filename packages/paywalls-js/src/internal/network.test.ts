@@ -109,6 +109,30 @@ test("buildHeaders includes the §11.3 header set with identity values", async (
   expect(headers["X-Device-Interface-Style"]).toMatch(/^(light|dark)$/);
 });
 
+test("buildHeaders marks custom environments as PRODUCTION (P1)", async () => {
+  const { fetch } = mockFetch(() => new Response("{}"));
+  const stack = buildStack(fetch, {
+    environment: {
+      custom: {
+        base: "api.proxy.example",
+        collector: "collector.proxy.example",
+        enrichment: "enrich.proxy.example",
+        subscriptions: "subs.proxy.example",
+      },
+    },
+  });
+  const headers = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const net = yield* NetworkService;
+      return yield* net.buildHeaders();
+    }).pipe(Effect.provide(stack)) as Effect.Effect<Record<string, string>, never, never>,
+  );
+  // Custom env defaults to production (sandbox=false). Dev sets up their
+  // own header override if they need it.
+  expect(headers["X-Is-Sandbox"]).toBe("false");
+});
+
 test("buildHeaders marks dev/RC environments as sandbox", async () => {
   const { fetch } = mockFetch(() => new Response("{}"));
   const stack = buildStack(fetch, { environment: "developer" });

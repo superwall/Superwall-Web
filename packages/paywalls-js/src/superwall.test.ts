@@ -504,11 +504,15 @@ test("dismiss aborts the in-flight presentation and tells the presenter", async 
   await sw.dispose();
 });
 
-test("getPresentationResult returns paywallNotAvailable until config processing lands", async () => {
+test("getPresentationResult returns placementNotFound for placements not in config", async () => {
+  // No real config response (noopFetch returns 204), so any placement
+  // lookup misses → placementNotFound. When config processing returns a
+  // matching trigger, the result will become `paywallNotAvailable` until
+  // the audience-rule evaluator lands.
   const sw = make();
   await sw.ready;
-  const r = await sw.placements.getPresentationResult("x");
-  expect(r).toEqual({ type: "paywallNotAvailable" });
+  const r = await sw.placements.getPresentationResult("unknown_placement");
+  expect(r).toEqual({ type: "placementNotFound" });
   await sw.dispose();
 });
 
@@ -727,5 +731,571 @@ test("reset() clears the lastRestoreAt cache from storage", async () => {
   await sw.reset();
   await tick();
   expect(await adapter.get(STORAGE_KEYS.lastRestoreAt)).toBeNull();
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Delegate bridges — userAttributesDidChange + customerInfoDidChange
+// ---------------------------------------------------------------------------
+
+test("delegate.onUserAttributesChange fires when sw.user.setAttributes is called", async () => {
+  const seen: Array<Partial<typeof sw.user.attributes.value>> = [];
+  const sw = make({
+    delegate: {
+      onUserAttributesChange(next) {
+        seen.push(next);
+      },
+    },
+  });
+  await sw.ready;
+  await tick();
+  // The merge from enrichment may have already fired once; clear the
+  // sample window before our explicit setAttributes.
+  const baseline = seen.length;
+
+  sw.user.setAttributes({ email: "a@b.co" } as never);
+  await tick();
+  await tick();
+
+  expect(seen.length).toBeGreaterThan(baseline);
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// paywall_open_url + paywall_open_deep_link → delegate bridge
+// ---------------------------------------------------------------------------
+
+test("paywallWillOpenURL local event is delivered to the delegate", async () => {
+  const captured: string[] = [];
+  const sw = make({
+    delegate: {
+      onPaywallWillOpenURL(url) {
+        captured.push(url);
+      },
+    },
+  });
+  await sw.ready;
+
+  // Simulate the browser presenter forwarding `open_url`.
+  sw.events.dispatchEvent(
+    new CustomEvent("paywallWillOpenURL", {
+      detail: { url: "https://help.example.com" },
+    }),
+  );
+  await tick();
+
+  expect(captured).toEqual(["https://help.example.com"]);
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Code-review fixes (regression coverage)
+// ---------------------------------------------------------------------------
+
+test("paywall_open with stub info does NOT POST to collector (P0-3)", async () => {
+  const { fetch, calls } = fetchRecorder();
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "purchased", productId: "p1" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+  // Drain the configure-time enrichment call so the only "registered"
+  // POSTs after register() are paywall_* events.
+  const baseline = calls.length;
+
+  await sw.placements.register({ placement: "checkout" });
+  await tick();
+
+  const newCalls = calls.slice(baseline);
+  // No collector POST for paywall_* events on stub data.
+  const collectorPosts = newCalls.filter((c) =>
+    c.url.includes("/api/v1/events"),
+  );
+  // (transaction_start / transaction_complete may still post depending on
+  // the presenter; we only assert paywall_open / paywall_close didn't.)
+  for (const post of collectorPosts) {
+    const parsed = JSON.parse(post.body!) as { events: Array<{ event_name: string }> };
+    for (const e of parsed.events) {
+      expect(e.event_name).not.toBe("paywall_open");
+      expect(e.event_name).not.toBe("paywall_close");
+      expect(e.event_name).not.toBe("paywall_decline");
+    }
+  }
+  await sw.dispose();
+});
+
+test("paywall_decline fires on declined results (P1, parity with Android)", async () => {
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "declined" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  let declineCount = 0;
+  sw.events.addEventListener("paywall_decline", () => declineCount++);
+
+  await sw.placements.register({ placement: "checkout" });
+  await tick();
+
+  expect(declineCount).toBe(1);
+  await sw.dispose();
+});
+
+test("paywall_decline does NOT fire on purchased / restored results", async () => {
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "purchased", productId: "p" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  let declineCount = 0;
+  sw.events.addEventListener("paywall_decline", () => declineCount++);
+  await sw.placements.register({ placement: "x" });
+  await tick();
+  expect(declineCount).toBe(0);
+  await sw.dispose();
+});
+
+test("after declined dismiss, isPaywallPresented resets to false (regression for P0-2)", async () => {
+  // Sanity test that the open-lifecycle try/finally + close-lifecycle path
+  // both leave the SDK ready to register again. The P0-2 fix specifically
+  // guards against `runtime.runPromise(open-lifecycle)` rejection — hard
+  // to trigger deterministically without runtime injection — but the
+  // happy path here proves the cleanup invariant the P0 fix preserves.
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "declined" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  await sw.placements.register({ placement: "first" });
+  await tick();
+  expect(sw.isPaywallPresented.value).toBe(false);
+
+  // Second register works (proves signal isn't stuck).
+  const r = await sw.placements.register({ placement: "second" });
+  expect(r.type).toBe("presented");
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Config-driven register pipeline (audience eval + variant lookup)
+// ---------------------------------------------------------------------------
+
+const configResponse = (overrides: Partial<{
+  triggers: Array<{
+    placementName: string;
+    rules: Array<{ expression: string; variantType?: "treatment" | "holdout"; paywallId?: string }>;
+  }>;
+  paywalls: Array<{ identifier: string; name?: string; url?: string; productIds?: string[] }>;
+}> = {}) => ({
+  buildId: "test_build",
+  triggerOptions: (overrides.triggers ?? []).map((t) => ({
+    placementName: t.placementName,
+    rules: t.rules.map((r, i) => ({
+      expression: r.expression,
+      experiment: {
+        // Each rule needs its own experiment id — backend guarantees this.
+        // The helper used to share `exp_<placement>` across rules; that
+        // collided once eager assignment landed (one experimentId can only
+        // resolve to one variant), so different rules masked each other.
+        id: `exp_${t.placementName}_${i}`,
+        groupId: "grp_test",
+        variants: [
+          {
+            id: `var_${t.placementName}_${i}`,
+            type: r.variantType ?? "treatment",
+            paywallId: r.paywallId,
+          },
+        ],
+      },
+    })),
+  })),
+  paywallResponses: overrides.paywalls ?? [],
+  products: [],
+  toggles: [],
+  localization: { locales: [{ locale: "en-US" }] },
+});
+
+const configFetchRecorder = (cfg: ReturnType<typeof configResponse>) => {
+  const calls: Array<{ url: string; body: string | undefined }> = [];
+  const impl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push({ url, body: init?.body as string | undefined });
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(JSON.stringify(cfg), { status: 200 });
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return new Response(JSON.stringify({ user: {}, device: {} }), { status: 200 });
+    }
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+  return { fetch: impl, calls };
+};
+
+test("register: empty audience matches → presents the config-driven paywall", async () => {
+  const { fetch } = configFetchRecorder(
+    configResponse({
+      triggers: [
+        {
+          placementName: "checkout",
+          rules: [{ expression: "", paywallId: "pw_pro" }],
+        },
+      ],
+      paywalls: [
+        {
+          identifier: "pw_pro",
+          name: "Pro Pricing",
+          url: "https://paywalls.superwall.test/pw_pro",
+          productIds: ["pro_yearly"],
+        },
+      ],
+    }),
+  );
+  const presented: PaywallInfo[] = [];
+  const presenter: PaywallPresenter = {
+    present: async (info) => {
+      presented.push(info);
+      return { type: "purchased", productId: "pro_yearly" };
+    },
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  const r = await sw.placements.register({ placement: "checkout" });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    expect(r.info.identifier).toBe("pw_pro");
+    expect(r.info.name).toBe("Pro Pricing");
+    expect(r.info.experiment?.id).toBe("exp_checkout_0");
+    expect(r.info.experiment?.variant.id).toBe("var_checkout_0");
+  }
+  expect(presented).toHaveLength(1);
+  expect(presented[0]!.identifier).toBe("pw_pro"); // not stub_*
+  await sw.dispose();
+});
+
+test("register: holdout variant → skipped { type: 'holdout', experiment }", async () => {
+  const { fetch } = configFetchRecorder(
+    configResponse({
+      triggers: [
+        {
+          placementName: "checkout",
+          rules: [
+            {
+              expression: "",
+              variantType: "holdout",
+              paywallId: "pw_pro",
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "declined" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  let onSkipCalls = 0;
+  const r = await sw.placements.register({
+    placement: "checkout",
+    handler: { onSkip: () => onSkipCalls++ },
+  });
+  expect(r.type).toBe("skipped");
+  if (r.type === "skipped") {
+    expect(r.reason.type).toBe("holdout");
+    if (r.reason.type === "holdout") {
+      expect(r.reason.experiment.id).toBe("exp_checkout_0");
+    }
+  }
+  expect(onSkipCalls).toBe(1);
+  await sw.dispose();
+});
+
+test("register: placement not in config → skipped placementNotFound", async () => {
+  const { fetch } = configFetchRecorder(
+    configResponse({
+      triggers: [{ placementName: "other", rules: [{ expression: "" }] }],
+    }),
+  );
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "declined" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  let featureRan = false;
+  const r = await sw.placements.register({
+    placement: "checkout", // not in config
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  expect(r.type).toBe("skipped");
+  if (r.type === "skipped") {
+    expect(r.reason.type).toBe("placementNotFound");
+  }
+  // Skip → feature runs unconditionally (no gating paywall).
+  expect(featureRan).toBe(true);
+  await sw.dispose();
+});
+
+test("register: variant pick is sticky — same alias re-evaluates → same paywall", async () => {
+  // Two-variant experiment with explicit 50/50; the alias-driven hash
+  // bucket determines which one fires. Either way, BOTH register calls
+  // should land on the same one.
+  const { fetch } = configFetchRecorder({
+    buildId: "test_build",
+    triggerOptions: [
+      {
+        placementName: "checkout",
+        rules: [
+          {
+            expression: "",
+            experiment: {
+              id: "exp_split",
+              groupId: "grp",
+              variants: [
+                { id: "v_a", type: "treatment", paywallId: "pw_a", percentage: 50 },
+                { id: "v_b", type: "treatment", paywallId: "pw_b", percentage: 50 },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+    paywallResponses: [
+      { identifier: "pw_a", url: "https://paywalls.superwall.test/pw_a" },
+      { identifier: "pw_b", url: "https://paywalls.superwall.test/pw_b" },
+    ],
+    products: [],
+    toggles: [],
+    localization: { locales: [{ locale: "en-US" }] },
+  } as never);
+
+  const presented: string[] = [];
+  const presenter: PaywallPresenter = {
+    present: async (info) => {
+      presented.push(info.identifier);
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  await sw.placements.register({ placement: "checkout" });
+  await sw.placements.register({ placement: "checkout" });
+  await sw.placements.register({ placement: "checkout" });
+
+  // All three calls hit the same paywall — sticky variant.
+  expect(new Set(presented).size).toBe(1);
+
+  // The chosen experiment is in the confirmed-assignments cache.
+  const confirmed = await sw.placements.confirmAllAssignments();
+  expect(confirmed).toHaveLength(1);
+  expect(confirmed[0]!.experimentId).toBe("exp_split");
+
+  await sw.dispose();
+});
+
+test("register: rule expression evaluates against user attributes via Superscript", async () => {
+  const { fetch } = configFetchRecorder(
+    configResponse({
+      triggers: [
+        {
+          placementName: "checkout",
+          rules: [
+            {
+              expression: "user.plan == 'pro'",
+              paywallId: "pw_pro",
+            },
+            {
+              expression: "user.plan == 'free'",
+              paywallId: "pw_upsell",
+            },
+          ],
+        },
+      ],
+      paywalls: [
+        { identifier: "pw_pro", url: "https://paywalls.superwall.test/pw_pro" },
+        { identifier: "pw_upsell", url: "https://paywalls.superwall.test/pw_upsell" },
+      ],
+    }),
+  );
+  const presenter: PaywallPresenter = {
+    present: async () => ({ type: "declined" }),
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter,
+  });
+  await sw.ready;
+
+  // Set user attributes BEFORE register.
+  sw.user.setAttributes({ plan: "free" } as never);
+  await tick();
+
+  const r = await sw.placements.register({ placement: "checkout" });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    // Second rule (`plan == "free"`) matched, so we present `pw_upsell`.
+    expect(r.info.identifier).toBe("pw_upsell");
+  }
+  await sw.dispose();
+});
+
+test("paywallWillOpenDeepLink local event is delivered to the delegate", async () => {
+  const captured: string[] = [];
+  const sw = make({
+    delegate: {
+      onPaywallWillOpenDeepLink(url) {
+        captured.push(url);
+      },
+    },
+  });
+  await sw.ready;
+
+  sw.events.dispatchEvent(
+    new CustomEvent("paywallWillOpenDeepLink", {
+      detail: { url: "myapp://upgrade" },
+    }),
+  );
+  await tick();
+
+  expect(captured).toEqual(["myapp://upgrade"]);
+  await sw.dispose();
+});
+
+test("configure: hanging static_config fetch falls back to cached config under enableConfigRefresh deadline", async () => {
+  // Pre-seed storage with a cached config carrying the enableConfigRefresh
+  // toggle. On configure(), the fetch deadline should fire (1s) and the
+  // cached config stays in place — `register()` must resolve to the
+  // cached paywall, not paywallNotAvailable.
+  const cachedPayload = {
+    buildId: "cached_build",
+    triggerOptions: [
+      {
+        placementName: "checkout",
+        rules: [
+          {
+            expression: "",
+            experiment: {
+              id: "exp_cached",
+              groupId: "grp_cached",
+              variants: [
+                { id: "var_cached", type: "treatment", paywallId: "pw_cached" },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+    paywallResponses: [
+      { identifier: "pw_cached", url: "https://paywalls.superwall.test/pw_cached" },
+    ],
+    products: [],
+    toggles: [{ key: "enableConfigRefresh", enabled: true }],
+    localization: { locales: [{ locale: "en-US" }] },
+  };
+  const adapter = newAdapter();
+  adapter.set(
+    "superwall.config",
+    JSON.stringify({ buildId: "cached_build", payload: cachedPayload }),
+  );
+
+  // fetch that hangs for static_config; resolves enrichment fast.
+  const hangingFetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return new Promise<Response>(() => {
+        /* never resolves */
+      });
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return new Response(JSON.stringify({ user: {}, device: {} }), { status: 200 });
+    }
+    return new Response("", { status: 204 });
+  }) as unknown as typeof fetch;
+
+  const presented: string[] = [];
+  const presenter: PaywallPresenter = {
+    present: async (info) => {
+      presented.push(info.identifier);
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: hangingFetch,
+    storage: adapter,
+    presenter,
+  });
+
+  const t0 = Date.now();
+  await sw.ready;
+  const elapsed = Date.now() - t0;
+  // Deadline is 1s (sub status UNKNOWN, not ACTIVE). Allow generous slack
+  // for CI variance but make sure we didn't hang.
+  expect(elapsed).toBeLessThan(2500);
+
+  const r = await sw.placements.register({ placement: "checkout" });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    expect(r.info.identifier).toBe("pw_cached");
+  }
   await sw.dispose();
 });

@@ -155,6 +155,23 @@ export interface LocalSuperwallEventMap {
     aliasChanged: boolean;
     userChanged: boolean;
   };
+  /**
+   * Paywall asked to navigate to an in-app URL (`open_url` postMessage).
+   * Bridged to `SuperwallDelegate.onPaywallWillOpenURL`. Local-only because
+   * Android exposes this as a delegate hook, not as a wire event.
+   */
+  paywallWillOpenURL: {
+    url: string;
+    /** When the paywall meant the URL to open inside a payment sheet
+     *  rather than a generic in-app browser. Per Android's `OpenUrl` /
+     *  `browser_type` field. */
+    browserType?: "payment_sheet";
+  };
+  /**
+   * Paywall asked to follow a deep link (`open_deep_link` postMessage).
+   * Bridged to `SuperwallDelegate.onPaywallWillOpenDeepLink`. Local-only.
+   */
+  paywallWillOpenDeepLink: { url: string };
 }
 
 export type AllSuperwallEvents = SuperwallEventMap & LocalSuperwallEventMap;
@@ -262,6 +279,10 @@ export interface SuperwallDelegate {
   onPaywallWillDismiss?(info: PaywallInfo): void;
   onPaywallDidDismiss?(info: PaywallInfo): void;
   onPaywallWillOpenURL?(url: string): void;
+  /** Fires when the paywall sends an `open_deep_link` postMessage. The
+   *  consumer is responsible for routing the URL into the host app
+   *  (e.g. `next/navigation` push, React Router navigate). */
+  onPaywallWillOpenDeepLink?(url: string): void;
 
   // custom paywall actions (legacy `custom` postMessage)
   onCustomPaywallAction?(name: string): void;
@@ -292,4 +313,6 @@ export interface SuperwallDelegate {
  *  `LocalSuperwallEventMap` keys; runtime check is a string-set lookup. */
 export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEventMap>([
   "identityHydrated",
+  "paywallWillOpenURL",
+  "paywallWillOpenDeepLink",
 ]);

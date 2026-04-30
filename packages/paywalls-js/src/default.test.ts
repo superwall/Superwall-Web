@@ -144,7 +144,7 @@ test("placements.getPresentationResult / confirmAllAssignments / preload route t
   const sw = make();
   await sw.ready;
   expect(await placements.getPresentationResult("p")).toEqual({
-    type: "paywallNotAvailable",
+    type: "placementNotFound",
   });
   expect(await placements.confirmAllAssignments()).toEqual([]);
   await placements.preloadAll();

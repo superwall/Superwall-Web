@@ -85,3 +85,15 @@ export class NetworkDecodingError extends Schema.TaggedError<NetworkDecodingErro
     cause: Schema.optional(Schema.Unknown),
   },
 ) {}
+
+// ---------------------------------------------------------------------------
+// Config parsing
+// ---------------------------------------------------------------------------
+
+export class ConfigParseError extends Schema.TaggedError<ConfigParseError>()(
+  "ConfigParseError",
+  {
+    message: Schema.String,
+    cause: Schema.optional(Schema.Unknown),
+  },
+) {}

@@ -25,6 +25,7 @@
     "clean": "rm -rf node_modules .turbo *.tsbuildinfo"
   },
   "dependencies": {
+    "@superwall/superscript": "^0.2.5",
     "effect": "^3.18.0"
   },
   "devDependencies": {

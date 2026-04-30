@@ -329,6 +329,41 @@ test("test mode purchase with should_dismiss=false stays open after purchase res
 // open_url_external — opens a new tab via window.open
 // ---------------------------------------------------------------------------
 
+test("custom_placement is forwarded via ctx.emit (P1)", async () => {
+  const emitted: Array<{ name: string; detail: unknown }> = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_a"),
+    newCtx({
+      emit: (name, detail) => emitted.push({ name, detail }),
+    }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  dispatchFromPaywall(iframe, [
+    {
+      event_name: "custom_placement",
+      name: "upsell_clicked",
+      params: { upgrade: "yearly" },
+    },
+  ]);
+  await flushMessages();
+
+  const cp = emitted.find((e) => e.name === "custom_placement");
+  expect(cp).toBeDefined();
+  const detail = cp!.detail as {
+    placementName: string;
+    paywall_info: { identifier: string };
+    params: Record<string, unknown>;
+  };
+  expect(detail.placementName).toBe("upsell_clicked");
+  expect(detail.paywall_info.identifier).toBe("pw_a");
+  expect(detail.params).toEqual({ upgrade: "yearly" });
+
+  presenter.dismiss();
+  await presentation;
+});
+
 test("open_url_external calls globalThis.open with the url", async () => {
   const opened: Array<[string, string | undefined, string | undefined]> = [];
   const originalOpen = globalThis.open;

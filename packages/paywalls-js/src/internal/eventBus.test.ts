@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { Effect, Layer } from "effect";
+import { computedPropertiesLayer } from "./computed.ts";
 import type { PaywallInfo, SubscriptionStatus } from "../types.ts";
 import {
   type SuperwallDelegate,
@@ -48,7 +49,9 @@ const buildStack = (
   const storage = StorageService.fromAdapter(createMemoryStorage());
   const identity = identityWithStorage(storage);
   const network = networkServiceLayer(config, identity);
-  return eventBusLayerWithTarget(target, network);
+  const computed = computedPropertiesLayer(storage);
+  const upstream = Layer.merge(network, computed);
+  return eventBusLayerWithTarget(target, upstream);
 };
 
 const stubPaywall = (id: string): PaywallInfo => ({

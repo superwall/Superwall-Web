@@ -72,6 +72,17 @@ export const createBrowserStorage = (
 
   const cookieFor = (key: string): string | undefined => COOKIE_MIRROR.get(key);
 
+  // Cookie deletion needs the SAME `Secure`/`SameSite`/`Path`/`Domain` as
+  // creation, otherwise Chrome / Safari treat it as a different cookie and
+  // leave the original in place. (Code-review P1.)
+  const deleteCookieOpts = {
+    ...(options.cookieDomain !== undefined && { domain: options.cookieDomain }),
+    ...(options.cookieSecure !== undefined && { secure: options.cookieSecure }),
+    ...(options.cookieSameSite !== undefined && {
+      sameSite: options.cookieSameSite,
+    }),
+  };
+
   return {
     get: (key) => {
       // localStorage authoritative; cookie is the SSR fallback.
@@ -109,11 +120,7 @@ export const createBrowserStorage = (
         }
       }
       const cookieName = cookieFor(key);
-      if (cookieName) {
-        deleteCookie(cookieName, {
-          ...(options.cookieDomain !== undefined && { domain: options.cookieDomain }),
-        });
-      }
+      if (cookieName) deleteCookie(cookieName, deleteCookieOpts);
     },
 
     clear: () => {
@@ -128,9 +135,7 @@ export const createBrowserStorage = (
         }
       }
       for (const cookieName of COOKIE_MIRROR.values()) {
-        deleteCookie(cookieName, {
-          ...(options.cookieDomain !== undefined && { domain: options.cookieDomain }),
-        });
+        deleteCookie(cookieName, deleteCookieOpts);
       }
     },
   };

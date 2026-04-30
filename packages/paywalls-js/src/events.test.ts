@@ -56,8 +56,10 @@ test("removeEventListener detaches a previously-added listener", () => {
   expect(count).toBe(1);
 });
 
-test("LOCAL_ONLY contains identityHydrated (and only the documented local-only set)", () => {
+test("LOCAL_ONLY contains the documented local-only events", () => {
   expect(LOCAL_ONLY.has("identityHydrated")).toBe(true);
+  expect(LOCAL_ONLY.has("paywallWillOpenURL")).toBe(true);
+  expect(LOCAL_ONLY.has("paywallWillOpenDeepLink")).toBe(true);
   expect(LOCAL_ONLY.has("paywall_open")).toBe(false);
-  expect(LOCAL_ONLY.size).toBe(1);
+  expect(LOCAL_ONLY.size).toBe(3);
 });

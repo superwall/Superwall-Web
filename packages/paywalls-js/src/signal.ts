@@ -11,12 +11,12 @@
 //   - Notifications MUST be coalesced — a single mutation that touches multiple
 //     signals MUST NOT fire any listener twice in the same microtask.
 //
-// Internals run on Effect's `SubscriptionRef`, so future Effect-side
-// consumers can `Stream.fromSubscriptionRef(...)` over the same source of
-// truth. The vanilla façade in this file owns listener notification +
-// microtask coalescing for the public Readable<T> surface.
-
-import { Effect, SubscriptionRef } from "effect";
+// Vanilla TS implementation — no Effect dependency. The earlier prototype
+// kept a parallel `SubscriptionRef` for "future Effect-side consumers,"
+// but every internal service that bridges Effect → public goes one way
+// (`Stream.runForEach` writing into a vanilla signal). Dropping the
+// runtime hop per write makes signal updates allocation-free and avoids
+// every public mutation crossing into the Effect runtime.
 
 export interface Readable<T> {
   readonly value: T;
@@ -31,21 +31,8 @@ export interface Writable<T> extends Readable<T> {
 /**
  * Create a writable signal. Internal services hold the `Writable<T>`;
  * the public surface gets the `Readable<T>` view via {@link asReadable}.
- *
- * Backed by an Effect `SubscriptionRef`. The ref is also returned so
- * Effect-side code can compose with `Stream.fromSubscriptionRef(ref)`
- * — both the public listeners and any Effect Stream consumers see the
- * same writes.
  */
-export const createSignal = <T>(
-  initial: T,
-): Writable<T> & {
-  /** Internal escape hatch for Effect-side composition. Not part of the
-   *  public Readable<T> surface — never re-export to consumers. */
-  readonly __ref: SubscriptionRef.SubscriptionRef<T>;
-} => {
-  const ref = Effect.runSync(SubscriptionRef.make(initial));
-
+export const createSignal = <T>(initial: T): Writable<T> => {
   let current = initial;
   let pending = initial;
   let pendingDirty = false;
@@ -73,9 +60,6 @@ export const createSignal = <T>(
     current = next;
     pending = next;
     pendingDirty = true;
-    // Mirror into the SubscriptionRef so Effect-side consumers see the
-    // same value. SubscriptionRef.set is `Effect<void, never, never>`.
-    Effect.runSync(SubscriptionRef.set(ref, next));
     scheduleFlush();
   };
 
@@ -95,11 +79,10 @@ export const createSignal = <T>(
     update(fn) {
       write(fn(current));
     },
-    __ref: ref,
   };
 };
 
-/** Erase the writable + Effect-side surface, returning the read-only view. */
+/** Erase the writable surface, returning the read-only view. */
 export const asReadable = <T>(signal: Writable<T>): Readable<T> => ({
   get value() {
     return signal.value;

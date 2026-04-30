@@ -22,6 +22,7 @@ import {
   SuperwallEventTarget,
 } from "../events.ts";
 import type { JsonValue } from "../types.ts";
+import { ComputedProperties } from "./computed.ts";
 import { NetworkService } from "./network.ts";
 
 /** Random-but-good-enough event ID; collisions are extremely unlikely and
@@ -31,10 +32,14 @@ const newEventId = (): string => crypto.randomUUID();
 export interface EventBusImpl {
   readonly target: SuperwallEventTarget;
 
-  /** Fire a typed event. Wire-bound events also POST to the collector. */
+  /** Fire a typed event. Wire-bound events also POST to the collector
+   *  unless `opts.wireEmit === false` (used by the SDK when emitting a
+   *  lifecycle event whose payload references stub data — e.g. a
+   *  `PaywallInfo` synthesized from a placement name without real config). */
   publish<K extends keyof AllSuperwallEvents>(
     name: K,
     detail: AllSuperwallEvents[K],
+    opts?: { wireEmit?: boolean },
   ): Effect.Effect<void>;
 
   /** Replace the active delegate (or detach with `null`). */
@@ -52,11 +57,13 @@ export interface EventBusImpl {
 const make = (target: SuperwallEventTarget) =>
   Effect.gen(function* () {
     const network = yield* NetworkService;
+    const computed = yield* ComputedProperties;
     const delegateRef = yield* Ref.make<SuperwallDelegate | null>(null);
 
     const publish = <K extends keyof AllSuperwallEvents>(
       name: K,
       detail: AllSuperwallEvents[K],
+      opts?: { wireEmit?: boolean },
     ): Effect.Effect<void> =>
       Effect.gen(function* () {
         // (1) typed EventTarget dispatch — synchronous
@@ -65,7 +72,14 @@ const make = (target: SuperwallEventTarget) =>
         const wireBound = !LOCAL_ONLY.has(name);
         if (!wireBound) return;
 
-        // (2) delegate firehose (wire-bound only — local events aren't
+        // (2) record into computed-properties history. Wire-bound only —
+        // local events are SDK-internal and don't drive audience rules.
+        // Best-effort: storage failures don't block delivery.
+        yield* computed
+          .record(name)
+          .pipe(Effect.catchAll(() => Effect.void));
+
+        // (3) delegate firehose (wire-bound only — local events aren't
         //     in `SuperwallEventMap` so they don't fit the typed signature)
         const delegate = yield* Ref.get(delegateRef);
         if (delegate?.onEvent) {
@@ -76,7 +90,11 @@ const make = (target: SuperwallEventTarget) =>
           }
         }
 
-        // (3) wire emission
+        // (4) wire emission. Caller can opt out for stub-data lifecycle
+        // events that shouldn't pollute the collector (e.g. v0 alpha's
+        // synthesized `paywall_open` from a stub `PaywallInfo`).
+        if (opts?.wireEmit === false) return;
+
         const envelope = {
           event_id: newEventId(),
           event_name: name,
@@ -121,28 +139,42 @@ export class EventBus extends Context.Tag("@superwall/EventBus")<
   EventBusImpl
 >() {}
 
-/** Build an EventBus Layer over a fresh SuperwallEventTarget + a network
- *  Layer. The resulting Layer outputs `EventBus` AND re-exposes the
- *  upstream `NetworkService` for downstream consumers. */
+/** Build an EventBus Layer over a fresh SuperwallEventTarget + the upstream
+ *  Layer (which must provide both `NetworkService` and `ComputedProperties`).
+ *  The resulting Layer outputs `EventBus` AND re-exposes the upstream
+ *  services for downstream consumers. */
 export const eventBusLayer = (
-  networkLayer: Layer.Layer<NetworkService>,
-): Layer.Layer<EventBus | NetworkService, never, never> =>
+  upstream: Layer.Layer<NetworkService | ComputedProperties>,
+): Layer.Layer<
+  EventBus | NetworkService | ComputedProperties,
+  never,
+  never
+> =>
   Layer.provideMerge(
-    Layer.effect(
-      EventBus,
-      make(new SuperwallEventTarget()),
-    ),
-    networkLayer,
-  ) as Layer.Layer<EventBus | NetworkService, never, never>;
+    Layer.effect(EventBus, make(new SuperwallEventTarget())),
+    upstream,
+  ) as Layer.Layer<
+    EventBus | NetworkService | ComputedProperties,
+    never,
+    never
+  >;
 
 /** Same as `eventBusLayer` but takes a pre-built target so React's Provider
  *  can pass the same `SuperwallEventTarget` instance the consumer already
  *  reads via `sw.events`. */
 export const eventBusLayerWithTarget = (
   target: SuperwallEventTarget,
-  networkLayer: Layer.Layer<NetworkService>,
-): Layer.Layer<EventBus | NetworkService, never, never> =>
+  upstream: Layer.Layer<NetworkService | ComputedProperties>,
+): Layer.Layer<
+  EventBus | NetworkService | ComputedProperties,
+  never,
+  never
+> =>
   Layer.provideMerge(
     Layer.effect(EventBus, make(target)),
-    networkLayer,
-  ) as Layer.Layer<EventBus | NetworkService, never, never>;
+    upstream,
+  ) as Layer.Layer<
+    EventBus | NetworkService | ComputedProperties,
+    never,
+    never
+  >;

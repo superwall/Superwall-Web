@@ -446,6 +446,10 @@ export const STORAGE_KEYS = {
   /** ISO timestamp of the last successful `purchases.restore()`. Used to
    *  dedupe rapid restore calls and surface to the host app. */
   lastRestoreAt: "superwall.lastRestoreAt",
+  /** Cached `static_config` payload (JSON-encoded `{buildId, payload}`).
+   *  Replayed on configure so offline-first works; revalidated by the next
+   *  `static_config` fetch. */
+  config: "superwall.config",
 } as const;
 
 export type StorageKeyName = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];
