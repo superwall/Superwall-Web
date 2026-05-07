@@ -13,11 +13,42 @@ import {
 // SDK setup
 // ---------------------------------------------------------------------------
 
-// Replace with your own API key from the Superwall dashboard.
-const apiKey = "pk_web_demo";
+const apiKey = "pk_8610a1b862d329cc0ce2076fba5b26bca1fcbdd4cd7279ee";
+
+// Superwall BE doesn't return CORS headers for browser origins, so route
+// every API call through the local Bun proxy (see server.ts).
+const PROXY_BASE = location.origin;
+const PROXY_REWRITES: Array<[RegExp, string]> = [
+  [/^https:\/\/api\.superwall\.me/, `${PROXY_BASE}/proxy/api`],
+  [/^https:\/\/collector\.superwall\.me/, `${PROXY_BASE}/proxy/collector`],
+  [/^https:\/\/enrichment-api\.superwall\.com/, `${PROXY_BASE}/proxy/enrichment`],
+  [/^https:\/\/subscriptions-api\.superwall\.com/, `${PROXY_BASE}/proxy/subscriptions`],
+];
+
+const proxiedFetch: typeof fetch = (input, init) => {
+  const original =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+  let rewritten = original;
+  for (const [pattern, replacement] of PROXY_REWRITES) {
+    if (pattern.test(rewritten)) {
+      rewritten = rewritten.replace(pattern, replacement);
+      break;
+    }
+  }
+  if (rewritten === original) {
+    return globalThis.fetch(input, init);
+  }
+  // Re-issue with the rewritten URL but preserve the request init.
+  return globalThis.fetch(rewritten, init);
+};
 
 const sw = createSuperwall({
   apiKey,
+  fetch: proxiedFetch,
   presenter: createBrowserPresenter({
     presentation: "modal",
     testMode: true,
@@ -119,7 +150,6 @@ const watch = [
   "transaction_start",
   "transaction_complete",
   "subscriptionStatus_didChange",
-  "identityHydrated",
   "first_seen",
   "session_start",
 ] as const;
@@ -173,7 +203,7 @@ const handlers: Record<string, () => Promise<void> | void> = {
   },
   register: async () => {
     const result = await sw.placements.register({
-      placement: "checkout",
+      placement: "test2",
       feature: () => log("feature ran!"),
     });
     setLastResult(

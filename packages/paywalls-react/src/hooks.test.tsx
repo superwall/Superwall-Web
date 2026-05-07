@@ -330,3 +330,85 @@ test("useDelegate installs a delegate for the lifetime of the component", async 
   await act(async () => { fireEvent.click(getByText("toggle")); await flush(); });
   expect(statusCalls).toBe(1);
 });
+
+test("useSignal: unstable signal identity per render doesn't trigger infinite re-render", async () => {
+  // Pre-fix, useSignal's `useCallback((cb) => signal.subscribe(...), [signal])`
+  // would create a new subscribe per render whenever signal changed identity,
+  // forcing useSyncExternalStore to re-subscribe → potential render loop.
+  // The ref-based fix makes subscribe identity stable across renders.
+  let renderCount = 0;
+  const Display = () => {
+    renderCount++;
+    const sw = useSuperwall();
+    // Wrap in a fresh proxy each render — exercises the unstable-identity case.
+    const wrappedSignal = {
+      get value() {
+        return sw.user.id.value;
+      },
+      subscribe: (run: () => void) => sw.user.id.subscribe(run),
+    };
+    const id = useSignal(wrappedSignal);
+    return <span data-testid="id">{id}</span>;
+  };
+  render(<Wrap><Display /></Wrap>);
+  await act(async () => { await flush(); });
+  // A single mount should produce a bounded number of renders. Without the
+  // fix, this would balloon. Allow some slack for double-renders in test env.
+  expect(renderCount).toBeLessThan(5);
+});
+
+test("useDelegate: unmounting one of two stacked hooks leaves the other installed", async () => {
+  // The bug: pre-fix, ANY useDelegate unmount called sw.setDelegate(null),
+  // wiping a sibling's installed delegate. With the per-instance stack,
+  // unmount only pops the owner that pushed; whichever entry remains becomes
+  // the active delegate.
+  const calls: string[] = [];
+  const A = () => {
+    useDelegate({ onSubscriptionStatusChange: () => calls.push("A") });
+    return <span>A</span>;
+  };
+  const B = () => {
+    useDelegate({ onSubscriptionStatusChange: () => calls.push("B") });
+    return <span>B</span>;
+  };
+  const Wrapper = ({ showB }: { showB: boolean }) => {
+    const sw = useSuperwall();
+    return (
+      <>
+        <A />
+        {showB && <B />}
+        <button
+          onClick={() =>
+            sw.purchases.setSubscriptionStatus({
+              status: calls.length % 2 === 0 ? "INACTIVE" : "UNKNOWN",
+            })
+          }
+        >
+          toggle
+        </button>
+      </>
+    );
+  };
+  const { rerender, getByText } = render(
+    <Wrap><Wrapper showB={true} /></Wrap>,
+  );
+  await act(async () => { await flush(); });
+
+  // Both stacked → exactly one of them fires (the top).
+  await act(async () => { fireEvent.click(getByText("toggle")); await flush(); });
+  expect(calls).toHaveLength(1);
+  const initialOwner = calls[0]!;
+  const otherOwner = initialOwner === "A" ? "B" : "A";
+
+  // Unmount the *other* one (the one not currently the top). Active delegate
+  // should be unchanged — top stays installed.
+  // We can't selectively unmount A or B here; rerender drops B. So if B is
+  // the top, after unmount A becomes top; if A is the top, A stays top.
+  rerender(<Wrap><Wrapper showB={false} /></Wrap>);
+  await act(async () => { await flush(); });
+  await act(async () => { fireEvent.click(getByText("toggle")); await flush(); });
+  expect(calls).toHaveLength(2);
+  // Whichever survives must be A — only A is mounted now.
+  expect(calls[1]).toBe("A");
+  void otherOwner;
+});

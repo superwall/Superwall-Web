@@ -1,18 +1,14 @@
-// Public type surface for @superwall/paywalls-js.
-// Mirrors API.md §10 (primitives, subscription, paywall, callbacks, options).
-// Pure types — no runtime. Errors live in ./errors.ts.
+// Public type surface for @superwall/paywalls-js. Pure types — no runtime.
 
-// ---------------------------------------------------------------------------
-// 10.1 — Module augmentation surfaces
+// Module-augmentation surfaces. Apps extend these via `declare module
+// "@superwall/paywalls-js"`. Defaults are `{}` so augmentation closes the shape.
 //
-// Apps augment these via:
+// Example:
 //   declare module "@superwall/paywalls-js" {
 //     interface UserAttributes { email?: string; plan?: "free" | "pro" }
 //     interface PlacementParams { screen?: string }
 //     interface CustomCallbacks { submitEmail: { input: { email: string }; output: { ok: boolean } } }
 //   }
-// Defaults are `{}` so augmentation actually closes the shape.
-// ---------------------------------------------------------------------------
 
 export interface UserAttributes {}
 export interface PlacementParams {}
@@ -23,9 +19,7 @@ export interface CustomCallbackDefinition {
   output: unknown;
 }
 
-// ---------------------------------------------------------------------------
-// 10.2 — Primitives
-// ---------------------------------------------------------------------------
+// Primitives
 
 export type JsonValue =
   | string
@@ -64,14 +58,36 @@ export type DeepPartial<T> = T extends object
   ? { [K in keyof T]?: DeepPartial<T[K]> }
   : T;
 
-// ---------------------------------------------------------------------------
-// 10.3 — Subscription & entitlements
-// ---------------------------------------------------------------------------
+// Subscription & entitlements
 
 export type SubscriptionStatus =
   | { status: "UNKNOWN" }
   | { status: "INACTIVE" }
   | { status: "ACTIVE"; entitlements: Entitlement[] };
+
+// Purchase controller — mirrors Android `PurchaseController`. Implement to
+// override SDK purchase + restore handling. SDK ships an automatic
+// implementation that drives the standard Stripe-paywall + redemption-code
+// flow; consumers can swap it via `createSuperwall({purchaseController})`.
+
+export type PurchaseResult =
+  | { type: "purchased" }
+  | { type: "cancelled" }
+  | { type: "pending" }
+  | { type: "failed"; error: Error };
+
+export type RestorationResult =
+  | { type: "restored" }
+  | { type: "failed"; error: Error };
+
+export interface PurchaseController {
+  purchase(product: Product): Promise<PurchaseResult>;
+  restorePurchases(): Promise<RestorationResult>;
+  /** Optional one-shot lifecycle hook called once `configure()` settles.
+   *  The default automatic controller uses it to detect a returning
+   *  redemption-code redirect and start polling for web entitlements. */
+  onConfigured?(): Promise<void>;
+}
 
 export type ProductStore =
   | "appStore"
@@ -114,7 +130,6 @@ export interface Entitlements {
   active: Entitlement[];
   inactive: Entitlement[];
   all: Entitlement[];
-  // `web` bucket deferred to v1; see API.md §2.4
 }
 
 export interface Product {
@@ -192,9 +207,7 @@ export interface PageViewData {
   timeOnPreviousPageMs?: number;
 }
 
-// ---------------------------------------------------------------------------
-// 10.4 — Paywall
-// ---------------------------------------------------------------------------
+// Paywall
 
 export interface PaywallInfo {
   identifier: string;
@@ -223,6 +236,18 @@ export interface PaywallInfo {
   paywalljsVersion?: string;
   isFreeTrialAvailable?: boolean;
   featureGatingBehavior?: "gated" | "nonGated";
+  /** Per-paywall product slot mapping from the paywall config. Each entry
+   *  carries `product` (slot name like "primary"), `productId`, `product_id`.
+   *  Forwarded verbatim into the paywall iframe's templates bundle so the
+   *  iframe's checkout-click handler can resolve clicked product slots. */
+  rawProducts?: ReadonlyArray<Record<string, JsonValue>>;
+  /** Pre-encoded `paywalljs_event` base64 payload (substitutions + page
+   *  styles). Sent to the iframe as a separate `accept64` after the main
+   *  templates bundle. */
+  paywalljsEvent?: string;
+  /** Where the paywall should render: `"EXTERNAL"` ⇒ navigate to the
+   *  Superwall Web Project hosted URL; `"EMBEDDED"`/null ⇒ in-page iframe. */
+  webCheckoutDestination?: string;
   closeReason?:
     | "systemLogic"
     | "forNextPaywall"
@@ -258,7 +283,8 @@ export type PaywallResult =
 export type PaywallSkippedReason =
   | { type: "holdout"; experiment: Experiment }
   | { type: "noAudienceMatch" }
-  | { type: "placementNotFound" };
+  | { type: "placementNotFound" }
+  | { type: "userSubscribed" };
 
 export type PresentationResult =
   | { type: "paywall"; experiment: Experiment }
@@ -290,9 +316,7 @@ export type PaywallPresentationRequestStatusReason =
   | { type: "noConfig" }
   | { type: "subsStatusTimeout" };
 
-// ---------------------------------------------------------------------------
-// 10.5 — Custom callbacks, computed properties, integration attributes
-// ---------------------------------------------------------------------------
+// Custom callbacks, computed properties, integration attributes
 
 export interface CustomCallback {
   name: string;
@@ -321,7 +345,6 @@ export type ComputedPropertyRequestType =
   | "placementsInMonth"
   | "placementsSinceInstall";
 
-// Closed superset of Android's 24 third-party providers.
 export type IntegrationAttribute =
   | "adjustId"
   | "amplitudeDeviceId"
@@ -351,9 +374,7 @@ export type IntegrationAttribute =
   | "appstackId"
   | "custom";
 
-// ---------------------------------------------------------------------------
-// 10.6 — Options
-// ---------------------------------------------------------------------------
+// Options
 
 export interface CustomEnvironmentHosts {
   base: string;
@@ -379,7 +400,7 @@ export interface PaywallOptions {
   shouldShowWebRestorationAlert?: boolean;
   shouldShowWebPurchaseConfirmationAlert?: boolean;
   automaticallyDismiss?: boolean;
-  /** Test-mode override; see API.md §6. */
+  /** Test-mode override. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
 }
 
@@ -403,10 +424,7 @@ export interface SuperwallOptions {
 
 export type PartialSuperwallOptions = DeepPartial<SuperwallOptions>;
 
-// ---------------------------------------------------------------------------
-// 5 — Storage adapter (public interface; default impls live in /browser
-// and in `createMemoryStorage()`). API.md §5.
-// ---------------------------------------------------------------------------
+// Storage adapter — default impls live in /browser and `createMemoryStorage()`.
 
 /**
  * Persistence layer for identity, counters, and computed properties.
@@ -422,11 +440,8 @@ export interface StorageAdapter {
 
 /**
  * Canonical storage keys the SDK reads/writes. Adapter authors who care
- * about cross-tool interop (e.g. encrypted-cookie or remote-KV adapters)
- * should treat exactly these keys as the contract.
- *
- * Resolves API.md §14 #7 (storage key contract) by promoting the key set
- * to a public constant.
+ * about cross-tool interop (encrypted-cookie or remote-KV adapters) should
+ * treat exactly these keys as the contract.
  */
 export const STORAGE_KEYS = {
   aliasId: "superwall.aliasId",
@@ -450,6 +465,9 @@ export const STORAGE_KEYS = {
    *  Replayed on configure so offline-first works; revalidated by the next
    *  `static_config` fetch. */
   config: "superwall.config",
+  /** Latest redemption response (JSON-encoded). Replayed on configure so
+   *  the entitlements granted via web checkout survive page reloads. */
+  latestRedemption: "superwall.latestRedemption",
 } as const;
 
 export type StorageKeyName = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

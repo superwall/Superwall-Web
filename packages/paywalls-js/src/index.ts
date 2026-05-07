@@ -1,14 +1,11 @@
 // @superwall/paywalls-js — headless core public surface.
-// Per API.md. v0 alpha: types + errors + version constant only.
-// Runtime (createSuperwall, store, network, presenter) lands incrementally.
 
 export { SDK_VERSION } from "./version.ts";
 
 export * from "./types.ts";
 export * from "./errors.ts";
-// Public reactive-read primitive. Only the read-only `Readable<T>` view ships
-// from the package barrel; `Writable<T>` and `createSignal` are intentionally
-// internal-only — public services expose `Readable<T>` via `asReadable`.
+// Only the read-only `Readable<T>` view is public; `Writable<T>` and
+// `createSignal` are internal-only.
 export type { Readable } from "./signal.ts";
 export {
   SuperwallEventTarget,
@@ -35,9 +32,7 @@ export type {
   PresentationContext,
   SuperwallEventEmit,
 } from "./presenter.ts";
-// Tree-shakeable namespace proxies — bind to the default Superwall instance
-// (first-created). See API.md §2.7. Importing only `user` drops `placements`
-// etc. via standard ESM dead-code elimination.
+// Tree-shakeable namespace proxies bound to the default (first-created) instance.
 export {
   user,
   placements,

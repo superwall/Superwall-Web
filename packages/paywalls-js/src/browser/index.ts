@@ -1,5 +1,4 @@
 // @superwall/paywalls-js/browser — factories for the browser environment.
-// Per API.md §0 + §5 + §7.
 
 export {
   createBrowserStorage,

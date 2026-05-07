@@ -1,14 +1,7 @@
 // ComputedPropertiesService — records event history + computes the
 // `daysSince_<event>` / `paywallsInHour|Day|Week|Month` /
 // `placementsSinceInstall` counters used by the audience-rule evaluator.
-//
-// v0 alpha: storage is a single JSON array under
-// `STORAGE_KEYS.computedProperties`, FIFO-evicted at MAX_HISTORY entries.
-// The audience-rule evaluator that consumes these values is deferred
-// (MISSING.md), but landing the storage + recording side now means the
-// data is already accumulating when the evaluator ships.
-//
-// Internal-only — not exported from the package barrel.
+// Storage is a single JSON array, FIFO-evicted at MAX_HISTORY entries.
 
 import { Context, Effect, Layer, Ref } from "effect";
 import { STORAGE_KEYS, type ComputedPropertyRequest } from "../types.ts";
@@ -60,7 +53,6 @@ const computeOne = (
     case "daysSince":
     case "monthsSince":
     case "yearsSince": {
-      // Find the most recent record matching the event name.
       let latest: number | null = null;
       for (let i = history.length - 1; i >= 0; i--) {
         const rec = history[i];
@@ -99,8 +91,7 @@ const computeOne = (
               : MONTH_MS;
       const cutoff = now - window;
       let count = 0;
-      // Only count placement-trigger events. Per Android `triggerFire` is
-      // the canonical "a placement was evaluated" event.
+      // `trigger_fire` is the canonical "a placement was evaluated" event.
       for (const rec of history) {
         if (rec.name === "trigger_fire" && rec.ts >= cutoff) count++;
       }
@@ -119,8 +110,7 @@ const computeOne = (
 const make = Effect.gen(function* () {
   const storage = yield* StorageService;
 
-  // Hydrate history from storage. Corrupt JSON is silently dropped (matches
-  // assignment-cache behaviour in `superwall.ts`).
+  // Corrupt JSON is silently dropped (tolerant-cache pattern).
   const initial = yield* storage.get(HISTORY_KEY);
   let parsed: EventRecord[] = [];
   if (initial !== null) {
@@ -135,9 +125,7 @@ const make = Effect.gen(function* () {
             typeof (e as EventRecord).ts === "number",
         );
       }
-    } catch {
-      /* drop corrupt cache */
-    }
+    } catch {}
   }
 
   const ref = yield* Ref.make<EventRecord[]>(parsed);
@@ -152,7 +140,6 @@ const make = Effect.gen(function* () {
       const ts = now ?? Date.now();
       const next = yield* Ref.modify(ref, (current) => {
         const appended = current.concat({ name: eventName, ts });
-        // FIFO evict if over cap.
         const trimmed =
           appended.length > MAX_HISTORY
             ? appended.slice(appended.length - MAX_HISTORY)
@@ -186,8 +173,7 @@ export class ComputedProperties extends Context.Tag(
 )<ComputedProperties, ComputedPropertiesImpl>() {}
 
 /** Build a Layer that exposes `ComputedProperties` over the supplied
- *  `StorageService`. The result re-exposes the upstream storage Layer so
- *  consumers don't have to compose it twice. */
+ *  storage Layer (re-exposed for downstream consumers). */
 export const computedPropertiesLayer = (
   storageLayer: Layer.Layer<StorageService>,
 ): Layer.Layer<ComputedProperties | StorageService, never, never> =>

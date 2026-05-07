@@ -38,6 +38,69 @@ const make = (override: Partial<Parameters<typeof createSuperwall>[0]> = {}): Su
     ...override,
   });
 
+/** Variant of `make()` that wires a fetch returning a minimal real config
+ *  with a "checkout" placement → "pw_default" paywall. Used by tests that
+ *  rely on register() actually presenting (formerly via the now-deleted
+ *  stub fallback). */
+const makeWithPaywall = (
+  override: Partial<Parameters<typeof createSuperwall>[0]> = {},
+): Superwall => {
+  const fakeFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            build_id: "test_build",
+            trigger_options: [
+              {
+                event_name: "checkout",
+                rules: [
+                  {
+                    experiment_id: "exp_checkout",
+                    experiment_group_id: "grp_test",
+                    expression_cel: "",
+                    variants: [
+                      {
+                        variant_id: "var_default",
+                        variant_type: "TREATMENT",
+                        percentage: 100,
+                        paywall_identifier: "pw_default",
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+            paywall_responses: [
+              {
+                identifier: "pw_default",
+                name: "Default",
+                url: "https://paywalls.superwall.test/pw_default",
+              },
+            ],
+            products: [],
+            toggles: [],
+            localization: { locales: [{ locale: "en-US" }] },
+          }),
+        ),
+      );
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ user: {}, device: {} })),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  return createSuperwall({
+    apiKey: "pk_test",
+    fetch: fakeFetch,
+    storage: newAdapter(),
+    ...override,
+  });
+};
+
 // ---------------------------------------------------------------------------
 // factory + ready
 // ---------------------------------------------------------------------------
@@ -188,14 +251,12 @@ test("sw.events receives the lifecycle events fired during configure", async () 
   sw.events.addEventListener("first_seen", () => seen.push("first_seen"));
   sw.events.addEventListener("session_start", () => seen.push("session_start"));
   sw.events.addEventListener("app_launch", () => seen.push("app_launch"));
-  sw.events.addEventListener("identityHydrated", () => seen.push("identityHydrated"));
 
   // Listeners attached BEFORE ready resolves; lifecycle events are fired
   // inside `configure`, which the runtime drives synchronously enough that
   // listeners attached pre-await still see them.
   await sw.ready;
 
-  expect(seen).toContain("identityHydrated");
   expect(seen).toContain("first_seen");
   expect(seen).toContain("session_start");
   expect(seen).toContain("app_launch");
@@ -265,7 +326,7 @@ import type {
   PresentationContext,
 } from "./presenter.ts";
 import { PaywallAlreadyPresentedError, PresenterError } from "./errors.ts";
-import type { PaywallInfo, PaywallResult } from "./types.ts";
+import type { PaywallInfo, PaywallResult, PaywallSkippedReason } from "./types.ts";
 
 const presenterThatResolves = (
   result: PaywallResult,
@@ -282,7 +343,7 @@ const presenterThatResolves = (
 };
 
 test("register without a presenter returns { type: 'error', error: NoPresenterRegisteredError }", async () => {
-  const sw = make();
+  const sw = makeWithPaywall();
   await sw.ready;
   const r = await sw.placements.register({ placement: "checkout" });
   expect(r.type).toBe("error");
@@ -292,7 +353,9 @@ test("register without a presenter returns { type: 'error', error: NoPresenterRe
   await sw.dispose();
 });
 
-test("register short-circuits with { type: 'entitled' } when subscription is ACTIVE; runs feature", async () => {
+test("register: ACTIVE subscription → skipped { type: 'userSubscribed' } and runs feature", async () => {
+  // Mirrors Android `PaywallSkippedReason.UserIsSubscribed`: skip the
+  // paywall, fire onSkip(reason), run feature.
   const presenter = presenterThatResolves({ type: "purchased", productId: "x" });
   const sw = make({ presenter });
   await sw.ready;
@@ -303,21 +366,25 @@ test("register short-circuits with { type: 'entitled' } when subscription is ACT
   await tick();
 
   let featureRan = false;
+  let skipReason: PaywallSkippedReason | null = null;
   const r = await sw.placements.register({
     placement: "checkout",
+    handler: { onSkip: (reason) => { skipReason = reason; } },
     feature: () => {
       featureRan = true;
     },
   });
-  expect(r.type).toBe("entitled");
+  expect(r.type).toBe("skipped");
+  if (r.type === "skipped") expect(r.reason.type).toBe("userSubscribed");
+  expect(skipReason).toEqual({ type: "userSubscribed" });
   expect(featureRan).toBe(true);
-  expect(presenter.presented).toHaveLength(0); // presenter never called
+  expect(presenter.presented).toHaveLength(0);
   await sw.dispose();
 });
 
 test("register presents, awaits result, fires lifecycle events + handler callbacks", async () => {
   const presenter = presenterThatResolves({ type: "purchased", productId: "p1" });
-  const sw = make({ presenter });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
   const lifecycle: string[] = [];
@@ -345,7 +412,7 @@ test("register presents, awaits result, fires lifecycle events + handler callbac
 
   expect(r.type).toBe("presented");
   if (r.type === "presented") {
-    expect(r.info.identifier).toBe("stub_checkout");
+    expect(r.info.identifier).toBe("pw_default");
     expect(r.result).toEqual({ type: "purchased", productId: "p1" });
   }
   expect(presenter.presented).toHaveLength(1);
@@ -357,9 +424,150 @@ test("register presents, awaits result, fires lifecycle events + handler callbac
   await sw.dispose();
 });
 
+test("register: declined result on a config-driven nonGated paywall RUNS the feature", async () => {
+  // Config carries `featureGatingBehavior: "nonGated"` on the paywall —
+  // even when the user dismisses, the consumer's feature callback fires.
+  // Mirrors Android `featureGatingBehavior` semantics.
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          buildId: "b1",
+          triggerOptions: [
+            {
+              placementName: "checkout",
+              rules: [
+                {
+                  expression: "",
+                  experiment: {
+                    id: "exp_x",
+                    groupId: "grp",
+                    variants: [
+                      { id: "v_a", type: "treatment", paywallId: "pw_x" },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+          paywallResponses: [
+            {
+              identifier: "pw_x",
+              url: "https://paywalls.superwall.test/pw_x",
+              featureGatingBehavior: "nonGated",
+            },
+          ],
+          products: [],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    if (url.includes("/api/v1/enrich"))
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  let featureRan = false;
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter: {
+      present: async () => ({ type: "declined" }),
+      dismiss: () => {},
+    },
+  });
+  await sw.ready;
+
+  const r = await sw.placements.register({
+    placement: "checkout",
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    expect(r.info.featureGatingBehavior).toBe("nonGated");
+    expect(r.result.type).toBe("declined");
+  }
+  expect(featureRan).toBe(true);
+  await sw.dispose();
+});
+
+test("register: declined result on a config-driven gated paywall does NOT run feature", async () => {
+  // Same setup as above but featureGatingBehavior: "gated" — feature must NOT fire.
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          buildId: "b1",
+          triggerOptions: [
+            {
+              placementName: "checkout",
+              rules: [
+                {
+                  expression: "",
+                  experiment: {
+                    id: "exp_x",
+                    groupId: "grp",
+                    variants: [
+                      { id: "v_a", type: "treatment", paywallId: "pw_x" },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+          paywallResponses: [
+            {
+              identifier: "pw_x",
+              url: "https://paywalls.superwall.test/pw_x",
+              featureGatingBehavior: "gated",
+            },
+          ],
+          products: [],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    if (url.includes("/api/v1/enrich"))
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  let featureRan = false;
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter: {
+      present: async () => ({ type: "declined" }),
+      dismiss: () => {},
+    },
+  });
+  await sw.ready;
+
+  const r = await sw.placements.register({
+    placement: "checkout",
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    expect(r.info.featureGatingBehavior).toBe("gated");
+  }
+  expect(featureRan).toBe(false);
+  await sw.dispose();
+});
+
 test("register: declined result on a (default-gated) paywall does NOT run feature", async () => {
   const presenter = presenterThatResolves({ type: "declined" });
-  const sw = make({ presenter });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
   let featureRan = false;
@@ -393,21 +601,21 @@ test("register enforces the single-paywall invariant — second call → Paywall
     },
     dismiss: () => {},
   };
-  const sw = make({ presenter: slowPresenter });
+  const sw = makeWithPaywall({ presenter: slowPresenter });
   await sw.ready;
 
-  const first = sw.placements.register({ placement: "first" });
+  const first = sw.placements.register({ placement: "checkout" });
   await started; // presenter has been invoked → isPaywallPresented is true
   expect(sw.isPaywallPresented.value).toBe(true);
 
-  // Second register collides.
-  const second = await sw.placements.register({ placement: "second" });
+  // Second register collides regardless of placement.
+  const second = await sw.placements.register({ placement: "checkout" });
   expect(second.type).toBe("error");
   if (second.type === "error") {
     expect(second.error).toBeInstanceOf(PaywallAlreadyPresentedError);
     const e = second.error as PaywallAlreadyPresentedError;
-    expect(e.attemptedPlacement).toBe("second");
-    expect(e.currentPaywallInfo.identifier).toBe("stub_first");
+    expect(e.attemptedPlacement).toBe("checkout");
+    expect(e.currentPaywallInfo.identifier).toBe("pw_default");
   }
 
   // Resolve the first to let it complete cleanly.
@@ -423,7 +631,7 @@ test("register: presenter throw → { type: 'error', error: PresenterError }, is
     },
     dismiss: () => {},
   };
-  const sw = make({ presenter: boom });
+  const sw = makeWithPaywall({ presenter: boom });
   await sw.ready;
 
   let onError: Error | null = null;
@@ -455,7 +663,7 @@ test("register: presentation context exposes placement + params + signal + emit"
     },
     dismiss: () => {},
   };
-  const sw = make({ presenter });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
   await sw.placements.register({
@@ -488,7 +696,7 @@ test("dismiss aborts the in-flight presentation and tells the presenter", async 
       dismissCalls++;
     },
   };
-  const sw = make({ presenter });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
   const reg = sw.placements.register({ placement: "checkout" });
@@ -586,10 +794,18 @@ test("configure POSTs enrichment with current user attributes + merges response 
 
   const enrichmentCall = calls.find((c) => c.url.includes("/api/v1/enrich"));
   expect(enrichmentCall).toBeDefined();
-  expect(JSON.parse(enrichmentCall!.body!)).toEqual({
-    user: { email: "a@b.co" },
-    device: {},
-  });
+  const body = JSON.parse(enrichmentCall!.body!) as {
+    user: Record<string, unknown>;
+    device: Record<string, unknown>;
+  };
+  expect(body.user).toEqual({ email: "a@b.co" });
+  // Spot-check a few canonical device-attribute fields. Full coverage of
+  // every key is in `internal/deviceAttributes.test.ts`.
+  expect(body.device.platform).toBe("Web");
+  expect(body.device.publicApiKey).toBe("pk_test");
+  expect(body.device.subscriptionStatus).toBe("UNKNOWN");
+  expect(typeof body.device.timezoneOffset).toBe("number");
+  expect(Array.isArray(body.device.aliases)).toBe(true);
   // Server-known field merged into the user attributes signal.
   expect((sw.user.attributes.value as { server_field?: string }).server_field).toBe(
     "from_enrichment",
@@ -835,12 +1051,7 @@ test("paywall_decline fires on declined results (P1, parity with Android)", asyn
     present: async () => ({ type: "declined" }),
     dismiss: () => {},
   };
-  const sw = createSuperwall({
-    apiKey: "pk_test",
-    fetch: noopFetch,
-    storage: newAdapter(),
-    presenter,
-  });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
   let declineCount = 0;
@@ -858,17 +1069,12 @@ test("paywall_decline does NOT fire on purchased / restored results", async () =
     present: async () => ({ type: "purchased", productId: "p" }),
     dismiss: () => {},
   };
-  const sw = createSuperwall({
-    apiKey: "pk_test",
-    fetch: noopFetch,
-    storage: newAdapter(),
-    presenter,
-  });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
   let declineCount = 0;
   sw.events.addEventListener("paywall_decline", () => declineCount++);
-  await sw.placements.register({ placement: "x" });
+  await sw.placements.register({ placement: "checkout" });
   await tick();
   expect(declineCount).toBe(0);
   await sw.dispose();
@@ -884,20 +1090,15 @@ test("after declined dismiss, isPaywallPresented resets to false (regression for
     present: async () => ({ type: "declined" }),
     dismiss: () => {},
   };
-  const sw = createSuperwall({
-    apiKey: "pk_test",
-    fetch: noopFetch,
-    storage: newAdapter(),
-    presenter,
-  });
+  const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
-  await sw.placements.register({ placement: "first" });
+  await sw.placements.register({ placement: "checkout" });
   await tick();
   expect(sw.isPaywallPresented.value).toBe(false);
 
   // Second register works (proves signal isn't stuck).
-  const r = await sw.placements.register({ placement: "second" });
+  const r = await sw.placements.register({ placement: "checkout" });
   expect(r.type).toBe("presented");
   await sw.dispose();
 });
@@ -1245,7 +1446,441 @@ test("configure: failing static_config fetch retries exactly once before giving 
   await sw.dispose();
 });
 
-test("configure: hanging static_config fetch falls back to cached config under enableConfigRefresh deadline", async () => {
+test("paywall post_checkout_complete flows through PurchaseController.purchase()", async () => {
+  // Custom presenter that fires post_checkout_complete via ctx.onPurchaseEvent —
+  // the terminal success signal from the paywall's WebPaywallController on the
+  // `client_surface=web-sdk` branch.
+  const fakePresenter: PaywallPresenter = {
+    present: (_info, ctx) =>
+      new Promise<PaywallResult>((resolve) => {
+        queueMicrotask(() => {
+          ctx.onPurchaseEvent?.({
+            type: "postCheckout",
+            productId: "pro_yearly",
+            checkoutContextId: "ckctx_test",
+          });
+          setTimeout(() => resolve({ type: "purchased", productId: "pro_yearly" }), 5);
+        });
+      }),
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall({ presenter: fakePresenter });
+  await sw.ready;
+  // Drive the controller-level purchase by calling sw.purchases.purchase()
+  // and concurrently presenting a paywall that fires the complete event.
+  // The controller subscribe wires both sides.
+  const productPromise = sw.purchases.purchase({
+    id: "pro_yearly",
+    store: "stripe",
+    entitlements: [],
+  });
+  // Trigger a paywall presentation in parallel — this hooks the same
+  // ctx.onPurchaseEvent the controller subscribes to.
+  void sw.placements.register({ placement: "checkout" }).catch(() => {});
+  const r = await productPromise;
+  expect(r.type).toBe("purchased");
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  await sw.dispose();
+});
+
+test("purchases.purchase: routes through PurchaseController + emits transaction lifecycle on success", async () => {
+  // Custom controller that simulates a successful purchase synchronously.
+  const customController = {
+    purchase: async () => ({ type: "purchased" as const }),
+    restorePurchases: async () => ({ type: "restored" as const }),
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    purchaseController: customController,
+  });
+  await sw.ready;
+
+  const events: string[] = [];
+  for (const name of [
+    "transaction_start",
+    "transaction_complete",
+    "subscription_start",
+  ]) {
+    sw.events.addEventListener(name as never, () => events.push(name));
+  }
+  const r = await sw.purchases.purchase({
+    id: "pro_yearly",
+    store: "stripe",
+    entitlements: [],
+  });
+  expect(r.type).toBe("purchased");
+  await tick();
+  await tick();
+  expect(events).toEqual([
+    "transaction_start",
+    "transaction_complete",
+    "subscription_start",
+  ]);
+  await sw.dispose();
+});
+
+test("purchases.purchase: cancelled → transaction_abandon, no subscription_start", async () => {
+  const customController = {
+    purchase: async () => ({ type: "cancelled" as const }),
+    restorePurchases: async () => ({ type: "restored" as const }),
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    purchaseController: customController,
+  });
+  await sw.ready;
+  const events: string[] = [];
+  for (const name of ["transaction_abandon", "subscription_start"]) {
+    sw.events.addEventListener(name as never, () => events.push(name));
+  }
+  const r = await sw.purchases.purchase({
+    id: "pro_yearly",
+    store: "stripe",
+    entitlements: [],
+  });
+  expect(r.type).toBe("declined");
+  await tick();
+  await tick();
+  expect(events).toEqual(["transaction_abandon"]);
+  await sw.dispose();
+});
+
+test("purchases.getProducts: returns config-derived products as Product[]", async () => {
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          buildId: "b1",
+          triggerOptions: [],
+          paywallResponses: [],
+          products: [
+            {
+              id: "pro_yearly",
+              name: "Pro Yearly",
+              store: "stripe",
+              entitlements: [{ id: "pro" }],
+            },
+            { id: "no_entitlements" },
+          ],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    if (url.includes("/api/v1/enrich"))
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+  });
+  await sw.ready;
+
+  const products = await sw.purchases.getProducts();
+  expect(products).toHaveLength(2);
+  expect(products[0]!.id).toBe("pro_yearly");
+  expect(products[0]!.name).toBe("Pro Yearly");
+  expect(products[0]!.store).toBe("stripe");
+  expect(products[0]!.entitlements).toEqual([
+    { id: "pro", type: "SERVICE_LEVEL", isActive: false, productIds: ["pro_yearly"] },
+  ]);
+  expect(products[1]!.id).toBe("no_entitlements");
+  expect(products[1]!.entitlements).toEqual([]);
+  await sw.dispose();
+});
+
+test("purchases.getCustomerInfo: returns the current customerSig snapshot", async () => {
+  const sw = make();
+  await sw.ready;
+  expect(await sw.purchases.getCustomerInfo()).toBeNull();
+  // Once subscriptionStatus flips ACTIVE the customerSig still hasn't been
+  // explicitly seeded — the method just mirrors the signal.
+  sw.purchases.setSubscriptionStatus({
+    status: "ACTIVE",
+    entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: [] }],
+  });
+  expect(await sw.purchases.getCustomerInfo()).toBe(sw.customerInfo.value);
+  await sw.dispose();
+});
+
+test("logger: failures inside delegate callbacks are surfaced via onLog instead of silently swallowed", async () => {
+  const logs: Array<{ scope: string; message: string; error: string | null }> = [];
+  const delegate: SuperwallDelegate = {
+    onLog: (_level, scope, message, _info, error) => {
+      logs.push({ scope, message, error });
+    },
+    onUserAttributesChange: () => {
+      throw new Error("delegate boom");
+    },
+  };
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    delegate,
+    options: { logging: { level: "warn" } },
+  });
+  await sw.ready;
+  // Trigger the delegate hook by mutating user attributes.
+  sw.user.setAttributes({ plan: "free" } as never);
+  // Two ticks: signal flush → delegate fire → caught error → logger.warn → onLog.
+  await tick();
+  await tick();
+  await tick();
+
+  const captured = logs.find((l) =>
+    l.message.includes("onUserAttributesChange threw"),
+  );
+  expect(captured).toBeDefined();
+  expect(captured!.scope).toBe("superwallCore");
+  expect(captured!.error).toContain("delegate boom");
+  await sw.dispose();
+});
+
+test("counters: firstSeenAt bootstrapped on first run + totalPaywallViews increments on paywall_open", async () => {
+  const adapter = newAdapter();
+  const captured: Array<Record<string, unknown>> = [];
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/enrich")) {
+      // Capture the device payload sent on each enrichment POST.
+      const body = JSON.parse(init?.body as string) as {
+        device: Record<string, unknown>;
+      };
+      captured.push(body.device);
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    }
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          buildId: "b1",
+          triggerOptions: [],
+          paywallResponses: [],
+          products: [],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  // First run — firstSeenAt should be bootstrapped + persisted.
+  const sw1 = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: adapter,
+  });
+  await sw1.ready;
+  expect(typeof captured[0]!.appInstallDate).toBe("string");
+  expect(captured[0]!.appInstallDate).not.toBe("");
+  expect(captured[0]!.totalPaywallViews).toBe(0);
+  const firstSeenISO = captured[0]!.appInstallDate as string;
+  await sw1.dispose();
+
+  // Second run with the same storage — firstSeenAt should match (not regenerated).
+  // Cache-hot path fires revalidation in the background, so wait for the
+  // enrichment to land before asserting.
+  const sw2 = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: adapter,
+  });
+  await sw2.ready;
+  for (let i = 0; i < 100 && captured.length < 2; i++) {
+    await tick();
+  }
+  expect(captured[1]!.appInstallDate).toBe(firstSeenISO);
+  await sw2.dispose();
+});
+
+test("entitlements.byProductIds: returns config-derived entitlements before any purchase", async () => {
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          buildId: "b1",
+          triggerOptions: [],
+          paywallResponses: [],
+          products: [
+            { id: "pro_yearly", entitlements: [{ id: "pro" }] },
+            { id: "vip", entitlements: [{ id: "pro" }, { id: "vip_only" }] },
+          ],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    if (url.includes("/api/v1/enrich"))
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+  });
+  await sw.ready;
+
+  const proOnly = sw.entitlements.byProductIds(["pro_yearly"]);
+  expect(proOnly.map((e) => e.id)).toEqual(["pro"]);
+  expect(proOnly[0]!.isActive).toBe(false); // not purchased
+
+  const vipBundle = sw.entitlements.byProductIds(["vip"]);
+  expect(vipBundle.map((e) => e.id).sort()).toEqual(["pro", "vip_only"]);
+
+  // Unknown productId → empty.
+  expect(sw.entitlements.byProductIds(["nope"])).toEqual([]);
+  await sw.dispose();
+});
+
+test("configure: POSTs confirm_assignments after eager assignment", async () => {
+  const calls: Array<{ url: string; body: string | undefined }> = [];
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push({ url, body: init?.body as string | undefined });
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          buildId: "b1",
+          triggerOptions: [
+            {
+              placementName: "checkout",
+              rules: [
+                {
+                  expression: "",
+                  experiment: {
+                    id: "exp_checkout_0",
+                    groupId: "grp",
+                    variants: [
+                      { id: "v_a", type: "treatment", paywallId: "pw_a" },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+          paywallResponses: [],
+          products: [],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    if (url.includes("/api/v1/enrich"))
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+  });
+  await sw.ready;
+
+  const confirmCall = calls.find((c) =>
+    c.url.includes("/api/v1/confirm_assignments"),
+  );
+  expect(confirmCall).toBeDefined();
+  const body = JSON.parse(confirmCall!.body!) as {
+    assignments: Array<{
+      experimentId: string;
+      variant: { id: string; type: string };
+    }>;
+  };
+  expect(body.assignments).toHaveLength(1);
+  expect(body.assignments[0]).toEqual({
+    experimentId: "exp_checkout_0",
+    variant: { id: "v_a", type: "treatment" },
+  });
+  await sw.dispose();
+});
+
+test("refreshConfiguration: re-fetches static_config and re-runs eager assignment", async () => {
+  let configCalls = 0;
+  const buildConfig = (buildId: string) =>
+    JSON.stringify({
+      buildId,
+      triggerOptions: [
+        {
+          placementName: "checkout",
+          rules: [
+            {
+              expression: "",
+              experiment: {
+                id: "exp_checkout_0",
+                groupId: "grp_test",
+                variants: [
+                  {
+                    id: `var_${buildId}`,
+                    type: "treatment",
+                    paywallId: `pw_${buildId}`,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+      paywallResponses: [
+        {
+          identifier: `pw_${buildId}`,
+          url: `https://paywalls.superwall.test/pw_${buildId}`,
+        },
+      ],
+      products: [],
+      toggles: [],
+      localization: { locales: [{ locale: "en-US" }] },
+    });
+
+  const fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      configCalls++;
+      return new Response(buildConfig(configCalls === 1 ? "v1" : "v2"));
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    }
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter: {
+      present: async () => ({ type: "declined" }),
+      dismiss: () => {},
+    },
+  });
+  await sw.ready;
+  expect(configCalls).toBe(1);
+
+  await sw.refreshConfiguration();
+  expect(configCalls).toBe(2);
+
+  // The fresh config carries pw_v2; verify register hits it.
+  const r = await sw.placements.register({ placement: "checkout" });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    expect(r.info.identifier).toBe("pw_v2");
+  }
+  await sw.dispose();
+});
+
+test("configure: cached config makes sw.ready resolve before a hanging fetch — register() can fire against cache", async () => {
   // Pre-seed storage with a cached config carrying the enableConfigRefresh
   // toggle. On configure(), the fetch deadline should fire (1s) and the
   // cached config stays in place — `register()` must resolve to the

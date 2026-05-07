@@ -33,17 +33,22 @@ export const useSuperwall = (): Superwall => useSuperwallContext();
 // ---------------------------------------------------------------------------
 
 /**
- * Subscribe to a `Readable<T>` and re-render on change. The Readable
- * contract guarantees (a) sync-on-attach (so the initial snapshot is the
- * current value), (b) ===-stable references between change notifications
- * (so React doesn't infinite-render). See API.md §2 normative contract.
+ * Subscribe to a `Readable<T>` and re-render on change. Stores the signal
+ * in a ref so an unstable `signal` identity per render doesn't cause
+ * `useSyncExternalStore` to re-subscribe on every render (which would
+ * spin into an infinite re-render loop). The ref always points at the
+ * latest signal; subscribe + getSnapshot read through it.
  */
-export const useSignal = <T,>(signal: Readable<T>): T =>
-  useSyncExternalStore(
-    useCallback((onChange) => signal.subscribe(() => onChange()), [signal]),
-    () => signal.value,
-    () => signal.value, // SSR snapshot — same as client; identity hydrates client-side
+export const useSignal = <T,>(signal: Readable<T>): T => {
+  const ref = useRef(signal);
+  ref.current = signal;
+  const subscribe = useCallback(
+    (onChange: () => void) => ref.current.subscribe(() => onChange()),
+    [],
   );
+  const getSnapshot = useCallback(() => ref.current.value, []);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+};
 
 // ---------------------------------------------------------------------------
 // useUser — flat view of the user namespace + bound methods
@@ -211,24 +216,51 @@ export const useSuperwallEvent = <K extends keyof AllSuperwallEvents>(
 
 // ---------------------------------------------------------------------------
 // useDelegate — install a global SuperwallDelegate for the lifetime of the
-// component. Detaches on unmount.
+// component. Multiple hooks can mount concurrently: each pushes onto a
+// per-instance stack. The active delegate is always the top; unmount pops
+// only the owner that pushed and re-installs whatever was below.
 // ---------------------------------------------------------------------------
+
+interface DelegateEntry {
+  readonly id: symbol;
+  readonly delegate: SuperwallDelegate | null;
+}
+
+const delegateStacks = new WeakMap<Superwall, DelegateEntry[]>();
+
+const applyTop = (sw: Superwall): void => {
+  const stack = delegateStacks.get(sw) ?? [];
+  const top = stack.length === 0 ? null : (stack[stack.length - 1]!.delegate);
+  sw.setDelegate(top);
+};
 
 export const useDelegate = (delegate: SuperwallDelegate | null): void => {
   const sw = useSuperwall();
   const ref = useRef(delegate);
   ref.current = delegate;
   useEffect(() => {
-    // Wrap so the active delegate always reads from the ref (latest).
-    const wrapped: SuperwallDelegate | null = ref.current === null
-      ? null
-      : new Proxy({} as SuperwallDelegate, {
-          get(_t, prop: string) {
-            const d = ref.current;
-            return d ? (d as Record<string, unknown>)[prop] : undefined;
-          },
-        });
-    sw.setDelegate(wrapped);
-    return () => sw.setDelegate(null);
+    const id = Symbol("useDelegate");
+    // Always read latest delegate from the ref so callbacks see the current
+    // closure values without re-mounting.
+    const wrapped: SuperwallDelegate | null =
+      ref.current === null
+        ? null
+        : new Proxy({} as SuperwallDelegate, {
+            get(_t, prop: string) {
+              const d = ref.current;
+              return d ? (d as Record<string, unknown>)[prop] : undefined;
+            },
+          });
+    const stack = delegateStacks.get(sw) ?? [];
+    stack.push({ id, delegate: wrapped });
+    delegateStacks.set(sw, stack);
+    applyTop(sw);
+    return () => {
+      const current = delegateStacks.get(sw) ?? [];
+      const next = current.filter((e) => e.id !== id);
+      if (next.length === 0) delegateStacks.delete(sw);
+      else delegateStacks.set(sw, next);
+      applyTop(sw);
+    };
   }, [sw]);
 };

@@ -1,12 +1,6 @@
-// Module-level "default instance" registry + tree-shakeable named-export
-// proxies. Per API.md §2.7.
-//
-// First `createSuperwall(...)` call registers itself as the default; that
-// instance's `dispose()` clears the registry. Named exports (`user`,
-// `placements`, `purchases`, `entitlements`, `events`) lazily delegate to
-// whatever the default is at the time the method is *called* (not when it
-// is destructured) — so `const { identify } = user; await identify("u1")`
-// works as long as `createSuperwall` has run by the time `identify` fires.
+// Module-level default-instance registry + lazy named-export proxies. First
+// `createSuperwall(...)` wins; its `dispose()` clears the registry. Proxies
+// resolve the default at call time, not at destructure time.
 
 import { NoDefaultSuperwallError } from "./errors.ts";
 import type { Readable } from "./signal.ts";
@@ -16,7 +10,7 @@ let _default: Superwall | null = null;
 
 /** Internal — invoked by `createSuperwall` on first construction. */
 export const _registerDefault = (sw: Superwall): void => {
-  if (_default !== null) return; // first-wins; subsequent createSuperwall calls don't replace
+  if (_default !== null) return; // first-wins
   _default = sw;
 };
 
@@ -25,16 +19,12 @@ export const _clearDefault = (sw: Superwall): void => {
   if (_default === sw) _default = null;
 };
 
-/** Test-only — force-clear the default registry. Bun runs files in parallel
- *  in the same process, so module-level state can leak between test suites
- *  unless each suite resets in `beforeEach`. Not part of the public API. */
+/** Test-only — force-clear the default registry. Not part of the public API. */
 export const _resetDefaultForTests = (): void => {
   _default = null;
 };
 
-/** Public: get the default instance, or throw if none. Useful for advanced
- *  consumers that want explicit access (e.g. SSR code with multiple
- *  conditional instances). */
+/** Get the default instance, or throw if none has been created. */
 export const getDefaultSuperwall = (): Superwall => {
   if (_default === null) throw new NoDefaultSuperwallError();
   return _default;
@@ -42,13 +32,8 @@ export const getDefaultSuperwall = (): Superwall => {
 
 const requireDefault = (): Superwall => getDefaultSuperwall();
 
-// ---------------------------------------------------------------------------
-// Lazy Readable<T> proxy — `.value` and `.subscribe()` defer to the current
-// default instance's underlying signal at call time. The Readable contract
-// is preserved (sync-on-attach, ===-stable .value, microtask coalescing)
-// because we delegate to the real signal which honors all of those.
-// ---------------------------------------------------------------------------
-
+// Lazy Readable<T> proxy — defers `.value` and `.subscribe()` to the current
+// default instance's signal at call time.
 const lazyReadable = <T>(get: () => Readable<T>): Readable<T> => ({
   get value() {
     return get().value;
@@ -58,14 +43,8 @@ const lazyReadable = <T>(get: () => Readable<T>): Readable<T> => ({
   },
 });
 
-// ---------------------------------------------------------------------------
-// Namespaces
-// ---------------------------------------------------------------------------
-
-// Promise-returning proxies: `async` so `requireDefault()` throwing sync
-// surfaces as a rejected Promise (consumers can `await ... .catch(...)`
-// rather than wrap in try/catch). Sync proxies throw normally — that's
-// the right shape for void-returning methods.
+// Promise-returning proxies are `async` so a missing-default throw surfaces
+// as a rejected Promise. Sync proxies throw normally.
 
 export const user = {
   identify: async (...args: Parameters<Superwall["user"]["identify"]>) =>
@@ -80,8 +59,6 @@ export const user = {
     ...args: Parameters<Superwall["user"]["setIntegrationAttributes"]>
   ) => requireDefault().user.setIntegrationAttributes(...args),
 
-  // Lazy Readables — `.value` throws sync if no default; `subscribe` defers
-  // to the underlying signal which honors the §2 contract.
   id: lazyReadable(() => requireDefault().user.id),
   aliasId: lazyReadable(() => requireDefault().user.aliasId),
   effectiveId: lazyReadable(() => requireDefault().user.effectiveId),

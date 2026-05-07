@@ -1,10 +1,6 @@
-// Internal → public error translation.
-//
-// Internals throw Schema.TaggedError variants for clean Effect.catchTag
-// ergonomics. At every public API surface (Promise-returning façade) we
-// catch those and rethrow the documented public TS classes from §10.7.
-// Consumers `catch (e) { if (e instanceof StorageError) ... }` and never
-// see a `_tag` field or any Effect convention.
+// Internal → public error translation. Called at every Promise-returning
+// façade so consumers only ever see the documented public error classes —
+// never a `_tag` field or any Effect convention.
 
 import {
   ConfigurationFetchError,
@@ -16,10 +12,9 @@ import {
 } from "../errors.ts";
 import * as Internal from "./errors.ts";
 
-/** Translate any internal tagged error to its public counterpart. Unknown
- *  errors pass through (caller chooses to wrap or not). */
+/** Translate an internal tagged error to its public counterpart. Unknown
+ *  errors pass through. */
 export const translateInternalError = (cause: unknown): unknown => {
-  // Internal storage errors → public StorageError (cause-wrap)
   if (
     cause instanceof Internal.StorageGetError ||
     cause instanceof Internal.StorageSetError ||
@@ -29,7 +24,6 @@ export const translateInternalError = (cause: unknown): unknown => {
     return new StorageError(cause.message, asError(cause.cause));
   }
 
-  // Internal network errors → public NetworkError
   if (cause instanceof Internal.NetworkRequestError) {
     return new NetworkError(cause.message, cause.status, asError(cause.cause));
   }
@@ -37,15 +31,13 @@ export const translateInternalError = (cause: unknown): unknown => {
     return new NetworkError(cause.message, undefined, asError(cause.cause));
   }
 
-  // Identity not hydrated typically means "called before sw.ready"
+  // Not-hydrated typically means "called before sw.ready".
   if (cause instanceof Internal.IdentityNotHydratedError) {
     return new NotConfiguredError();
   }
   if (cause instanceof Internal.IdentityHydrationError) {
     return new ConfigurationFetchError(asError(cause.cause) ?? new Error(cause.message), 1);
   }
-  // Config parse failure is "the BE returned config we couldn't make sense of"
-  // — surface as a ConfigurationFetchError rather than a generic Error.
   if (cause instanceof Internal.ConfigParseError) {
     return new ConfigurationFetchError(
       asError(cause.cause) ?? new Error(cause.message),
@@ -53,7 +45,6 @@ export const translateInternalError = (cause: unknown): unknown => {
     );
   }
 
-  // Already a public SuperwallError? leave it.
   if (cause instanceof SuperwallError) return cause;
 
   // Wrap arbitrary thrown values so consumers always catch an Error subclass.

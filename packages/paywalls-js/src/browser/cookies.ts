@@ -1,8 +1,4 @@
-// Tiny cookie helpers. Public StorageAdapter does NOT touch cookies — the
-// adapter built by `createBrowserStorage` mirrors a small subset of identity
-// keys to cookies for SSR / cross-origin readability per API.md §7.4.
-//
-// All functions are no-ops when `document` is undefined (SSR).
+// Tiny cookie helpers. All functions are no-ops when `document` is undefined (SSR).
 
 export interface CookieWriteOptions {
   /** Cookie domain (e.g. `.example.com`). Default: current host. */
@@ -25,7 +21,6 @@ const hasDocument = (): boolean =>
 export const readCookie = (name: string): string | null => {
   if (!hasDocument()) return null;
   const prefix = `${name}=`;
-  // `document.cookie` is `name=value; name=value` — split + trim.
   for (const part of document.cookie.split(";")) {
     const trimmed = part.trim();
     if (trimmed.startsWith(prefix)) {
@@ -66,9 +61,7 @@ export const deleteCookie = (
 ): void => {
   if (!hasDocument()) return;
   // Browsers require `Secure` + `SameSite` to MATCH the original Set-Cookie
-  // for the deletion to actually take effect (especially `SameSite=None`).
-  // Pass through whatever the caller wrote with so cookies set by
-  // `BrowserStorage` clean up reliably on Safari + Chrome.
+  // for deletion to take effect (especially `SameSite=None` on Safari/Chrome).
   const parts: string[] = [
     `${name}=`,
     `Path=${options.path ?? "/"}`,

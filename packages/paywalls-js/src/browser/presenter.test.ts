@@ -85,6 +85,203 @@ test("test mode flips debug=true in the iframe URL", async () => {
   await presentation;
 });
 
+test("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.bootstrap is set", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_b"),
+    newCtx({
+      bootstrap: {
+        apiKey: "pk_test_123",
+        appUserId: "user_42",
+        aliasId: "alias_xyz",
+        email: "u@example.test",
+        deviceId: "11111111-1111-1111-1111-111111111111",
+        hostOrigin: "https://merchant.test",
+        sdkVersion: "1.2.3",
+        clientSurface: "web-sdk",
+      },
+    }),
+  );
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const url = new URL(iframe.src);
+  expect(url.searchParams.get("api_key")).toBe("pk_test_123");
+  expect(url.searchParams.get("app_user_id")).toBe("user_42");
+  expect(url.searchParams.get("alias_id")).toBe("alias_xyz");
+  expect(url.searchParams.get("email")).toBe("u@example.test");
+  expect(url.searchParams.get("device_id")).toBe(
+    "11111111-1111-1111-1111-111111111111",
+  );
+  expect(url.searchParams.get("host_origin")).toBe("https://merchant.test");
+  expect(url.searchParams.get("sdk_version")).toBe("1.2.3");
+  expect(url.searchParams.get("client_surface")).toBe("web-sdk");
+
+  // iframe `allow` attr enables Apple/Google Pay inside the nested Stripe iframe.
+  expect(iframe.allow).toContain("payment *");
+  expect(iframe.allow).toContain("publickey-credentials-get *");
+
+  presenter.dismiss();
+  await presentation;
+});
+
+test("post_checkout_complete enriches transaction_complete with currency / value / transaction_id", async () => {
+  const emitted: Array<[string, Record<string, unknown>]> = [];
+  const presenter = createBrowserPresenter();
+  const info = stubInfo("pw_pcr");
+  const ctx = newCtx({
+    emit: (name, detail) => emitted.push([name as string, detail as Record<string, unknown>]),
+  });
+  const presentation = presenter.present(info, ctx);
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const origin = new URL(iframe.src).origin;
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        version: 1,
+        payload: {
+          events: [
+            {
+              event_name: "post_checkout_complete",
+              checkout_context_id: "ckctx_x",
+              product_identifier: "pro_yearly",
+              transactionData: {
+                transactionId: "tx_revenue",
+                productIdentifier: "pro_yearly",
+                currency: "EUR",
+                value: 49.5,
+              },
+            },
+          ],
+        },
+      },
+      origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+
+  await presentation;
+  const tc = emitted.find(([n]) => n === "transaction_complete");
+  expect(tc).toBeDefined();
+  expect(tc![1]["transaction_id"]).toBe("tx_revenue");
+  expect(tc![1]["currency"]).toBe("EUR");
+  expect(tc![1]["value"]).toBe(49.5);
+});
+
+test("redirect_required calls window.open and emits paywallWillOpenURL", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const opens: string[] = [];
+  const originalOpen = globalThis.open;
+  // happy-dom's window.open returns null and triggers navigation; stub it.
+  (globalThis as { open?: unknown }).open = (url: string) => {
+    opens.push(url);
+    return null;
+  };
+  try {
+    const presenter = createBrowserPresenter();
+    const info = stubInfo("pw_redir");
+    const ctx = newCtx({
+      emit: (name, detail) => emitted.push([name as string, detail]),
+    });
+    const presentation = presenter.present(info, ctx);
+    await tick();
+
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    const origin = new URL(iframe.src).origin;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          version: 1,
+          payload: {
+            events: [
+              { event_name: "redirect_required", url: "https://stripe.com/checkout/abc" },
+            ],
+          },
+        },
+        origin,
+        source: iframe.contentWindow,
+      } as MessageEventInit),
+    );
+    await flushMessages();
+    expect(opens).toEqual(["https://stripe.com/checkout/abc"]);
+    expect(emitted.find(([n]) => n === "paywallWillOpenURL")).toBeDefined();
+    presenter.dismiss();
+    await presentation;
+  } finally {
+    (globalThis as { open?: unknown }).open = originalOpen;
+  }
+});
+
+test("post_checkout_complete resolves purchased + emits transaction_complete and routes via onPurchaseEvent", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const purchaseEvents: unknown[] = [];
+  const presenter = createBrowserPresenter();
+  const info = stubInfo("pw_pc");
+  const ctx = newCtx({
+    emit: (name, detail) => emitted.push([name as string, detail]),
+    onPurchaseEvent: (ev) => purchaseEvents.push(ev),
+  });
+  const presentation = presenter.present(info, ctx);
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const origin = new URL(iframe.src).origin;
+  // Simulate the paywall iframe posting `post_checkout_complete`.
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        version: 1,
+        payload: {
+          events: [
+            {
+              event_name: "post_checkout_complete",
+              checkout_context_id: "ckctx_42",
+              product_identifier: "pro_yearly",
+              transactionData: {
+                transactionId: "tx_abc",
+                productIdentifier: "pro_yearly",
+                currency: "USD",
+                value: 99.99,
+              },
+              redirectUrl: "https://merchant.test/thanks",
+            },
+          ],
+        },
+      },
+      origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+
+  const r = await presentation;
+  expect(r.type).toBe("purchased");
+  if (r.type === "purchased") {
+    expect(r.productId).toBe("pro_yearly");
+  }
+  // Surfaced lifecycle.
+  expect(emitted.map(([n]) => n)).toContain("transaction_complete");
+  expect(emitted.map(([n]) => n)).toContain("subscription_start");
+  expect(emitted.map(([n]) => n)).toContain("paywallWillOpenURL");
+  // Internal channel saw the postCheckout event with the transaction data.
+  const pc = purchaseEvents.find(
+    (e) => (e as { type: string }).type === "postCheckout",
+  ) as
+    | undefined
+    | {
+        type: string;
+        productId: string;
+        checkoutContextId: string;
+        transactionData?: { transactionId: string };
+        redirectUrl?: string;
+      };
+  expect(pc).toBeDefined();
+  expect(pc!.checkoutContextId).toBe("ckctx_42");
+  expect(pc!.transactionData?.transactionId).toBe("tx_abc");
+  expect(pc!.redirectUrl).toBe("https://merchant.test/thanks");
+});
+
 test("custom container option mounts the overlay there instead of body", async () => {
   const host = document.createElement("section");
   host.id = "custom-host";
@@ -431,4 +628,23 @@ test("closeOnBackdrop=false does NOT dismiss on backdrop click", async () => {
   expect(document.querySelector("iframe")).not.toBeNull();
   presenter.dismiss();
   await presentation;
+});
+
+test("preload(): mounts a hidden iframe and removes it after load", async () => {
+  const presenter = createBrowserPresenter();
+  const info = {
+    ...stubInfo("pw_warm"),
+  };
+  const done = presenter.preload!(info);
+  const preloadFrame = document.querySelector(
+    'iframe[data-sw-preload="pw_warm"]',
+  ) as HTMLIFrameElement | null;
+  expect(preloadFrame).not.toBeNull();
+  expect(preloadFrame!.style.opacity).toBe("0");
+  // Simulate load → cleanup runs.
+  preloadFrame!.dispatchEvent(new Event("load"));
+  await done;
+  expect(
+    document.querySelector('iframe[data-sw-preload="pw_warm"]'),
+  ).toBeNull();
 });

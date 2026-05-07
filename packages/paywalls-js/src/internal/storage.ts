@@ -1,10 +1,8 @@
-// Internal storage service. Wraps a public StorageAdapter (sync-or-async
-// JS interface) into an Effect.Service whose methods take branded
-// StorageKey and return tagged-error Effects.
-//
-// Default Layer: in-memory adapter (zero-config for tests / Node / edge).
-// Browser Layer ships from /browser via createBrowserStorage().
-// Custom adapters: `StorageService.fromAdapter(myAdapter)`.
+// Wraps a public StorageAdapter (sync-or-async) into an Effect.Service
+// whose methods take branded StorageKey and return tagged-error Effects.
+// Default Layer is in-memory (tests / Node / edge); browser Layer ships
+// from /browser via createBrowserStorage(); custom adapters via
+// `StorageService.fromAdapter(myAdapter)`.
 
 import { Effect, Layer } from "effect";
 import type { StorageAdapter } from "../types.ts";
@@ -83,8 +81,8 @@ const make = (adapter: StorageAdapter) => {
     );
   });
 
-  // `clear` is optional on the public adapter; if missing we fail with a
-  // tagged error rather than silently no-op.
+  // `clear` is optional on the adapter; absence fails with a tagged error
+  // rather than a silent no-op.
   const clear = Effect.fn("StorageService.clear")(function* () {
     if (!adapter.clear) {
       return yield* Effect.fail(

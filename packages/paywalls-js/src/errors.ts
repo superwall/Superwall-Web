@@ -13,7 +13,8 @@ export type SuperwallErrorCode =
   | "NETWORK"
   | "CONFIG_FETCH"
   | "PRESENTER"
-  | "STORAGE";
+  | "STORAGE"
+  | "PAYWALL_NOT_AVAILABLE";
 
 export class SuperwallError extends Error {
   override readonly name: string = "SuperwallError";
@@ -108,6 +109,21 @@ export class PresenterError extends SuperwallError {
   constructor(message: string, cause?: Error) {
     super(message, "PRESENTER");
     if (cause !== undefined) this.cause = cause;
+  }
+}
+
+export class PaywallNotAvailableError extends SuperwallError {
+  override readonly name = "PaywallNotAvailableError";
+  readonly placement: string;
+  readonly reason: "no_config" | "no_paywall_in_config" | "no_paywall_id_on_variant";
+
+  constructor(placement: string, reason: PaywallNotAvailableError["reason"]) {
+    super(
+      `No paywall available for "${placement}" (${reason}).`,
+      "PAYWALL_NOT_AVAILABLE",
+    );
+    this.placement = placement;
+    this.reason = reason;
   }
 }
 

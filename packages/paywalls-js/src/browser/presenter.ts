@@ -1,21 +1,5 @@
 // `createBrowserPresenter` — default `PaywallPresenter` for the browser.
-//
-// Mounts an iframe overlay (modal or fullscreen), bridges the v1
-// `postMessage` contract from API.md §7.2, and resolves `present()` when
-// the user dismisses or completes a purchase.
-//
-// v0 alpha intentionally implements a subset of inbound message types:
-//   ping → reply with templates (empty stub for v0)
-//   template_params_and_user_attributes → same templates bundle as ping
-//   close → resolve as { type: "declined" }
-//   restore → resolve as { type: "restored" }
-//   restore_failed → no-op (logged future)
-//   purchase → test-mode confirm OR observer-mode emit
-//   open_url_external → window.open in a new tab
-//
-// Deferred to v1: request_callback / request_permission correlation,
-// page_view, haptic_feedback, schedule_notification, request_store_review,
-// HTML substitutions, real product hydration in the templates bundle.
+// Mounts an iframe overlay and bridges the v1 postMessage contract (API.md §7.2).
 
 import type {
   PaywallInfo,
@@ -23,17 +7,14 @@ import type {
   Product,
 } from "../types.ts";
 import type {
+  PaywallBootstrap,
   PaywallPresenter,
   PresentationContext,
 } from "../presenter.ts";
 
-// ---------------------------------------------------------------------------
-// Public options
-// ---------------------------------------------------------------------------
-
 export interface BrowserPresenterOptions {
   /** "modal" centers the iframe with a backdrop; "fullscreen" fills the
-   *  viewport. Default: "modal". `"inline"` is deferred past v0. */
+   *  viewport. Default: "modal". */
   presentation?: "modal" | "fullscreen";
   /** Where to mount the overlay portal. Default: `document.body`. */
   container?: HTMLElement | (() => HTMLElement);
@@ -45,22 +26,15 @@ export interface BrowserPresenterOptions {
    *  product. Resolve with `"purchased"` to simulate a successful purchase
    *  or `"declined"` to cancel. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
-  /** Whether the SDK is in test mode. The factory takes this directly so
-   *  the presenter can intercept purchase clicks accordingly. Defaults to
-   *  false; the public Superwall instance toggles it via options. */
+  /** Whether the SDK is in test mode; intercepts purchase clicks. Default: false. */
   testMode?: boolean;
 }
-
-// ---------------------------------------------------------------------------
-// Presenter factory
-// ---------------------------------------------------------------------------
 
 const DEFAULT_Z_INDEX = 2147483000;
 
 export const createBrowserPresenter = (
   options: BrowserPresenterOptions = {},
 ): PaywallPresenter => {
-  // State for the in-flight presentation.
   let active: ActivePresentation | null = null;
 
   const present: PaywallPresenter["present"] = (info, ctx) => {
@@ -70,13 +44,13 @@ export const createBrowserPresenter = (
       );
     }
     if (active !== null) {
-      // Core enforces the single-paywall invariant before reaching here, but
-      // a custom caller could bypass; reject defensively.
+      // Defensive — core normally enforces the single-paywall invariant.
       return Promise.reject(
         new Error("BrowserPresenter is already presenting a paywall"),
       );
     }
 
+    warnHostPolicyOnce(ctx);
     return new Promise<PaywallResult>((resolve, reject) => {
       const onTearDown = (a: ActivePresentation) => {
         if (active === a) active = null;
@@ -90,7 +64,7 @@ export const createBrowserPresenter = (
         onTearDown,
       );
       active = a;
-      // External abort (sw.dismiss / sw.dispose) → tear down + resolve declined.
+      // sw.dismiss / sw.dispose → tear down and resolve declined.
       const onAbort = () => {
         if (active === a) {
           active = null;
@@ -110,12 +84,58 @@ export const createBrowserPresenter = (
     a.resolve({ type: "declined" });
   };
 
-  return { present, dismiss };
-};
+  /** Warm a paywall by firing a hidden iframe. The iframe is removed once
+   *  the URL has loaded — bytes stay in the browser HTTP cache so the next
+   *  `present(info)` for the same URL avoids the network round-trip.
+   *  No-op on SSR. iOS Safari throttles hidden iframes; cache warming is
+   *  best-effort there. */
+  const preload: NonNullable<PaywallPresenter["preload"]> = (info) =>
+    new Promise<void>((resolve) => {
+      if (typeof document === "undefined") {
+        resolve();
+        return;
+      }
+      const url = buildPaywallUrl(info, options.testMode === true, undefined);
+      const iframe = document.createElement("iframe");
+      iframe.dataset["swPreload"] = info.identifier;
+      iframe.setAttribute("aria-hidden", "true");
+      iframe.tabIndex = -1;
+      Object.assign(iframe.style, {
+        position: "absolute",
+        width: "1px",
+        height: "1px",
+        opacity: "0",
+        pointerEvents: "none",
+        border: "0",
+        left: "-9999px",
+        top: "-9999px",
+      });
+      let settled = false;
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        try {
+          iframe.remove();
+        } catch {}
+        resolve();
+      };
+      iframe.addEventListener("load", cleanup, { once: true });
+      iframe.addEventListener("error", cleanup, { once: true });
+      // Hard cap so a never-loading iframe doesn't leak.
+      setTimeout(cleanup, 8_000);
+      iframe.src = url;
+      try {
+        (options.container && typeof options.container !== "function"
+          ? options.container
+          : document.body
+        ).appendChild(iframe);
+      } catch {
+        cleanup();
+      }
+    });
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
+  return { present, dismiss, preload };
+};
 
 interface ActivePresentation {
   readonly overlay: HTMLDivElement;
@@ -137,20 +157,87 @@ const resolveContainer = (
   return document.body;
 };
 
-/** Append §7.3 query params to the paywall URL. User context (alias, userId,
- *  locale, etc.) is injected post-load via `paywall.accept64`, not in the URL. */
-const buildPaywallUrl = (info: PaywallInfo, debug: boolean): string => {
-  try {
-    const url = new URL(info.url);
+/** Append §7.3 query params + identity bootstrap. User context is also
+ *  re-injected post-load via `paywall.accept64`; the URL params are what
+ *  the SSR loader uses to mint the placement session token AND what the
+ *  paywall server uses to switch routing (`client_surface=web-sdk`). */
+const buildPaywallUrl = (
+  info: PaywallInfo,
+  debug: boolean,
+  bootstrap: PaywallBootstrap | undefined,
+): string => {
+  const apply = (url: URL) => {
     url.searchParams.set("platform", "web");
     url.searchParams.set("transport", "web");
     url.searchParams.set("debug", debug ? "true" : "false");
+    if (bootstrap) {
+      url.searchParams.set("api_key", bootstrap.apiKey);
+      url.searchParams.set("client_surface", bootstrap.clientSurface);
+      url.searchParams.set("sdk_version", bootstrap.sdkVersion);
+      if (bootstrap.appUserId) {
+        url.searchParams.set("app_user_id", bootstrap.appUserId);
+      }
+      if (bootstrap.aliasId) {
+        url.searchParams.set("alias_id", bootstrap.aliasId);
+      }
+      if (bootstrap.email) {
+        url.searchParams.set("email", bootstrap.email);
+      }
+      if (bootstrap.deviceId) {
+        url.searchParams.set("device_id", bootstrap.deviceId);
+      }
+      if (bootstrap.hostOrigin) {
+        url.searchParams.set("host_origin", bootstrap.hostOrigin);
+      }
+    }
+  };
+  try {
+    const url = new URL(info.url);
+    apply(url);
     return url.toString();
   } catch {
-    // If `info.url` isn't parseable, fall back to a naive concat.
+    // Relative or malformed URL — fall back to manual append. Best-effort,
+    // skip bootstrap to avoid double-encoding edge cases.
     const sep = info.url.includes("?") ? "&" : "?";
     return `${info.url}${sep}platform=web&transport=web&debug=${debug ? "true" : "false"}`;
   }
+};
+
+/** One-time dev-mode advisory: browsers can't expose top-frame
+ *  Permissions-Policy / CSP headers via JS, so this is informational
+ *  rather than a real check. Surface the merchant-side requirements
+ *  so they can wire them up. Skipped in test mode and after the first
+ *  call. No-op outside a browser. */
+let _hostPolicyWarned = false;
+const warnHostPolicyOnce = (ctx: PresentationContext): void => {
+  if (_hostPolicyWarned) return;
+  _hostPolicyWarned = true;
+  if (typeof console === "undefined" || typeof window === "undefined") return;
+  const tenant = (() => {
+    try {
+      return new URL(ctx.bootstrap?.hostOrigin ?? window.location.href).host;
+    } catch {
+      return "your tenant";
+    }
+  })();
+  const paywallOrigin = "https://*.superwall.app";
+  // Group header so it's collapsible — keeps the console clean for everyone
+  // not chasing checkout setup issues.
+  try {
+    console.groupCollapsed(
+      "[Superwall] Web SDK host policy checklist (info; cannot be auto-verified)",
+    );
+    console.info(
+      `Permissions-Policy: payment=(self "${paywallOrigin}")`,
+    );
+    console.info(
+      `Content-Security-Policy: frame-src ${paywallOrigin} https://js.stripe.com https://hooks.stripe.com; script-src https://js.stripe.com; connect-src https://api.stripe.com https://m.stripe.network ${paywallOrigin}`,
+    );
+    console.info(
+      `Tenant: ${tenant} — required for Apple Pay / Google Pay inside the embedded checkout iframe.`,
+    );
+    console.groupEnd();
+  } catch {}
 };
 
 const originOf = (urlStr: string): string => {
@@ -187,15 +274,22 @@ const mount = (
 
   const iframe = document.createElement("iframe");
   iframe.dataset["swPresenter"] = "iframe";
-  iframe.allow = "payment";
-  iframe.src = buildPaywallUrl(info, options.testMode === true);
+  // `payment *` (wildcard scope) is required for the nested Stripe iframe
+  // to render Apple/Google Pay sheets. `publickey-credentials-get *` enables
+  // passkey-based Link autofill where supported.
+  iframe.allow = "payment *; publickey-credentials-get *";
+  iframe.src = buildPaywallUrl(info, options.testMode === true, ctx.bootstrap);
   Object.assign(iframe.style, {
     border: "0",
     background: "transparent",
-    width: isModal ? "min(420px, 96vw)" : "100vw",
-    height: isModal ? "min(640px, 96vh)" : "100vh",
+    // Modal: tall sheet sized for typical paywall content. Was 420x640;
+    // most production paywalls bottom-out around 1100px tall on desktop
+    // and need at least ~480px wide for product cards to lay out.
+    width: isModal ? "min(480px, 96vw)" : "100vw",
+    height: isModal ? "min(900px, 96vh)" : "100vh",
     borderRadius: isModal ? "12px" : "0",
     boxShadow: isModal ? "0 16px 48px rgba(0,0,0,0.32)" : "none",
+    display: "block",
   });
   overlay.appendChild(iframe);
 
@@ -204,9 +298,7 @@ const mount = (
 
   const paywallOrigin = originOf(iframe.src);
 
-  // We have to allocate `a` after we wire the listeners (they reference
-  // it for cleanup), but `mount` returns it for the factory's own
-  // bookkeeping. Use a forward ref via an object slot.
+  // Forward ref: listeners need `a` before it's constructed.
   const slot: { a: ActivePresentation | null } = { a: null };
 
   const cleanupOnce = () => {
@@ -220,7 +312,6 @@ const mount = (
   if (isModal && closeOnBackdrop) {
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay && slot.a) {
-        // Equivalent to a `close` postMessage from the paywall.
         const a = slot.a;
         cleanupOnce();
         a.resolve({ type: "declined" });
@@ -228,7 +319,6 @@ const mount = (
     });
   }
 
-  // postMessage bridge — listen for paywall→SDK v1 envelopes.
   const messageListener = (event: MessageEvent) => {
     if (!slot.a) return;
     if (event.source !== iframe.contentWindow) return;
@@ -243,8 +333,7 @@ const mount = (
       slot.a,
     );
   };
-  // Listen on `globalThis` rather than `window` so this works under
-  // happy-dom / Node-with-DOM-polyfill / RN Web. They're the same in browsers.
+  // `globalThis` instead of `window` so this works under happy-dom / RN Web.
   (globalThis as unknown as EventTarget).addEventListener(
     "message",
     messageListener as EventListener,
@@ -268,24 +357,87 @@ const tearDown = (a: ActivePresentation) => {
       "message",
       a.messageListener as EventListener,
     );
-  } catch {
-    /* ignore */
-  }
+  } catch {}
   try {
     a.overlay.remove();
-  } catch {
-    /* ignore */
-  }
+  } catch {}
 };
 
-// ---------------------------------------------------------------------------
 // Inbound v1 envelope handling — see API.md §7.2
-// ---------------------------------------------------------------------------
 
 interface V1Envelope {
   version?: number;
   payload?: { events?: ReadonlyArray<{ event_name?: string; [k: string]: unknown }> };
 }
+
+const readString = (
+  evt: { [k: string]: unknown },
+  key: string,
+): string | null => (typeof evt[key] === "string" ? (evt[key] as string) : null);
+
+const readTransactionData = (
+  evt: { [k: string]: unknown },
+):
+  | {
+      transactionId: string;
+      productIdentifier: string;
+      currency?: string;
+      value?: number;
+    }
+  | undefined => {
+  const td = evt["transactionData"];
+  if (!td || typeof td !== "object") return undefined;
+  const obj = td as Record<string, unknown>;
+  if (
+    typeof obj["transactionId"] !== "string" ||
+    typeof obj["productIdentifier"] !== "string"
+  ) {
+    return undefined;
+  }
+  const out: {
+    transactionId: string;
+    productIdentifier: string;
+    currency?: string;
+    value?: number;
+  } = {
+    transactionId: obj["transactionId"],
+    productIdentifier: obj["productIdentifier"],
+  };
+  if (typeof obj["currency"] === "string") out.currency = obj["currency"];
+  if (typeof obj["value"] === "number") out.value = obj["value"];
+  return out;
+};
+
+const readTransactionField = (
+  evt: { [k: string]: unknown },
+  key: "productIdentifier" | "transactionId",
+): string | null => {
+  const td = evt["transactionData"];
+  if (!td || typeof td !== "object") return null;
+  const v = (td as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : null;
+};
+
+const readEntitlements = (
+  evt: { [k: string]: unknown },
+): ReadonlyArray<{ id: string; productIds?: string[] }> | undefined => {
+  const raw = evt["entitlements"];
+  if (!Array.isArray(raw)) return undefined;
+  const out: Array<{ id: string; productIds?: string[] }> = [];
+  for (const e of raw) {
+    if (e && typeof e === "object" && typeof (e as { id?: unknown }).id === "string") {
+      const entry: { id: string; productIds?: string[] } = {
+        id: (e as { id: string }).id,
+      };
+      const pids = (e as { productIds?: unknown }).productIds;
+      if (Array.isArray(pids)) {
+        entry.productIds = pids.filter((p): p is string => typeof p === "string");
+      }
+      out.push(entry);
+    }
+  }
+  return out;
+};
 
 const handleInbound = (
   data: unknown,
@@ -299,7 +451,7 @@ const handleInbound = (
   const env = data as V1Envelope;
   if (!env || typeof env !== "object") return;
   const version = env.version ?? 1;
-  if (version !== 1) return; // unknown future version — drop
+  if (version !== 1) return;
   const events = env.payload?.events;
   if (!Array.isArray(events)) return;
 
@@ -311,10 +463,7 @@ const handleInbound = (
     switch (name) {
       case "ping":
       case "template_params_and_user_attributes": {
-        // Both messages request the templates bundle (params + user/device
-        // attributes + products). Android answers identically — see
-        // `PaywallMessageHandler.passTemplatesToWebView`.
-        sendTemplatesStub(ctx, active);
+        sendTemplates(info, ctx, active);
         break;
       }
       case "close": {
@@ -323,7 +472,6 @@ const handleInbound = (
         return;
       }
       case "restore": {
-        // Stub — real restore goes through PurchaseController. Emit lifecycle.
         ctx.emit("restore_start", {});
         ctx.emit("restore_complete", {});
         cleanup();
@@ -332,7 +480,7 @@ const handleInbound = (
       }
       case "restore_failed": {
         ctx.emit("restore_fail", { reason: String((evt as { reason?: unknown }).reason ?? "") });
-        // Don't dismiss — the paywall stays open per Android behavior.
+        // Stay open on failure.
         break;
       }
       case "purchase": {
@@ -346,7 +494,6 @@ const handleInbound = (
           typeof evt["should_dismiss"] === "boolean"
             ? (evt["should_dismiss"] as boolean)
             : true;
-        // Build a stub Product. Real product hydration lands with config.
         const product: Product = {
           id: productIdentifier,
           store: "stripe", // TODO: derive from config
@@ -354,6 +501,131 @@ const handleInbound = (
         };
         handlePurchase(product, options, info, ctx, shouldDismiss, resolve, cleanup);
         return;
+      }
+      // Stripe checkout lifecycle from the paywall iframe's WebCheckoutController.
+      // Routed internally via ctx.onPurchaseEvent → SDK PurchaseController.
+      // Not surfaced as public events.
+      case "stripe_checkout_start": {
+        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        ctx.onPurchaseEvent?.({ type: "start", productId });
+        break;
+      }
+      case "stripe_checkout_submit": {
+        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        ctx.onPurchaseEvent?.({ type: "submit", productId });
+        break;
+      }
+      case "stripe_checkout_complete": {
+        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        const sessionId = readString(evt, "session_id") ?? readString(evt, "checkout_session_id");
+        const entitlements = readEntitlements(evt);
+        ctx.onPurchaseEvent?.({
+          type: "complete",
+          productId,
+          ...(sessionId !== null && { sessionId }),
+          ...(entitlements && { entitlements }),
+        });
+        break;
+      }
+      case "stripe_checkout_fail": {
+        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        const error = readString(evt, "error") ?? readString(evt, "message");
+        ctx.onPurchaseEvent?.({
+          type: "fail",
+          productId,
+          ...(error !== null && { error }),
+        });
+        break;
+      }
+      case "stripe_checkout_abandon": {
+        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        ctx.onPurchaseEvent?.({ type: "abandon", productId });
+        break;
+      }
+      // Terminal success signal from the paywall's WebPaywallController on
+      // the `client_surface=web-sdk` branch — the controller has finished
+      // its post-checkout server work (POST /checkout/session/complete,
+      // redemption resolution) and would otherwise have done a top-frame
+      // navigation. We resolve the purchase here.
+      // ---------------------------------------------------------------
+      // Two parallel terminal-success paths exist in this dispatcher and
+      // they MUST stay separate:
+      //   • `purchase` (line ~`case "purchase":` above) — StoreKit-style
+      //     trigger from non-Stripe / observer-mode paywalls. Resolves
+      //     immediately on click.
+      //   • `post_checkout_complete` (this case) — Stripe-checkout flow on
+      //     `client_surface=web-sdk`. Resolves AFTER the paywall's
+      //     WebPaywallController finishes its server-side post-checkout
+      //     work (POST /checkout/session/complete + redemption).
+      // Don't unify them — a Stripe paywall fires both `purchase`
+      // (intent) and `post_checkout_complete` (terminal); only the latter
+      // is the real success signal.
+      // ---------------------------------------------------------------
+      case "post_checkout_complete": {
+        const productId =
+          readString(evt, "product_identifier") ??
+          readTransactionField(evt, "productIdentifier") ??
+          "";
+        const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
+        const redirectUrl = readString(evt, "redirectUrl");
+        const transactionData = readTransactionData(evt);
+        ctx.onPurchaseEvent?.({
+          type: "postCheckout",
+          productId,
+          checkoutContextId,
+          ...(transactionData && { transactionData }),
+          ...(redirectUrl !== null && { redirectUrl }),
+        });
+        const product: Product = {
+          id: productId,
+          store: "stripe",
+          entitlements: [],
+        };
+        ctx.emit("transaction_complete", {
+          product,
+          paywall_info: info,
+          product_identifier: productId,
+          ...(transactionData?.transactionId && {
+            transaction_id: transactionData.transactionId,
+          }),
+          ...(transactionData?.currency && { currency: transactionData.currency }),
+          ...(typeof transactionData?.value === "number" && {
+            value: transactionData.value,
+          }),
+        });
+        ctx.emit("subscription_start", { product, paywall_info: info });
+        if (redirectUrl) {
+          // Merchant-configured post-purchase URL. We surface but never
+          // navigate the host frame — the consumer decides.
+          ctx.emit(
+            "paywallWillOpenURL" as never,
+            { url: redirectUrl } as never,
+          );
+        }
+        cleanup();
+        resolve({ type: "purchased", productId });
+        return;
+      }
+      // The paywall's `redirect` checkout directive would otherwise do
+      // `window.location.href = checkoutUrl` inside our iframe (trapping
+      // the navigation). The paywall change to emit a structured
+      // `redirect_required` message is open with their team — until then
+      // this handler is dead code. When it lands, payload is `{ url }`
+      // and we open in a new tab; the merchant can also subscribe to
+      // `paywallWillOpenURL` for custom handling.
+      case "redirect_required": {
+        const url = readString(evt, "url");
+        if (!url) break;
+        ctx.emit(
+          "paywallWillOpenURL" as never,
+          { url } as never,
+        );
+        if (typeof globalThis.open === "function") {
+          try {
+            globalThis.open(url, "_blank", "noopener");
+          } catch {}
+        }
+        break;
       }
       case "open_url_external": {
         const url = typeof evt["url"] === "string" ? (evt["url"] as string) : null;
@@ -369,10 +641,7 @@ const handleInbound = (
       case "open_url": {
         const url = typeof evt["url"] === "string" ? (evt["url"] as string) : null;
         if (!url) break;
-        // Forward via the local-only event so the SDK's delegate-bridge
-        // listener can call `onPaywallWillOpenURL`. The presenter does NOT
-        // navigate the host page — the consumer's delegate decides what to
-        // do (in-app browser sheet, popup, ignore).
+        // Forward to the delegate; presenter does NOT navigate the host page.
         const browserType =
           evt["browser_type"] === "payment_sheet" ? "payment_sheet" : undefined;
         ctx.emit(
@@ -384,7 +653,7 @@ const handleInbound = (
         break;
       }
       case "open_deep_link": {
-        // Per Android `PaywallMessage.kt` the payload key is `link`, not `url`.
+        // Wire payload key is `link`, not `url`.
         const link = typeof evt["link"] === "string" ? (evt["link"] as string) : null;
         if (!link) break;
         ctx.emit(
@@ -394,10 +663,7 @@ const handleInbound = (
         break;
       }
       case "custom_placement": {
-        // Forward to the public wire event (consumers listen on
-        // `sw.events.addEventListener("custom_placement", ...)`). The
-        // paywall_info field is the ACTIVE paywall — captured at present()
-        // time. Params come from the postMessage payload.
+        // paywall_info is the ACTIVE paywall, captured at present() time.
         const placementName =
           typeof evt["name"] === "string" ? (evt["name"] as string) : "";
         const params =
@@ -411,9 +677,6 @@ const handleInbound = (
         });
         break;
       }
-      // custom, paywall_*, transaction_*, request_*, page_view,
-      // haptic_feedback, schedule_notification, user_attribute_updated,
-      // trial_started: deferred to v1 — drop silently for v0.
       default:
         break;
     }
@@ -441,6 +704,14 @@ const handlePurchase = (
         paywall_info: _info,
         product_identifier: product.id,
       });
+      // Emit `subscription_start` alongside transaction_complete. Web has
+      // no trial-detection signal in observer mode, so consumers that need
+      // to distinguish first-time non-trial activations from trials should
+      // dedup via product id + subscriptionStatus history.
+      ctx.emit("subscription_start", {
+        product,
+        paywall_info: _info,
+      });
       if (shouldDismiss) {
         cleanup();
         resolve({ type: "purchased", productId: product.id });
@@ -450,7 +721,7 @@ const handlePurchase = (
         product,
         paywall_info: _info,
       });
-      // Don't dismiss on cancel — paywall stays open.
+      // Stay open on cancel.
     }
   };
 
@@ -461,7 +732,6 @@ const handlePurchase = (
         .then(finalize)
         .catch(() => finalize("declined"));
     } else {
-      // window.confirm fallback. Synchronous; resolve immediately.
       const ok =
         typeof confirm === "function"
           ? confirm(`Simulate purchase of ${product.id}?`)
@@ -471,52 +741,78 @@ const handlePurchase = (
     return;
   }
 
-  // Non-test mode v0: emit `transaction_start`; observer-mode consumers
-  // run their own checkout and call `sw.purchases.setSubscriptionStatus`.
-  // The presenter just leaves the paywall open. (PurchaseController
-  // wiring lands when that path is implemented end-to-end.)
+  // Non-test mode: observer-mode consumers run their own checkout and call
+  // `sw.purchases.setSubscriptionStatus`. The presenter leaves the paywall open.
 };
 
-/** Send an empty templates bundle to the paywall iframe. Real shape per
- *  API.md §7.2 — an array of {event_name, ...} objects. v0 sends a minimal
- *  acknowledgment so the paywall's `ping`-then-wait pattern unblocks. */
-const sendTemplatesStub = (
+/** Send the templates bundle (API.md §7.2): products + template_variables
+ *  (user, device, params, products) + substitutions prefix. The `products`
+ *  array is the per-paywall slot mapping from config (verbatim — the iframe's
+ *  click handler keys off the `product` slot name). The second `accept64`
+ *  carries the BE-issued `paywalljs_event` (template_substitutions +
+ *  page_styles); falls back to an empty stub if the paywall config didn't
+ *  ship one. */
+const sendTemplates = (
+  info: PaywallInfo,
   ctx: PresentationContext,
   a: ActivePresentation,
 ): void => {
   if (!a.iframe.contentWindow) return;
+  // Prefer the raw per-paywall product mapping (carries `product` slot name);
+  // fall back to a synthesized list from the catalog products when absent.
+  const products =
+    info.rawProducts && info.rawProducts.length > 0
+      ? [...info.rawProducts]
+      : info.products.map((p) => ({
+          product: p.id,
+          productId: p.id,
+          product_id: p.id,
+        }));
+  const variables = {
+    user: ctx.user ?? {},
+    device: ctx.device ?? {},
+    params: ctx.params ?? {},
+    products,
+  };
   const payload = [
-    { event_name: "products", products: [] },
-    {
-      event_name: "template_variables",
-      variables: {
-        user: {},
-        device: {},
-        params: ctx.params ?? {},
-        products: [],
-      },
-    },
+    { event_name: "products", products },
+    { event_name: "template_variables", variables },
     { event_name: "template_substitutions_prefix", prefix: null },
   ];
-  const base64 = base64UrlOfJson(payload);
+  postAccept64(a, payload);
+
+  // Second accept64: the BE-issued paywalljs_event (substitutions + styles)
+  // forwarded verbatim. Some paywalls expect this immediately after the
+  // templates bundle; not sending it leaves their click handlers reading
+  // undefined `substitutions`. Falls back to an empty stub if absent.
+  if (info.paywalljsEvent) {
+    postRawAccept64(a, info.paywalljsEvent);
+  } else {
+    postAccept64(a, [
+      { event_name: "template_substitutions", substitutions: [] },
+      { event_name: "page_styles", pageStyles: [] },
+    ]);
+  }
+};
+
+const postAccept64 = (a: ActivePresentation, payload: unknown): void => {
+  postRawAccept64(a, base64UrlOfJson(payload));
+};
+
+const postRawAccept64 = (a: ActivePresentation, base64: string): void => {
   const message = {
     version: 1,
     channel: "paywall.accept64",
     payload: base64,
   };
   try {
-    a.iframe.contentWindow.postMessage(
-      message,
-      a.paywallOrigin || "*",
-    );
-  } catch {
-    /* iframe gone — no-op */
-  }
+    a.iframe.contentWindow!.postMessage(message, a.paywallOrigin || "*");
+  } catch {}
 };
 
 const base64UrlOfJson = (value: unknown): string => {
   const json = JSON.stringify(value);
-  // btoa only handles latin1; JSON is ASCII-friendly here, but be safe.
+  // btoa only handles latin1; encode UTF-8 bytes first.
   const bytes = new TextEncoder().encode(json);
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);

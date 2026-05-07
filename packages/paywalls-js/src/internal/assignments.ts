@@ -1,27 +1,9 @@
 // AssignmentService — variant rollout + sticky cached assignments for
-// experiments.
-//
-// Behavior matches Android (`ConfigLogic.kt:chooseVariant`):
-//   - First time we see (experimentId), pick a variant *randomly* from
-//     the variants' percentage ranges (sum percentages → uniform random
-//     pick in [0, sum), find the variant whose cumulative range contains
-//     the threshold). Missing percentages → even split.
-//   - Persist the pick. Subsequent evaluations return the cached one —
-//     same user sees the same variant across calls / sessions / reloads.
-//     The aliasId is NOT a hash input (Android doesn't hash; the cache
-//     is what makes it sticky). Cross-device parity is achieved via
-//     `POST /confirm_assignments` so the BE knows which variant is live
-//     (still TODO — see MISSING.md).
-//   - If a variant is deleted from config between sessions (cached id no
-//     longer in `experiment.variants`), repick.
-//
-// `pickVariant` accepts an injectable randomiser so tests can be
-// deterministic without changing the production semantics.
-//
-// Persistence: JSON-serialized `ConfirmedAssignment[]` under
-// `STORAGE_KEYS.assignments`. Loaded on service materialization.
-//
-// Internal-only — not exported from the package barrel.
+// experiments. First evaluation picks a variant via cumulative-percentage
+// random bucket (missing percentages → even split) and persists it; later
+// evaluations return the cached pick unless the variant has been deleted
+// from config (then repick). Stickiness comes from the cache, not a hash
+// of aliasId.
 
 import { Context, Effect, Layer, Ref } from "effect";
 import {
@@ -46,55 +28,29 @@ interface RawExperimentRef {
 }
 
 export interface AssignmentServiceImpl {
-  /**
-   * Sticky variant assignment. Returns the cached variant if one exists
-   * for this experimentId AND the variant id is still in the current
-   * experiment's variant list; otherwise picks a fresh variant via the
-   * cumulative-percentage random bucket and persists it.
-   */
+  /** Sticky variant assignment for the supplied experiment. */
   readonly getOrAssign: (
     experiment: RawExperimentRef,
     aliasId: string,
   ) => Effect.Effect<ConfirmedAssignment>;
-  /**
-   * Eagerly assign variants for every experiment referenced by the supplied
-   * experiment list, populating the cache so subsequent `register()` calls
-   * can short-circuit. Mirrors Android's `ApplyConfig → choosePaywallVariants`
-   * (`ConfigLogic.kt:chooseAllVariants`). Existing assignments are preserved
-   * (sticky); new experiments are picked + persisted in one batch.
-   */
+  /** Eagerly assign variants for every supplied experiment, preserving
+   *  existing sticky picks and persisting new ones in one batch. */
   readonly chooseAllVariants: (
     experiments: ReadonlyArray<RawExperimentRef>,
   ) => Effect.Effect<void>;
   /** Snapshot of all currently-cached assignments. */
   readonly getAll: () => Effect.Effect<ConfirmedAssignment[]>;
-  /** Wipe in-memory + storage. */
   readonly reset: () => Effect.Effect<void>;
 }
 
-// ---------------------------------------------------------------------------
-// Variant pick — pure helper, exported for test. Matches Android's
-// `ConfigLogic.chooseVariant` exactly (random per call, integer percent
-// math). Stickiness comes from the cache, not the algorithm.
-// ---------------------------------------------------------------------------
-
 /** Random integer in `[0, max)`. Replaceable in tests for deterministic
- *  distribution checks. Matches Android's `randomiser: (IntRange) -> Int`
- *  parameter on `ConfigLogic.chooseVariant`. */
+ *  distribution checks. */
 export type Randomiser = (max: number) => number;
 
 const defaultRandomiser: Randomiser = (max) => Math.floor(Math.random() * max);
 
-/**
- * Random-bucket pick over a variant list. Percentages are integers
- * (0–100); missing percentages on ALL variants → equal split (random
- * index pick). Otherwise: random threshold in `[0, sum_of_percentages)`,
- * walk cumulative until threshold lands in a variant's range.
- *
- * Same algorithm as Android `ConfigLogic.chooseVariant`. Per-call random
- * — not a hash — so stickiness comes exclusively from the cache layer
- * above (`AssignmentService.getOrAssign`).
- */
+/** Random-bucket pick over a variant list. Per-call random — stickiness
+ *  comes from the cache layer above. */
 export const pickVariant = (
   variants: RawExperimentRef["variants"],
   randomiser: Randomiser = defaultRandomiser,
@@ -114,7 +70,6 @@ export const pickVariant = (
   const sum = variants.reduce((s, v) => s + (v.percentage ?? 0), 0);
 
   if (sum === 0) {
-    // No percentages declared anywhere → even split via random index.
     const idx = randomiser(variants.length);
     const v = variants[Math.min(idx, variants.length - 1)]!;
     return {
@@ -136,8 +91,7 @@ export const pickVariant = (
       };
     }
   }
-  // Floating-point edge — should never hit since threshold < sum, but
-  // returning the last variant matches Android.
+  // Floating-point edge — should never hit since threshold < sum.
   const last = variants[variants.length - 1]!;
   return {
     id: last.id,
@@ -146,15 +100,10 @@ export const pickVariant = (
   };
 };
 
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
-
 const make = Effect.gen(function* () {
   const storage = yield* StorageService;
 
-  // Hydrate from storage on materialization. Corrupt JSON is silently
-  // dropped (matches the broader "tolerant cache" pattern in this repo).
+  // Corrupt JSON is silently dropped (tolerant-cache pattern).
   const initial = yield* storage
     .get(ASSIGNMENTS_KEY)
     .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
@@ -174,9 +123,7 @@ const make = Effect.gen(function* () {
           );
         });
       }
-    } catch {
-      /* drop corrupt cache */
-    }
+    } catch {}
   }
   const ref = yield* Ref.make<ConfirmedAssignment[]>(parsed);
 
@@ -193,8 +140,6 @@ const make = Effect.gen(function* () {
       const current = yield* Ref.get(ref);
       const cached = current.find((a) => a.experimentId === experiment.id);
       if (cached) {
-        // Verify the cached variant is still in the experiment's variant
-        // list (config changed, variant deleted) — if not, repick.
         const stillExists = experiment.variants.some(
           (v) => v.id === cached.variant.id,
         );
@@ -207,7 +152,6 @@ const make = Effect.gen(function* () {
         variant,
       };
 
-      // Replace any stale entry for this experimentId.
       const next = current.filter((a) => a.experimentId !== experiment.id);
       next.push(fresh);
       yield* Ref.set(ref, next);
@@ -221,8 +165,8 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       if (experiments.length === 0) return;
       const current = yield* Ref.get(ref);
-      // De-dup experiments by id — the same experiment can appear under
-      // multiple triggers (Android `chooseAllVariants` collects unique refs).
+      // De-dup experiments by id — same experiment can appear under
+      // multiple triggers.
       const seen = new Set<string>();
       const unique = experiments.filter((e) => {
         if (seen.has(e.id)) return false;
@@ -239,7 +183,6 @@ const make = Effect.gen(function* () {
             (v) => v.id === cached.variant.id,
           );
           if (stillExists) continue;
-          // Stale variant — drop and repick below.
           const idx = next.indexOf(cached);
           next.splice(idx, 1);
         }
@@ -258,7 +201,7 @@ const make = Effect.gen(function* () {
 
   const getAll: AssignmentServiceImpl["getAll"] = () =>
     Effect.gen(function* () {
-      // Return a copy so callers can't mutate the internal array.
+      // Copy to prevent caller mutation of the internal array.
       return [...(yield* Ref.get(ref))];
     });
 

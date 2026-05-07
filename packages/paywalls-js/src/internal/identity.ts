@@ -1,17 +1,12 @@
 // IdentityService — owns alias / userId / vendorId / deviceId persistence
-// and the SSR hydration algorithm from API.md §7.4.
-//
-// Resolution order, per field, per §7.4:
-//   1. value already in the StorageService (client localStorage)
-//   2. seed value passed via createSuperwall({ identity })  (cookie / pre-seed)
-//   3. generated locally  (or vendorIdProvider() for vendorId)
-//   4. for appUserId only: leave as "" — never fabricate one
-//
-// After hydrate(), all resolved values are written back to storage so the
-// adapter and the in-memory snapshot are consistent.
+// and the SSR hydration algorithm (API.md §7.4). Per-field resolution:
+// stored value → seed value → generated locally (appUserId stays "" if
+// none supplied — never fabricated). After hydrate(), all resolved values
+// are written back to storage.
 
 import { Effect, Layer, SubscriptionRef } from "effect";
 import { STORAGE_KEYS } from "../types.ts";
+import { makeActor } from "./actor.ts";
 import {
   asAliasId,
   asDeviceId,
@@ -36,14 +31,9 @@ export interface IdentitySnapshot {
   readonly deviceId: DeviceId;
 }
 
-// ---------------------------------------------------------------------------
-// IdentityPhase — typed pending-set actor. Mirrors Android
-// `IdentityState.Phase` (`Pending(Set<Pending>) | Ready`).
-//
-// `register()` blocks until the pending-set drains. Closes the race where
-// an in-flight `identify()` mid-resolves user attributes while a placement
-// rule is being evaluated.
-// ---------------------------------------------------------------------------
+// IdentityPhase — `register()` blocks until the pending-set drains, so a
+// concurrent `identify()` can't mid-resolve user attributes while a
+// placement rule is being evaluated.
 
 export type IdentityPending =
   | { readonly _tag: "Configuration" }
@@ -74,7 +64,7 @@ export type IdentityPhase =
 
 export const IdentityPhase = {
   /** Initial phase — `{Configuration}` pending until the first hydrate
-   *  + configure() pass completes (mirrors Android `Phase.Pending(setOf(Configuration))`). */
+   *  + configure() pass completes. */
   initial: (): IdentityPhase => ({
     _tag: "Pending",
     items: [IdentityPending.Configuration],
@@ -84,7 +74,6 @@ export const IdentityPhase = {
     items.length === 0 ? IdentityPhase.Ready : { _tag: "Pending", items },
 };
 
-/** Pure reducers. Match Android `IdentityState.Updates`. */
 export const IdentityUpdates = {
   /** Add a pending item. No-op if already present (set semantics). */
   begin:
@@ -95,7 +84,7 @@ export const IdentityUpdates = {
       if (existing.some((p) => pendingKey(p) === key)) return phase;
       return { _tag: "Pending", items: [...existing, item] };
     },
-  /** Remove a pending item; flips to Ready when set drains. */
+  /** Remove a pending item; flips to Ready when the set drains. */
   end:
     (item: IdentityPending) =>
     (phase: IdentityPhase): IdentityPhase => {
@@ -120,13 +109,13 @@ const USER_KEY = asStorageKey(STORAGE_KEYS.appUserId);
 const VENDOR_KEY = asStorageKey(STORAGE_KEYS.vendorId);
 const DEVICE_KEY = asStorageKey(STORAGE_KEYS.deviceId);
 
-/** `$SuperwallAlias:<uuid-v4>` — matches Android `IdentityLogic.generateAlias`. */
+/** `$SuperwallAlias:<uuid-v4>` — wire format expected by the BE. */
 export const generateAlias = (): AliasId =>
   asAliasId(`$SuperwallAlias:${crypto.randomUUID()}`);
 
 export const generateVendorId = (): VendorId => asVendorId(crypto.randomUUID());
 
-/** `sha256(vendorId)` truncated to 16 hex chars (matches Android's hashed `DeviceVendorId`). */
+/** `sha256(vendorId)` truncated to 16 hex chars. */
 export const deriveDeviceId = (
   vendorId: VendorId,
 ): Effect.Effect<DeviceId, IdentityHydrationError> =>
@@ -139,8 +128,6 @@ export const deriveDeviceId = (
         .join("");
       return asDeviceId(hex.slice(0, 16));
     },
-    // crypto.subtle.digest can't actually fail in any realistic runtime
-    // we ship to, but unwind cleanly if it ever does.
     catch: (cause) =>
       new IdentityHydrationError({
         message: `sha256(vendorId) failed: ${describe(cause)}`,
@@ -150,7 +137,14 @@ export const deriveDeviceId = (
 
 const make = Effect.gen(function* () {
   const storage = yield* StorageService;
-  const ref = yield* SubscriptionRef.make<IdentitySnapshot | null>(null);
+  // Snapshot actor — mutations serialize so concurrent identify() + reset()
+  // land in arrival order without half-applied state.
+  const snapshotActor = yield* makeActor<IdentitySnapshot | null>(null);
+  const ref = snapshotActor.stateRef;
+  const dispatch = snapshotActor.dispatch;
+
+  // Phase ref is intentionally NOT serialized — callers bracket dispatched
+  // ops with begin/end, and sharing the snapshot actor's permit would deadlock.
   const phaseRef = yield* SubscriptionRef.make<IdentityPhase>(
     IdentityPhase.initial(),
   );
@@ -171,59 +165,64 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const hydrate = Effect.fn("IdentityService.hydrate")(function* (
-    seed?: IdentitySeed,
-  ) {
-    const [storedAlias, storedUser, storedVendor] = yield* Effect.all([
-      storage.get(ALIAS_KEY),
-      storage.get(USER_KEY),
-      storage.get(VENDOR_KEY),
-    ]);
+  const hydrate = (seed?: IdentitySeed) =>
+    dispatch(
+      "IdentityService.hydrate",
+      Effect.gen(function* () {
+        const [storedAlias, storedUser, storedVendor] = yield* Effect.all([
+          storage.get(ALIAS_KEY),
+          storage.get(USER_KEY),
+          storage.get(VENDOR_KEY),
+        ]);
 
-    // Per §7.4: for each field, client storage wins, then seed, then fallback.
-    const aliasId =
-      storedAlias != null
-        ? asAliasId(storedAlias)
-        : seed?.aliasId
-          ? asAliasId(seed.aliasId)
-          : generateAlias();
+        const aliasId =
+          storedAlias != null
+            ? asAliasId(storedAlias)
+            : seed?.aliasId
+              ? asAliasId(seed.aliasId)
+              : generateAlias();
 
-    const appUserId: UserId | "" =
-      storedUser != null
-        ? asUserId(storedUser)
-        : seed?.appUserId
-          ? asUserId(seed.appUserId)
-          : "";
+        const appUserId: UserId | "" =
+          storedUser != null
+            ? asUserId(storedUser)
+            : seed?.appUserId
+              ? asUserId(seed.appUserId)
+              : "";
 
-    let vendorId: VendorId;
-    if (storedVendor != null) {
-      vendorId = asVendorId(storedVendor);
-    } else if (seed?.vendorId) {
-      vendorId = asVendorId(seed.vendorId);
-    } else {
-      const provider = seed?.vendorIdProvider;
-      if (provider) {
-        const provided = yield* Effect.tryPromise({
-          try: async () => await provider(),
-          catch: (cause) =>
-            new IdentityHydrationError({
-              message: `vendorIdProvider threw: ${describe(cause)}`,
-              cause,
-            }),
-        });
-        vendorId = asVendorId(provided);
-      } else {
-        vendorId = generateVendorId();
-      }
-    }
+        let vendorId: VendorId;
+        if (storedVendor != null) {
+          vendorId = asVendorId(storedVendor);
+        } else if (seed?.vendorId) {
+          vendorId = asVendorId(seed.vendorId);
+        } else {
+          const provider = seed?.vendorIdProvider;
+          if (provider) {
+            const provided = yield* Effect.tryPromise({
+              try: async () => await provider(),
+              catch: (cause) =>
+                new IdentityHydrationError({
+                  message: `vendorIdProvider threw: ${describe(cause)}`,
+                  cause,
+                }),
+            });
+            vendorId = asVendorId(provided);
+          } else {
+            vendorId = generateVendorId();
+          }
+        }
 
-    const deviceId = yield* deriveDeviceId(vendorId);
-
-    const snap: IdentitySnapshot = { aliasId, appUserId, vendorId, deviceId };
-    yield* persist(snap);
-    yield* SubscriptionRef.set(ref, snap);
-    return snap;
-  });
+        const deviceId = yield* deriveDeviceId(vendorId);
+        const snap: IdentitySnapshot = {
+          aliasId,
+          appUserId,
+          vendorId,
+          deviceId,
+        };
+        yield* persist(snap);
+        yield* SubscriptionRef.set(ref, snap);
+        return snap;
+      }),
+    );
 
   /** Read the current snapshot. Fails if `hydrate()` hasn't run yet. */
   const current = Effect.fn("IdentityService.current")(function* () {
@@ -238,66 +237,70 @@ const make = Effect.gen(function* () {
     return value;
   });
 
-  const identify = Effect.fn("IdentityService.identify")(function* (
-    userIdInput: string,
-  ) {
-    const snap = yield* current();
-    const next: IdentitySnapshot = { ...snap, appUserId: asUserId(userIdInput) };
-    yield* persist(next);
-    yield* SubscriptionRef.set(ref, next);
-    return next;
-  });
+  const identify = (userIdInput: string) =>
+    dispatch(
+      "IdentityService.identify",
+      Effect.gen(function* () {
+        const snap = yield* current();
+        const next: IdentitySnapshot = {
+          ...snap,
+          appUserId: asUserId(userIdInput),
+        };
+        yield* persist(next);
+        yield* SubscriptionRef.set(ref, next);
+        return next;
+      }),
+    );
 
-  const signOut = Effect.fn("IdentityService.signOut")(function* () {
-    const snap = yield* current();
-    if (snap.appUserId === "") return snap;
-    const next: IdentitySnapshot = { ...snap, appUserId: "" };
-    yield* persist(next);
-    yield* SubscriptionRef.set(ref, next);
-    return next;
-  });
+  const signOut = () =>
+    dispatch(
+      "IdentityService.signOut",
+      Effect.gen(function* () {
+        const snap = yield* current();
+        if (snap.appUserId === "") return snap;
+        const next: IdentitySnapshot = { ...snap, appUserId: "" };
+        yield* persist(next);
+        yield* SubscriptionRef.set(ref, next);
+        return next;
+      }),
+    );
 
   /** Wipe everything and regenerate alias + vendor + device. Drops appUserId. */
-  const reset = Effect.fn("IdentityService.reset")(function* () {
-    const aliasId = generateAlias();
-    const vendorId = generateVendorId();
-    const deviceId = yield* deriveDeviceId(vendorId);
-    const next: IdentitySnapshot = {
-      aliasId,
-      appUserId: "",
-      vendorId,
-      deviceId,
-    };
-    yield* persist(next);
-    yield* SubscriptionRef.set(ref, next);
-    return next;
-  });
+  const reset = () =>
+    dispatch(
+      "IdentityService.reset",
+      Effect.gen(function* () {
+        const aliasId = generateAlias();
+        const vendorId = generateVendorId();
+        const deviceId = yield* deriveDeviceId(vendorId);
+        const next: IdentitySnapshot = {
+          aliasId,
+          appUserId: "",
+          vendorId,
+          deviceId,
+        };
+        yield* persist(next);
+        yield* SubscriptionRef.set(ref, next);
+        return next;
+      }),
+    );
 
-  /** Effect-side change stream. Subscribers get the current value on attach
-   *  (per SubscriptionRef.changes contract), then every transition. The
-   *  initial pre-hydrate value is `null`; first hydrate replaces it. */
+  /** Change stream. Initial pre-hydrate value is `null`. */
   const observe = Effect.fn("IdentityService.observe")(function* () {
     return ref.changes;
   });
-
-  // ---------------------------------------------------------------------------
-  // Phase actor — pending-set transitions exposed to superwall.ts.
-  // ---------------------------------------------------------------------------
 
   /** Add a pending item to the phase set. Idempotent. */
   const beginPending = (item: IdentityPending) =>
     phaseUpdate(IdentityUpdates.begin(item));
 
-  /** Drop a pending item; phase flips to Ready when set drains. */
+  /** Drop a pending item; phase flips to Ready when the set drains. */
   const endPending = (item: IdentityPending) =>
     phaseUpdate(IdentityUpdates.end(item));
 
-  /** Read the current phase. */
   const currentPhase = () => SubscriptionRef.get(phaseRef);
 
-  /** Block until phase becomes Ready. Polls via SubscriptionRef.changes
-   *  semantics with a yield each iteration (bounded by external pending
-   *  resolutions). */
+  /** Block until phase becomes Ready. */
   const awaitReady: () => Effect.Effect<void> = () =>
     Effect.gen(function* () {
       const phase = yield* SubscriptionRef.get(phaseRef);
@@ -331,7 +334,7 @@ export class IdentityService extends Effect.Service<IdentityService>()(
 ) {}
 
 /** Build a Layer that exposes both `IdentityService` and the supplied
- *  `StorageService` so tests / callers can poke at storage too. */
+ *  `StorageService` (re-exposed for downstream consumers/tests). */
 export const identityWithStorage = (
   storage: Layer.Layer<StorageService>,
 ): Layer.Layer<IdentityService | StorageService> =>

@@ -1,14 +1,5 @@
-// Internal Logger — routes SDK log entries to the public
-// `SuperwallDelegate.onLog` callback (if any) and, when the configured
-// `LogLevel` permits, to `console`.
-//
-// Surface lands now so consumers can wire `delegate.onLog` for analytics
-// forwarding. Internal call sites (network failures, presenter teardown,
-// storage quota, etc.) will be migrated from `// swallow` comments to
-// `Logger.warn(...)` calls incrementally.
-//
-// Internal-only — not exported from the package barrel. The PUBLIC log
-// surface is the `setLogLevel` setter on `Superwall` + the delegate hook.
+// Internal Logger — routes SDK log entries to `SuperwallDelegate.onLog`
+// (if any) and, when the configured `LogLevel` permits, to `console`.
 
 import { Context, Effect, Layer, Ref } from "effect";
 import type { JsonValue, LogLevel, LogScope } from "../types.ts";
@@ -66,8 +57,7 @@ const make = (initialLevel: LogLevel) =>
         const current = yield* Ref.get(levelRef);
         if (LEVEL_RANK[level] < LEVEL_RANK[current]) return;
 
-        // Console mirror — best-effort. Wrapped because consumers might
-        // strip `console` (Workers, sandboxed iframes, etc.).
+        // Console may be stripped (Workers, sandboxed iframes).
         try {
           const target =
             level === "error"
@@ -84,12 +74,8 @@ const make = (initialLevel: LogLevel) =>
           } else {
             target(`[Superwall:${scope}] ${message}`);
           }
-        } catch {
-          /* console gone — drop */
-        }
+        } catch {}
 
-        // Delegate dispatch. Errors inside the delegate are absorbed by
-        // EventBus.withDelegate so a buggy log sink never crashes the SDK.
         yield* bus.withDelegate((d) =>
           d.onLog?.(level, scope, message, info ?? null, error ?? null),
         );
@@ -121,9 +107,7 @@ export class Logger extends Context.Tag("@superwall/Logger")<
   LoggerImpl
 >() {}
 
-/** Build a Logger Layer that depends on the supplied EventBus. The result
- *  exposes `Logger` AND re-exposes the upstream services for downstream
- *  consumers. */
+/** Build a Logger Layer over the supplied EventBus (re-exposed for downstream). */
 export const loggerLayer = (
   initialLevel: LogLevel,
   busLayer: Layer.Layer<EventBus>,

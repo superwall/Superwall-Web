@@ -119,17 +119,13 @@ test("publish does NOT post local-only events to the collector", async () => {
   const stack = buildStack(fetch, target);
 
   let localCount = 0;
-  target.addEventListener("identityHydrated", () => localCount++);
+  target.addEventListener("paywallWillOpenURL", () => localCount++);
 
   await Effect.runPromise(
     Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const bus = yield* EventBus;
-      yield* bus.publish("identityHydrated", {
-        source: "generated",
-        aliasChanged: true,
-        userChanged: false,
-      });
+      yield* bus.publish("paywallWillOpenURL", { url: "https://example.com" });
     }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
   );
 
@@ -269,16 +265,12 @@ test("publish fires delegate.onEvent firehose for wire-bound events only", async
       const bus = yield* EventBus;
       yield* bus.setDelegate(delegate);
       yield* bus.publish("app_open", {});
-      yield* bus.publish("identityHydrated", {
-        source: "generated",
-        aliasChanged: false,
-        userChanged: false,
-      });
+      yield* bus.publish("paywallWillOpenURL", { url: "https://example.com" });
       yield* bus.publish("session_start", {});
     }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
   );
 
-  // identityHydrated is local-only and skipped from the firehose; the rest land.
+  // paywallWillOpenURL is local-only and skipped from the firehose; the rest land.
   expect(seen).toEqual(["app_open", "session_start"]);
 });
 

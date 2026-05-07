@@ -1,6 +1,5 @@
-// Public event surface. Matches API.md §8.1 (wire-bound) + §8.2 (local-only).
-// Wire `event_name` strings are taken verbatim from Android's
-// `SuperwallEvent.kt` `rawName` properties — see API.md §11.4.
+// Public event surface — wire-bound + local-only event maps, the typed
+// EventTarget, and the global delegate interface.
 
 import type {
   ConfirmedAssignment,
@@ -20,12 +19,7 @@ import type {
   UserAttributes,
 } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// 8.1 — Wire-bound event map
-// ---------------------------------------------------------------------------
-
-/** Strings copied from Android `SuperwallEvent.kt` `rawName`. Each entry's
- *  payload key set matches what Android emits. */
+// Wire-bound events — POSTed to the collector.
 export interface SuperwallEventMap {
   // lifecycle
   first_seen: {};
@@ -100,6 +94,15 @@ export interface SuperwallEventMap {
     product: Product;
     paywall_info: PaywallInfo;
     product_identifier: string;
+    /** Stripe transaction id (from the paywall's post_checkout_complete
+     *  payload). Web-specific — the StoreKit-shaped `transaction` field
+     *  doesn't carry it. Absent on test-mode paywalls and any flow that
+     *  doesn't produce a Stripe Checkout Session. */
+    transaction_id?: string;
+    /** ISO 4217 currency code (e.g. "USD"). Web-specific revenue data. */
+    currency?: string;
+    /** Transaction value in `currency` units. Web-specific revenue data. */
+    value?: number;
   };
   transaction_fail: { error: string; paywall_info: PaywallInfo };
   transaction_abandon: { product: Product; paywall_info: PaywallInfo };
@@ -109,8 +112,8 @@ export interface SuperwallEventMap {
   restore_complete: {};
   restore_fail: { reason: string };
   /** First-time non-trial activation. Emitted alongside `transaction_complete`
-   *  when the purchased product is a recurring subscription with no
-   *  free-trial offer. (Free trials emit `freeTrial_start` instead.) */
+   *  for recurring subscriptions without a free-trial offer (free trials
+   *  emit `freeTrial_start` instead). */
   subscription_start: { product: Product; paywall_info: PaywallInfo };
   freeTrial_start: {
     product: Product;
@@ -144,33 +147,18 @@ export interface SuperwallEventMap {
   permission_denied: { permissionName: string; paywallIdentifier: string };
 }
 
-// ---------------------------------------------------------------------------
-// 8.2 — Local-only event map (never POSTed to collector)
-// ---------------------------------------------------------------------------
-
+// Local-only events — never POSTed to the collector.
 export interface LocalSuperwallEventMap {
-  /** Fires once after SSR hydration completes. See API.md §7.4. */
-  identityHydrated: {
-    source: "client" | "cookie" | "generated";
-    aliasChanged: boolean;
-    userChanged: boolean;
-  };
-  /**
-   * Paywall asked to navigate to an in-app URL (`open_url` postMessage).
-   * Bridged to `SuperwallDelegate.onPaywallWillOpenURL`. Local-only because
-   * Android exposes this as a delegate hook, not as a wire event.
-   */
+  /** Paywall asked to navigate to an in-app URL. Bridged to
+   *  `SuperwallDelegate.onPaywallWillOpenURL`. */
   paywallWillOpenURL: {
     url: string;
-    /** When the paywall meant the URL to open inside a payment sheet
-     *  rather than a generic in-app browser. Per Android's `OpenUrl` /
-     *  `browser_type` field. */
+    /** Paywall meant the URL to open in a payment sheet rather than a
+     *  generic in-app browser. */
     browserType?: "payment_sheet";
   };
-  /**
-   * Paywall asked to follow a deep link (`open_deep_link` postMessage).
-   * Bridged to `SuperwallDelegate.onPaywallWillOpenDeepLink`. Local-only.
-   */
+  /** Paywall asked to follow a deep link. Bridged to
+   *  `SuperwallDelegate.onPaywallWillOpenDeepLink`. */
   paywallWillOpenDeepLink: { url: string };
 }
 
@@ -179,29 +167,17 @@ export type AllSuperwallEvents = SuperwallEventMap & LocalSuperwallEventMap;
 export type SuperwallCustomEvent<K extends keyof AllSuperwallEvents> =
   CustomEvent<AllSuperwallEvents[K]>;
 
-// ---------------------------------------------------------------------------
-// Typed EventTarget
-// ---------------------------------------------------------------------------
-
 /**
  * `EventTarget` subclass with typed `addEventListener` / `removeEventListener`
- * over the union of wire-bound and local-only events. Per spec §2.5.
- *
- * Listener cleanup uses the standard `AbortSignal` option:
- *
- *   const ac = new AbortController();
- *   sw.events.addEventListener("paywall_open", fn, { signal: ac.signal });
- *   ac.abort();
+ * over the union of wire-bound and local-only events. Listener cleanup uses
+ * the standard `AbortSignal` option.
  */
 export class SuperwallEventTarget extends EventTarget {
-  // Typed overload — preferred call shape (`type` constrained to known events).
   override addEventListener<K extends keyof AllSuperwallEvents>(
     type: K,
     listener: (event: SuperwallCustomEvent<K>) => void,
     options?: AddEventListenerOptions | boolean,
   ): void;
-  // Catch-all overload that mirrors `EventTarget.addEventListener` so the
-  // override is variance-compatible with the parent.
   override addEventListener(
     type: string,
     callback: EventListenerOrEventListenerObject | null,
@@ -216,11 +192,8 @@ export class SuperwallEventTarget extends EventTarget {
     options?: AddEventListenerOptions | boolean,
   ): void {
     if (callback === null) return;
-    // Defensive AbortSignal handling — modern browsers + Bun honor
-    // `{ signal }` natively, but happy-dom (and older runtimes) silently
-    // ignore it. We strip the signal from the options we pass to the
-    // underlying EventTarget and wire removal manually so the contract
-    // holds everywhere.
+    // happy-dom (and older runtimes) silently ignore `{ signal }`, so we
+    // wire abort-driven removal manually for cross-runtime parity.
     const handler = callback as EventListener;
     if (typeof options === "object" && options !== null && options.signal) {
       const signal = options.signal;
@@ -260,10 +233,7 @@ export class SuperwallEventTarget extends EventTarget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 2.6 — Global delegate (sibling to per-listener and per-placement callbacks)
-// ---------------------------------------------------------------------------
-
+// Global delegate — sibling to per-listener and per-placement callbacks.
 export interface SuperwallDelegate {
   // subscription / customer
   onSubscriptionStatusChange?(
@@ -273,18 +243,17 @@ export interface SuperwallDelegate {
   onCustomerInfoChange?(from: CustomerInfo, to: CustomerInfo): void;
   onUserAttributesChange?(newAttributes: Partial<UserAttributes>): void;
 
-  // paywall lifecycle (typed convenience around the corresponding wire events)
+  // paywall lifecycle (typed convenience around the wire events)
   onPaywallWillPresent?(info: PaywallInfo): void;
   onPaywallDidPresent?(info: PaywallInfo): void;
   onPaywallWillDismiss?(info: PaywallInfo): void;
   onPaywallDidDismiss?(info: PaywallInfo): void;
   onPaywallWillOpenURL?(url: string): void;
-  /** Fires when the paywall sends an `open_deep_link` postMessage. The
-   *  consumer is responsible for routing the URL into the host app
+  /** Consumer is responsible for routing the URL into the host app
    *  (e.g. `next/navigation` push, React Router navigate). */
   onPaywallWillOpenDeepLink?(url: string): void;
 
-  // custom paywall actions (legacy `custom` postMessage)
+  // legacy `custom` postMessage
   onCustomPaywallAction?(name: string): void;
 
   // logging
@@ -296,23 +265,16 @@ export interface SuperwallDelegate {
     error: string | null,
   ): void;
 
-  /** Catch-all for transient lifecycle hooks the typed methods above don't
-   *  cover. Receives every dispatched event in the same order as the
-   *  EventTarget. Useful for analytics / logging forwarders. */
+  /** Catch-all that receives every dispatched event in EventTarget order.
+   *  Useful for analytics / logging forwarders. */
   onEvent?<K extends keyof SuperwallEventMap>(
     name: K,
     detail: SuperwallEventMap[K],
   ): void;
 }
 
-// ---------------------------------------------------------------------------
-// LOCAL_ONLY filter — wire emitter consults this to skip local-only events
-// ---------------------------------------------------------------------------
-
-/** Set of event names that MUST NOT be POSTed to the collector. Derived from
- *  `LocalSuperwallEventMap` keys; runtime check is a string-set lookup. */
+/** Event names the wire emitter MUST NOT POST to the collector. */
 export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEventMap>([
-  "identityHydrated",
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
 ]);

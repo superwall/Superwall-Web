@@ -7,7 +7,9 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
-    "clean": "turbo run clean && rm -rf node_modules"
+    "clean": "turbo run clean && rm -rf node_modules",
+    "example": "bun --filter @superwall/example-browser dev",
+    "example:start": "bun --filter @superwall/example-browser start"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.9.0",

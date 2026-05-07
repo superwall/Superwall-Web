@@ -6,6 +6,7 @@ import {
   ConfigState,
   ConfigUpdates,
   configServiceLayer,
+  extractEntitlementsByProductId,
   getConfig,
   parseConfig,
   type RawConfig,
@@ -78,6 +79,79 @@ test("parseConfig lifts top-level fields", () => {
 test("parseConfig accepts the legacy `build_id` snake_case key", () => {
   const cfg = parseConfig({ build_id: "snake" });
   expect(cfg.buildId).toBe("snake");
+});
+
+test("parseConfig reads the real snake_case wire shape (trigger_options, paywall_responses, store_product, etc.)", () => {
+  const cfg = parseConfig({
+    build_id: "wire_build",
+    trigger_options: [
+      {
+        event_name: "test_web",
+        rules: [
+          {
+            experiment_id: "140039",
+            experiment_group_id: "83733",
+            expression_cel: "size(device.activeEntitlements) == 0",
+            variants: [
+              { variant_id: "507319", variant_type: "HOLDOUT", percentage: 0 },
+              {
+                variant_id: "507321",
+                variant_type: "TREATMENT",
+                percentage: 100,
+                paywall_identifier: "new-paywall-38fe-2025-05-08",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    paywall_responses: [
+      {
+        identifier: "new-paywall-38fe-2025-05-08",
+        name: "Stripe Product Example",
+        url: "https://user-content.example.com/abc",
+        product_ids: ["superwall_pro_3999"],
+        feature_gating: "NON_GATED",
+      },
+    ],
+    products: [
+      {
+        sw_composite_product_id: "superwall_pro_3999",
+        store_product: {
+          store: "STRIPE",
+          product_identifier: "superwall_pro_3999",
+        },
+        entitlements: [{ identifier: "pro", type: "SERVICE_LEVEL" }],
+      },
+    ],
+  });
+  // Triggers
+  expect(cfg.triggerOptions).toHaveLength(1);
+  expect(cfg.triggerOptions[0]!.placementName).toBe("test_web");
+  expect(cfg.triggerOptions[0]!.rules).toHaveLength(1);
+  const rule = cfg.triggerOptions[0]!.rules[0]!;
+  expect(rule.expression).toBe("size(device.activeEntitlements) == 0");
+  expect(rule.experiment.id).toBe("140039");
+  expect(rule.experiment.groupId).toBe("83733");
+  expect(rule.experiment.variants).toHaveLength(2);
+  expect(rule.experiment.variants[0]!.type).toBe("holdout");
+  expect(rule.experiment.variants[1]!.type).toBe("treatment");
+  expect(rule.experiment.variants[1]!.paywallId).toBe(
+    "new-paywall-38fe-2025-05-08",
+  );
+  // Paywalls
+  expect(cfg.paywallResponses).toHaveLength(1);
+  expect(cfg.paywallResponses[0]!.identifier).toBe(
+    "new-paywall-38fe-2025-05-08",
+  );
+  expect(cfg.paywallResponses[0]!.url).toBe("https://user-content.example.com/abc");
+  expect(cfg.paywallResponses[0]!.productIds).toEqual(["superwall_pro_3999"]);
+  expect(cfg.paywallResponses[0]!.featureGatingBehavior).toBe("nonGated");
+  // Products
+  expect(cfg.products).toHaveLength(1);
+  expect(cfg.products[0]!.id).toBe("superwall_pro_3999");
+  expect(cfg.products[0]!.store).toBe("stripe");
+  expect(cfg.products[0]!.entitlements).toEqual([{ id: "pro" }]);
 });
 
 test("parseConfig is lenient — missing arrays default to []", () => {
@@ -292,6 +366,23 @@ test("ConfigService.fetch failure on a malformed payload surfaces ConfigParseErr
 // ConfigState actor — pure reducers + transition observability
 // ---------------------------------------------------------------------------
 
+test("extractEntitlementsByProductId: builds productId → entitlementIds map", () => {
+  const map = extractEntitlementsByProductId([
+    { id: "pro_yearly", entitlements: [{ id: "pro" }] },
+    { id: "pro_monthly", entitlements: [{ id: "pro" }] },
+    { id: "vip", entitlements: [{ id: "pro" }, { id: "vip_only" }] },
+    { id: "no_entitlements" },
+  ]);
+  expect(map.get("pro_yearly")).toEqual(["pro"]);
+  expect(map.get("pro_monthly")).toEqual(["pro"]);
+  expect(map.get("vip")).toEqual(["pro", "vip_only"]);
+  expect(map.has("no_entitlements")).toBe(false);
+});
+
+test("extractEntitlementsByProductId: empty input → empty map", () => {
+  expect(extractEntitlementsByProductId([]).size).toBe(0);
+});
+
 test("ConfigUpdates.SetRetrieving transitions any prior state to Retrieving", () => {
   expect(ConfigUpdates.SetRetrieving(ConfigState.None)).toEqual({
     _tag: "Retrieving",
@@ -344,6 +435,47 @@ test("ConfigService.fetch transitions None → Retrieved on success", async () =
   expect(final._tag).toBe("Retrieved");
 });
 
+test("ConfigService.fetch surfaces Retrying between attempts (fail → retry → succeed)", async () => {
+  // Capture the state tag observed at the *first* failed attempt — by then
+  // the fetch is mid-flight and the second attempt hasn't started yet.
+  let calls = 0;
+  let stateAtSecondAttempt: ConfigState | null = null;
+  const responder = async () => {
+    calls++;
+    if (calls === 1) return new Response("nope", { status: 500 });
+    // Slow second attempt so the poller can observe Retrying.
+    await new Promise<void>((r) => setTimeout(r, 30));
+    return new Response(sampleConfig, { status: 200 });
+  };
+  const { layer } = buildStack(mockFetch(responder));
+  const final = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const c = yield* ConfigService;
+      // Snapshot state from inside fetch's lifetime — fork a poller that
+      // captures whatever tag is set at the moment the second network call
+      // fires. We poll because we don't own the network mock's await point.
+      const poll: Effect.Effect<void> = Effect.gen(function* () {
+        while (true) {
+          if (calls >= 2 && stateAtSecondAttempt === null) {
+            stateAtSecondAttempt = yield* c.state();
+            return;
+          }
+          yield* Effect.sleep("1 millis");
+        }
+      });
+      const fiber = yield* Effect.fork(poll);
+      yield* c.fetch();
+      yield* fiber;
+      return yield* c.state();
+    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
+  );
+  expect(final._tag).toBe("Retrieved");
+  expect(calls).toBe(2);
+  // Between attempts the actor is in Retrying.
+  expect(stateAtSecondAttempt?._tag).toBe("Retrying");
+});
+
 test("ConfigService.fetch transitions to Failed on fetch error", async () => {
   const { layer } = buildStack(
     mockFetch(() => new Response("nope", { status: 500 })),
@@ -359,10 +491,46 @@ test("ConfigService.fetch transitions to Failed on fetch error", async () => {
   expect(final._tag).toBe("Failed");
 });
 
-test("ConfigService.fetch concurrent calls share one in-flight network round-trip", async () => {
+test("ConfigService: reset queued behind a slow fetch lands strictly after it", async () => {
+  // Slow fetch (resolves after 50ms) + immediate reset(). The serializer
+  // must run reset *after* fetch finishes; otherwise reset would clobber
+  // the about-to-be-set Retrieved state and we'd be stuck somewhere weird.
+  const fetchImpl = mockFetch(async () => {
+    await new Promise<void>((r) => setTimeout(r, 50));
+    return new Response(sampleConfig, { status: 200 });
+  });
+  const { layer } = buildStack(fetchImpl);
+  const finalState = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const c = yield* ConfigService;
+      // Fire fetch + reset concurrently. Both go through the same
+      // serializer; reset queues behind fetch.
+      yield* Effect.all([c.fetch().pipe(Effect.either), c.reset()], {
+        concurrency: "unbounded",
+      });
+      return yield* c.state();
+    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
+  );
+  // After the fetch+reset sequence, state must end up at None (reset wins
+  // because it ran second per arrival order).
+  expect(finalState._tag).toBe("None");
+});
+
+test("ConfigService.fetch concurrent calls serialize through the actor", async () => {
+  // Two concurrent fetches each hit the network — the semaphore queues
+  // them serially, but each runs to completion. (We dropped the
+  // dedup-on-Retrieved short-circuit because it silently no-op'd
+  // intentional refresh calls; serialization alone preserves ordering.)
   let calls = 0;
-  const fetchImpl = mockFetch(() => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchImpl = mockFetch(async () => {
     calls++;
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise<void>((r) => setTimeout(r, 5));
+    inFlight--;
     return new Response(sampleConfig, { status: 200 });
   });
   const { layer } = buildStack(fetchImpl);
@@ -376,7 +544,9 @@ test("ConfigService.fetch concurrent calls share one in-flight network round-tri
       expect(a.buildId).toBe(b.buildId);
     }).pipe(Effect.provide(layer)) as Effect.Effect<void, never, never>,
   );
-  expect(calls).toBe(1);
+  expect(calls).toBe(2);
+  // Strict serialization — never two fetches in flight at the same time.
+  expect(maxInFlight).toBe(1);
 });
 
 test("ConfigService.hydrateFromStorage seeds the actor in Retrieved", async () => {

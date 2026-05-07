@@ -418,6 +418,70 @@ test("IdentityService.awaitReady resolves only after the pending-set drains", as
   expect(result._tag).toBe("Right");
 });
 
+test("IdentityService: concurrent identify + reset land in arrival order (snapshot never half-applied)", async () => {
+  // identify("u_1") + reset() fired concurrently. The serializer runs them
+  // strictly in arrival order: identify first → snapshot has appUserId=u_1,
+  // then reset → snapshot back to anonymous (appUserId="") with a fresh
+  // alias. We assert (a) the final state is the reset (anonymous +
+  // regenerated alias), (b) at no point during the run was the snapshot
+  // half-applied (e.g. appUserId=u_1 with the regenerated alias).
+  const { stack, adapter } = freshStack();
+  // Pre-seed an alias so the post-hydrate snapshot is deterministic.
+  await adapter.set(asStorageKey(STORAGE_KEYS.aliasId), "$SuperwallAlias:initial");
+
+  const observed: Array<{ alias: string; user: string }> = [];
+  await runWith(
+    stack,
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const initial = yield* IdentityService.current();
+      const initialAlias = initial.aliasId as string;
+
+      // Subscribe to snapshot transitions.
+      const observer = yield* Effect.fork(
+        IdentityService.observe().pipe(
+          Effect.flatMap((stream) =>
+            stream.pipe(
+              Stream.tap((snap) => {
+                if (snap !== null) {
+                  observed.push({
+                    alias: snap.aliasId as string,
+                    user: snap.appUserId as string,
+                  });
+                }
+                return Effect.void;
+              }),
+              Stream.take(3),
+              Stream.runDrain,
+            ),
+          ),
+        ),
+      );
+
+      // Concurrent identify + reset.
+      yield* Effect.all(
+        [IdentityService.identify("u_1"), IdentityService.reset()],
+        { concurrency: "unbounded" },
+      );
+
+      yield* observer;
+
+      const finalSnap = yield* IdentityService.current();
+      expect(finalSnap.appUserId).toBe(""); // reset ran last
+      expect(finalSnap.aliasId).not.toBe(initialAlias); // alias regenerated
+
+      // Verify no half-applied state: every observed snapshot has
+      // (alias=initial AND user∈{"","u_1"}) OR (alias=fresh AND user="").
+      // I.e. (newAlias, "u_1") must never appear.
+      for (const o of observed) {
+        if (o.alias !== initialAlias) {
+          expect(o.user).toBe("");
+        }
+      }
+    }),
+  );
+});
+
 test("IdentityService.awaitReady stays pending while items remain in the set", async () => {
   const { stack } = freshStack();
   const result = await runWith(

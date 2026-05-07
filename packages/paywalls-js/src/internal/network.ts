@@ -1,11 +1,5 @@
 // NetworkService — wraps `fetch` for the four Superwall HTTP endpoints
-// (config, collector, enrichment, confirm_assignments). v0 ships the
-// header builder + `getStaticConfig` + `postEvents`. Enrichment and
-// confirm-assignments land alongside their callers.
-//
-// Per API.md §11.1 / §11.3 / §11.4. Retries (`Schedule.exponential` honoring
-// `maxConfigRetryCount`) and the 500ms / 1s fresh-window cache from §11.7
-// land in §2 follow-up — added once the config consumer exists to drive them.
+// (config, collector, enrichment, confirm_assignments). Per API.md §11.
 
 import { Context, Effect, Layer } from "effect";
 import { SDK_VERSION } from "../version.ts";
@@ -16,10 +10,6 @@ import {
   NetworkRequestError,
 } from "./errors.ts";
 import { IdentityService } from "./identity.ts";
-
-// ---------------------------------------------------------------------------
-// Hosts
-// ---------------------------------------------------------------------------
 
 interface EnvironmentHosts {
   readonly base: string;
@@ -63,10 +53,6 @@ export const resolveHosts = (env: NetworkEnvironment): EnvironmentHosts => {
   return env.custom;
 };
 
-// ---------------------------------------------------------------------------
-// Config (per-instance data)
-// ---------------------------------------------------------------------------
-
 export interface NetworkConfig {
   readonly apiKey: string;
   readonly environment: NetworkEnvironment;
@@ -76,10 +62,6 @@ export interface NetworkConfig {
   /** Override fetch (tests); falls back to `globalThis.fetch`. */
   readonly fetch?: typeof fetch;
 }
-
-// ---------------------------------------------------------------------------
-// Browser / BE-safe globals fallbacks
-// ---------------------------------------------------------------------------
 
 const safeReadString = (read: () => string | undefined): string => {
   try {
@@ -137,21 +119,13 @@ const resolveInterfaceStyle = (): "light" | "dark" => {
     ) {
       return "dark";
     }
-  } catch {
-    // no-op
-  }
+  } catch {}
   return "light";
 };
 
 // Custom environments are typically internal proxies → assume production.
-// Consumers running custom hosts in dev can override via headers if they
-// need to flip the flag. (Code-review P1.)
-const isSandbox = (env: NetworkEnvironment): boolean =>
+export const isSandbox = (env: NetworkEnvironment): boolean =>
   typeof env === "string" ? env !== "release" : false;
-
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
 
 const make = (config: NetworkConfig) =>
   Effect.gen(function* () {
@@ -162,8 +136,8 @@ const make = (config: NetworkConfig) =>
         ? (globalThis.fetch.bind(globalThis) as typeof fetch)
         : null);
 
-    // fetch availability is checked lazily inside requireFetch() below —
-    // building headers etc. still works without a fetch impl.
+    // fetch availability is checked lazily in requireFetch() — building
+    // headers still works without a fetch impl.
 
     const buildHeaders = Effect.fn("NetworkService.buildHeaders")(function* (
       extra?: Record<string, string>,
@@ -248,8 +222,7 @@ const make = (config: NetworkConfig) =>
       },
     );
 
-    /** POST /api/v1/events on the collector host.
-     *  `events` is the array shape from API.md §11.4. */
+    /** POST /api/v1/events on the collector host. */
     const postEvents = Effect.fn("NetworkService.postEvents")(function* (
       events: ReadonlyArray<EventEnvelope>,
     ) {
@@ -285,9 +258,7 @@ const make = (config: NetworkConfig) =>
       }
     });
 
-    /** POST /api/v1/enrich on the enrichment host.
-     *  Body: `{ user, device }`; response: `{ user, device }` of enriched
-     *  attributes that the SDK merges into local state. Per API.md §11.6. */
+    /** POST /api/v1/enrich on the enrichment host. */
     const postEnrichment = Effect.fn("NetworkService.postEnrichment")(
       function* (payload: EnrichmentRequest) {
         const hosts = resolveHosts(config.environment);
@@ -333,11 +304,138 @@ const make = (config: NetworkConfig) =>
       },
     );
 
+    /** POST /api/v1/confirm_assignments on the base host. Best-effort —
+     *  the local sticky cache is authoritative, so callers swallow failures. */
+    const postConfirmAssignments = Effect.fn(
+      "NetworkService.postConfirmAssignments",
+    )(function* (payload: ConfirmAssignmentsRequest) {
+      if (payload.assignments.length === 0) return;
+      const hosts = resolveHosts(config.environment);
+      const url = `https://${hosts.base}/api/v1/confirm_assignments`;
+      const headers = yield* buildHeaders();
+
+      const response = yield* Effect.tryPromise({
+        try: async () =>
+          requireFetch()(url, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+          }),
+        catch: (cause) =>
+          new NetworkRequestError({
+            method: "POST",
+            url,
+            message: `confirm_assignments network error: ${describe(cause)}`,
+            cause,
+          }),
+      });
+
+      if (!response.ok) {
+        return yield* Effect.fail(
+          new NetworkRequestError({
+            method: "POST",
+            url,
+            status: response.status,
+            message: `confirm_assignments returned ${response.status}`,
+          }),
+        );
+      }
+    });
+
+    /** POST /api/v1/redeem — redemption-code → entitlements + customer info. */
+    const postRedeem = Effect.fn("NetworkService.postRedeem")(function* (
+      payload: RedeemRequest,
+    ) {
+      const hosts = resolveHosts(config.environment);
+      // Android API.kt → `/subscriptions-api/public/v1/redeem`.
+      const url = `https://${hosts.subscriptions}/subscriptions-api/public/v1/redeem`;
+      const headers = yield* buildHeaders();
+      const response = yield* Effect.tryPromise({
+        try: async () =>
+          requireFetch()(url, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+          }),
+        catch: (cause) =>
+          new NetworkRequestError({
+            method: "POST",
+            url,
+            message: `redeem network error: ${describe(cause)}`,
+            cause,
+          }),
+      });
+      if (!response.ok) {
+        return yield* Effect.fail(
+          new NetworkRequestError({
+            method: "POST",
+            url,
+            status: response.status,
+            message: `redeem returned ${response.status}`,
+          }),
+        );
+      }
+      return yield* Effect.tryPromise({
+        try: () => response.json() as Promise<RedeemResponse>,
+        catch: (cause) =>
+          new NetworkDecodingError({
+            url,
+            message: `redeem JSON decode failed: ${describe(cause)}`,
+            cause,
+          }),
+      });
+    });
+
+    /** GET /subscriptions-api/public/v1/users/{id}/entitlements — periodic
+     *  poll to refresh active entitlements granted via web checkout. {id}
+     *  is the userId when present, otherwise the deviceId. */
+    const getWebEntitlements = Effect.fn(
+      "NetworkService.getWebEntitlements",
+    )(function* (params: { userId?: string; deviceId: string }) {
+      const hosts = resolveHosts(config.environment);
+      const id = params.userId ?? params.deviceId;
+      const qs = new URLSearchParams({ deviceId: params.deviceId });
+      const url = `https://${hosts.subscriptions}/subscriptions-api/public/v1/users/${encodeURIComponent(id)}/entitlements?${qs.toString()}`;
+      const headers = yield* buildHeaders();
+      const response = yield* Effect.tryPromise({
+        try: async () => requireFetch()(url, { method: "GET", headers }),
+        catch: (cause) =>
+          new NetworkRequestError({
+            method: "GET",
+            url,
+            message: `web_entitlements network error: ${describe(cause)}`,
+            cause,
+          }),
+      });
+      if (!response.ok) {
+        return yield* Effect.fail(
+          new NetworkRequestError({
+            method: "GET",
+            url,
+            status: response.status,
+            message: `web_entitlements returned ${response.status}`,
+          }),
+        );
+      }
+      return yield* Effect.tryPromise({
+        try: () => response.json() as Promise<WebEntitlementsResponse>,
+        catch: (cause) =>
+          new NetworkDecodingError({
+            url,
+            message: `web_entitlements JSON decode failed: ${describe(cause)}`,
+            cause,
+          }),
+      });
+    });
+
     return {
       buildHeaders,
       getStaticConfig,
       postEvents,
       postEnrichment,
+      postConfirmAssignments,
+      postRedeem,
+      getWebEntitlements,
     } as const;
   });
 
@@ -347,11 +445,19 @@ export interface EnrichmentRequest {
   readonly device: Record<string, JsonValue>;
 }
 
-/** Response from `POST /api/v1/enrich`. Server-known augmentations the SDK
- *  merges into its local user/device attribute snapshots. */
+/** Response from `POST /api/v1/enrich` — server-known augmentations the
+ *  SDK merges into its local snapshots. */
 export interface EnrichmentResponse {
   readonly user: Record<string, JsonValue | null>;
   readonly device: Record<string, JsonValue | null>;
+}
+
+/** Body of `POST /api/v1/confirm_assignments`. */
+export interface ConfirmAssignmentsRequest {
+  readonly assignments: ReadonlyArray<{
+    readonly experimentId: string;
+    readonly variant: { readonly id: string; readonly type: string };
+  }>;
 }
 
 export interface EventEnvelope {
@@ -378,22 +484,76 @@ export interface NetworkServiceImpl {
     EnrichmentResponse,
     NetworkRequestError | NetworkDecodingError | IdentityNotHydratedError
   >;
+  readonly postConfirmAssignments: (
+    payload: ConfirmAssignmentsRequest,
+  ) => Effect.Effect<void, NetworkRequestError | IdentityNotHydratedError>;
+  readonly postRedeem: (
+    payload: RedeemRequest,
+  ) => Effect.Effect<
+    RedeemResponse,
+    NetworkRequestError | NetworkDecodingError | IdentityNotHydratedError
+  >;
+  readonly getWebEntitlements: (params: {
+    userId?: string;
+    deviceId: string;
+  }) => Effect.Effect<
+    WebEntitlementsResponse,
+    NetworkRequestError | NetworkDecodingError | IdentityNotHydratedError
+  >;
 }
 
-/**
- * Network service is runtime-injected per `createSuperwall` (apiKey +
- * environment vary per instance), so it's a `Context.Tag` rather than an
- * `Effect.Service` with a Default — see effect-best-practices skill on
- * "runtime injection" / "factory patterns" exception.
- */
+export interface RedeemRequest {
+  readonly deviceId: string;
+  readonly appUserId?: string;
+  readonly aliasId?: string;
+  readonly codes: ReadonlyArray<{ code: string; firstRedemption?: boolean }>;
+  readonly externalAccountId?: string;
+}
+
+export interface RedeemResponse {
+  readonly codes: ReadonlyArray<{
+    code: string;
+    status: "SUCCESS" | "ERROR" | "EXPIRED" | "INVALID";
+    error?: { message: string };
+    redemptionInfo?: { ownership?: { type: "AppUser" | "Device" } };
+  }>;
+  readonly customerInfo?: {
+    entitlements?: ReadonlyArray<{
+      id: string;
+      isActive?: boolean;
+      productIds?: string[];
+      type?: string;
+    }>;
+  };
+  readonly allCodes?: ReadonlyArray<{ code: string; firstRedemption?: boolean }>;
+}
+
+export interface WebEntitlementsResponse {
+  readonly customerInfo?: {
+    entitlements?: ReadonlyArray<{
+      id: string;
+      isActive?: boolean;
+      productIds?: string[];
+      type?: string;
+    }>;
+  };
+  readonly entitlements?: ReadonlyArray<{
+    id: string;
+    isActive?: boolean;
+    productIds?: string[];
+    type?: string;
+  }>;
+}
+
+/** Runtime-injected per `createSuperwall` (apiKey + environment vary per
+ *  instance), hence `Context.Tag` rather than `Effect.Service`. */
 export class NetworkService extends Context.Tag("@superwall/NetworkService")<
   NetworkService,
   NetworkServiceImpl
 >() {}
 
-/** Build a Layer that exposes NetworkService given runtime config + an
- *  IdentityService Layer. The IdentityService is provided to NetworkService
- *  internally; the resulting Layer outputs both for downstream consumers. */
+/** Build a NetworkService Layer over runtime config + an IdentityService
+ *  Layer (re-exposed for downstream consumers). */
 export const networkServiceLayer = (
   config: NetworkConfig,
   identityLayer: Layer.Layer<IdentityService>,

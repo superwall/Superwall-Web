@@ -1,17 +1,6 @@
-// `createBrowserStorage` — public StorageAdapter backed by `localStorage`
-// with a small set of identity keys mirrored to cookies for SSR / cross-
-// origin readability. Per API.md §5 + §7.4.
-//
-// Mirrored keys (source → cookie):
-//   superwall.aliasId   → _sw_alias_id
-//   superwall.appUserId → _sw_user_id     (provisional cookie name)
-//   superwall.vendorId  → _sw_vendor_id   (provisional cookie name)
-//
-// Other localStorage keys (firstSeenAt, totalPaywallViews, computedProperties,
-// userAttributes, integrationAttributes) live in localStorage only.
-//
-// On read: localStorage wins; cookie is the fallback when localStorage
-// is empty. This matches the SSR-hydration policy in API.md §7.4.
+// `createBrowserStorage` — StorageAdapter backed by `localStorage`, mirroring
+// a small subset of identity keys to cookies for SSR / cross-origin readability.
+// On read: localStorage wins; cookie is the fallback when localStorage is empty.
 
 import { STORAGE_KEYS, type StorageAdapter } from "../types.ts";
 import {
@@ -47,7 +36,7 @@ const resolveLocalStorage = (override?: Storage): Storage | null => {
   if (typeof globalThis === "undefined") return null;
   if (!("localStorage" in globalThis)) return null;
   try {
-    // Touch the API — Safari private mode throws on access.
+    // Safari private mode throws on access.
     const ls = (globalThis as { localStorage: Storage }).localStorage;
     return ls;
   } catch {
@@ -73,8 +62,7 @@ export const createBrowserStorage = (
   const cookieFor = (key: string): string | undefined => COOKIE_MIRROR.get(key);
 
   // Cookie deletion needs the SAME `Secure`/`SameSite`/`Path`/`Domain` as
-  // creation, otherwise Chrome / Safari treat it as a different cookie and
-  // leave the original in place. (Code-review P1.)
+  // creation, otherwise Chrome/Safari treat it as a different cookie.
   const deleteCookieOpts = {
     ...(options.cookieDomain !== undefined && { domain: options.cookieDomain }),
     ...(options.cookieSecure !== undefined && { secure: options.cookieSecure }),
@@ -85,7 +73,6 @@ export const createBrowserStorage = (
 
   return {
     get: (key) => {
-      // localStorage authoritative; cookie is the SSR fallback.
       if (ls) {
         const v = ls.getItem(key);
         if (v !== null) return v;
@@ -103,8 +90,7 @@ export const createBrowserStorage = (
         try {
           ls.setItem(key, value);
         } catch {
-          // localStorage quota / private mode — fall through to cookie if
-          // applicable so identity isn't lost entirely.
+          // Quota / private mode — fall through to cookie so identity isn't lost.
         }
       }
       const cookieName = cookieFor(key);
@@ -115,9 +101,7 @@ export const createBrowserStorage = (
       if (ls) {
         try {
           ls.removeItem(key);
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       }
       const cookieName = cookieFor(key);
       if (cookieName) deleteCookie(cookieName, deleteCookieOpts);
@@ -126,13 +110,11 @@ export const createBrowserStorage = (
     clear: () => {
       if (ls) {
         try {
-          // Only remove our own keys — don't nuke the host app's localStorage.
+          // Only remove our own keys — don't nuke the host app's storage.
           for (const key of Object.values(STORAGE_KEYS)) {
             ls.removeItem(key);
           }
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       }
       for (const cookieName of COOKIE_MIRROR.values()) {
         deleteCookie(cookieName, deleteCookieOpts);

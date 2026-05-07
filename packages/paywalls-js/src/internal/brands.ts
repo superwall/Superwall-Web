@@ -1,9 +1,4 @@
-// Internal-only branded types. These never leak to the public surface
-// (consumers do not import from `internal/`). Per API.md §0.1: branded
-// IDs are an internal correctness aid, not part of the public contract.
-//
-// First brand: StorageKey. Identity / placement / experiment / product
-// brands land alongside their owning services.
+// Internal-only branded ID types. Not part of the public contract.
 
 import { Schema } from "effect";
 
@@ -13,10 +8,6 @@ export type StorageKey = typeof StorageKey.Type;
 /** Cast a plain string into a StorageKey. Use only at the public/internal
  *  boundary or for the canonical keys defined in `types.STORAGE_KEYS`. */
 export const asStorageKey = (s: string): StorageKey => s as StorageKey;
-
-// ---------------------------------------------------------------------------
-// Identity brands
-// ---------------------------------------------------------------------------
 
 export const AliasId = Schema.String.pipe(Schema.brand("@superwall/AliasId"));
 export type AliasId = typeof AliasId.Type;
