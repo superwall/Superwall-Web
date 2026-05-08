@@ -79,7 +79,14 @@ const makeWithPaywall = (
                 url: "https://paywalls.superwall.test/pw_default",
               },
             ],
-            products: [],
+            products: [
+              {
+                id: "pro_yearly",
+                product_identifier: "pro_yearly",
+                store: "stripe",
+                entitlements: [{ id: "pro" }],
+              },
+            ],
             toggles: [],
             localization: { locales: [{ locale: "en-US" }] },
           }),

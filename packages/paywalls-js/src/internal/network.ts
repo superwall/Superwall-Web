@@ -403,7 +403,7 @@ const make = (config: NetworkConfig) =>
           new NetworkRequestError({
             method: "GET",
             url,
-            message: `web_entitlements network error: ${describe(cause)}`,
+            message: `entitlements network error: ${describe(cause)}`,
             cause,
           }),
       });
@@ -413,7 +413,7 @@ const make = (config: NetworkConfig) =>
             method: "GET",
             url,
             status: response.status,
-            message: `web_entitlements returned ${response.status}`,
+            message: `entitlements returned ${response.status}`,
           }),
         );
       }
@@ -422,7 +422,7 @@ const make = (config: NetworkConfig) =>
         catch: (cause) =>
           new NetworkDecodingError({
             url,
-            message: `web_entitlements JSON decode failed: ${describe(cause)}`,
+            message: `entitlements JSON decode failed: ${describe(cause)}`,
             cause,
           }),
       });

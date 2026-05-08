@@ -17,12 +17,6 @@ import type { PaywallPurchaseEvent } from "../presenter.ts";
 const REDEMPTION_PARAM = "code";
 const REDEMPTION_PREFIX = "redemption_";
 const POLL_INTERVAL_MS = 60_000;
-/** After a successful purchase we optimistically flip sub status to ACTIVE.
- *  Background entitlements polling can race ahead of the BE's writer side
- *  and report INACTIVE for a few seconds; suppress that downgrade until the
- *  purchased entitlement set has propagated. Mirrors the Android SDK's
- *  "recent purchase" behavior. */
-const RECENT_PURCHASE_GRACE_MS = 30_000;
 
 export interface AutomaticPurchaseControllerDeps {
   /** Subscribe to in-flight paywall purchase events. Returns unsubscribe. */
@@ -35,6 +29,12 @@ export interface AutomaticPurchaseControllerDeps {
   setSubscriptionStatus(s: SubscriptionStatus): void;
   /** Surface log messages via the SDK's logger. */
   logWarn(message: string, error?: string): void;
+  /** Resolve a product id to its entitlement ids using the paywall config.
+   *  Returns `[]` when the product isn't in the active config (legacy
+   *  paywalls, test mode). The SDK uses this to materialize the active
+   *  entitlement set on `post_checkout_complete` without waiting for the
+   *  next /entitlements refresh — both signals are authoritative and agree. */
+  resolveEntitlementsForProduct(productId: string): string[];
   /** Browser location for redemption-code URL detection. SSR-safe. */
   location?: { search: string; href: string };
   /** Replace history entry with the given URL (strips ?code= after consume). */
@@ -50,26 +50,17 @@ export const createAutomaticPurchaseController = (
   deps: AutomaticPurchaseControllerDeps,
 ): PurchaseController => {
   let stopPolling: (() => void) | null = null;
-  let recentPurchaseUntil = 0;
-  const now = () =>
-    typeof performance !== "undefined" && typeof performance.now === "function"
-      ? performance.now()
-      : Date.now();
-  /** Apply a refreshed entitlement set, but don't downgrade ACTIVE → INACTIVE
-   *  during the post-purchase grace window. Prevents the optimistic ACTIVE
-   *  flip from flickering back to INACTIVE while the BE is still writing
-   *  the new entitlement row. */
+  /** Apply a refreshed entitlement set verbatim. Both `post_checkout_complete`
+   *  and the periodic /entitlements poll are authoritative; they agree by
+   *  contract (the BE has committed before either signal fires), so we
+   *  never need to mediate between them — last writer wins. */
   const applyRefresh = (ents: Entitlement[]): void => {
     const active = ents.filter((e) => e.isActive);
-    if (active.length > 0) {
-      deps.setSubscriptionStatus({ status: "ACTIVE", entitlements: active });
-      return;
-    }
-    if (now() < recentPurchaseUntil) {
-      // Suppress INACTIVE during grace window.
-      return;
-    }
-    deps.setSubscriptionStatus({ status: "INACTIVE" });
+    deps.setSubscriptionStatus(
+      active.length > 0
+        ? { status: "ACTIVE", entitlements: active }
+        : { status: "INACTIVE" },
+    );
   };
 
   const purchase = async (product: Product): Promise<PurchaseResult> =>
@@ -85,32 +76,33 @@ export const createAutomaticPurchaseController = (
         // still has work to do and may yet fail.
         if (ev.type === "postCheckout") {
           off();
-          // Optimistic sub-status flip; the entitlements polling loop will
-          // confirm/refine. Without a server-confirmed entitlement set in
-          // the event we can only assert "active" against the purchased
-          // product id.
-          deps.setSubscriptionStatus({
-            status: "ACTIVE",
-            entitlements: [
-              {
-                id: product.id,
+          // Resolve the entitlement ids the purchased product grants from
+          // the active paywall config. Mirrors how the mobile SDKs build
+          // the post-purchase status: product → config.entitlements → set.
+          // The next /entitlements poll will return the same set; both
+          // sources are authoritative and agree by contract.
+          const ids = deps.resolveEntitlementsForProduct(product.id);
+          if (ids.length > 0) {
+            deps.setSubscriptionStatus({
+              status: "ACTIVE",
+              entitlements: ids.map((id) => ({
+                id,
                 type: "SERVICE_LEVEL",
                 isActive: true,
                 productIds: [product.id],
-              } satisfies Entitlement,
-            ],
-          });
-          // Open the grace window so a stale INACTIVE refresh response
-          // can't immediately undo the optimistic flip.
-          recentPurchaseUntil = now() + RECENT_PURCHASE_GRACE_MS;
-          // Kick a fresh entitlements fetch so the authoritative set lands
-          // shortly after the paywall closes.
-          void deps
-            .refreshEntitlements()
-            .then((ents) => {
-              if (ents !== null) applyRefresh(ents);
-            })
-            .catch(() => {});
+              } satisfies Entitlement)),
+            });
+          } else {
+            // No config entry (legacy / unmapped product). Fall back to a
+            // refresh to learn the entitlement set; status stays whatever
+            // it was until the response lands.
+            void deps
+              .refreshEntitlements()
+              .then((ents) => {
+                if (ents !== null) applyRefresh(ents);
+              })
+              .catch(() => {});
+          }
           resolve({ type: "purchased" });
         } else if (ev.type === "fail") {
           off();

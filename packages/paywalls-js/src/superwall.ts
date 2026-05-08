@@ -1433,6 +1433,20 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           )
           .catch(() => {});
       },
+      resolveEntitlementsForProduct: (productId) => {
+        // Synchronous read of the cached config — `current()` is a Ref get,
+        // safe under runSync. Returns [] when config hasn't loaded yet.
+        const cfg = runtime.runSync(
+          Effect.gen(function* () {
+            const config = yield* ConfigService;
+            return yield* config.current();
+          }).pipe(Effect.catchAll(() => Effect.succeed(null))),
+        );
+        if (!cfg) return [];
+        return (
+          extractEntitlementsByProductId(cfg.products).get(productId) ?? []
+        );
+      },
     });
 
   const purchases: PurchasesNamespace = {

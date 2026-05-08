@@ -20,6 +20,7 @@ const stubDeps = (overrides: {
   redeem?: (code: string) => Promise<RedemptionOutcome>;
   refresh?: () => Promise<Entitlement[] | null>;
   location?: { search: string; href: string };
+  entitlementsByProduct?: Record<string, string[]>;
 }): Stub => {
   const handlers = new Set<(ev: PaywallPurchaseEvent) => void>();
   const stub: Stub = {
@@ -49,14 +50,18 @@ const stubDeps = (overrides: {
       logWarn: (msg) => {
         stub.warnings.push(msg);
       },
+      resolveEntitlementsForProduct: (productId) =>
+        overrides.entitlementsByProduct?.[productId] ?? [],
       ...(overrides.location && { location: overrides.location }),
     },
   };
   return stub;
 };
 
-test("purchase() resolves on post_checkout_complete + optimistically flips sub status to ACTIVE", async () => {
-  const stub = stubDeps({});
+test("purchase() resolves on post_checkout_complete + ACTIVE flip uses entitlement ids from config", async () => {
+  const stub = stubDeps({
+    entitlementsByProduct: { pro_yearly: ["pro", "premium"] },
+  });
   const controller = createAutomaticPurchaseController(stub.deps);
   const promise = controller.purchase({
     id: "pro_yearly",
@@ -83,10 +88,44 @@ test("purchase() resolves on post_checkout_complete + optimistically flips sub s
   expect(stub.setStatuses).toHaveLength(1);
   expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
   if (stub.setStatuses[0]!.status === "ACTIVE") {
+    // Entitlement ids come from config, NOT a synthesized fallback.
     expect(stub.setStatuses[0]!.entitlements.map((e) => e.id)).toEqual([
-      "pro_yearly",
+      "pro",
+      "premium",
     ]);
   }
+});
+
+test("purchase() with no config entry for product falls back to refreshEntitlements()", async () => {
+  const stub = stubDeps({
+    refresh: async () => [
+      {
+        id: "fallback_ent",
+        type: "SERVICE_LEVEL" as const,
+        isActive: true,
+        productIds: ["unmapped_product"],
+      },
+    ],
+  });
+  const controller = createAutomaticPurchaseController(stub.deps);
+  const promise = controller.purchase({
+    id: "unmapped_product",
+    store: "stripe",
+    entitlements: [],
+  });
+  queueMicrotask(() => {
+    stub.fire({
+      type: "postCheckout",
+      productId: "unmapped_product",
+      checkoutContextId: "ckctx_x",
+    });
+  });
+  const r = await promise;
+  expect(r.type).toBe("purchased");
+  // Wait for the fallback refresh.
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  expect(stub.refreshes).toBe(1);
+  expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
 });
 
 test("purchase() resolves cancelled on stripe_checkout_abandon", async () => {
@@ -144,30 +183,6 @@ test("restorePurchases() calls refreshEntitlements + flips sub status", async ()
   const r = await controller.restorePurchases();
   expect(r.type).toBe("restored");
   expect(stub.refreshes).toBe(1);
-  expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
-});
-
-test("recent-purchase grace window suppresses INACTIVE downgrades from racing refresh", async () => {
-  // Refresh always returns an empty (== INACTIVE) entitlement set.
-  const stub = stubDeps({ refresh: async () => [] });
-  const controller = createAutomaticPurchaseController(stub.deps);
-  const promise = controller.purchase({
-    id: "pro_yearly",
-    store: "stripe",
-    entitlements: [],
-  });
-  queueMicrotask(() => {
-    stub.fire({
-      type: "postCheckout",
-      productId: "pro_yearly",
-      checkoutContextId: "ckctx_test",
-    });
-  });
-  await promise;
-  // Wait for the kicked refresh to settle.
-  await new Promise<void>((r) => setTimeout(r, 20));
-  // Optimistic ACTIVE flip should NOT be undone by the empty refresh.
-  expect(stub.setStatuses).toHaveLength(1);
   expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
 });
 

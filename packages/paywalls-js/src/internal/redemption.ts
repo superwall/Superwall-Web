@@ -1,5 +1,6 @@
 // RedemptionService — POSTs Superwall-issued redemption codes to
-// /api/v1/redeem, persists the response, polls /api/v1/web_entitlements
+// /subscriptions-api/public/v1/redeem, persists the response, polls
+// /subscriptions-api/public/v1/users/{id}/entitlements
 // for refresh. Used by the default automaticPurchaseController; consumers
 // don't interact with this directly.
 
@@ -43,7 +44,7 @@ export interface RedemptionServiceImpl {
   readonly redeem: (
     type: RedeemType,
   ) => Effect.Effect<RedeemResponse | null>;
-  /** One-shot fetch + merge of /web_entitlements. */
+  /** One-shot fetch + merge of /users/{id}/entitlements. */
   readonly refreshWebEntitlements: () => Effect.Effect<WebEntitlementsResponse | null>;
   /** Start a polling loop that calls refreshWebEntitlements every `intervalMs`.
    *  Returns a cleanup callback. Idempotent — second call cancels the first. */
@@ -164,7 +165,7 @@ const make = Effect.gen(function* () {
             Effect.tapError((err) =>
               logger.warn(
                 "transactions",
-                "web_entitlements GET failed",
+                "entitlements GET failed",
                 null,
                 err.message,
               ),
