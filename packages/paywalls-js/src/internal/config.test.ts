@@ -232,7 +232,7 @@ const buildStack = (fetchImpl: typeof fetch) => {
   };
   const network = networkServiceLayer(networkConfig, identity);
   const upstream = Layer.merge(network, storage);
-  return { adapter, layer: configServiceLayer(upstream) };
+  return { adapter, layer: configServiceLayer("pk_test", upstream) };
 };
 
 const sampleConfig = JSON.stringify({

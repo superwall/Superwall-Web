@@ -69,9 +69,13 @@ export const user = {
   ),
 } as const;
 
+/** Top-level `register` aliasing the named-export pattern of the mobile
+ *  SDKs. `superwall.register(...)` on the default instance. */
+export const register = async (
+  ...args: Parameters<Superwall["register"]>
+): ReturnType<Superwall["register"]> => requireDefault().register(...args);
+
 export const placements = {
-  register: async (...args: Parameters<Superwall["placements"]["register"]>) =>
-    requireDefault().placements.register(...args),
   getPresentationResult: async (
     ...args: Parameters<Superwall["placements"]["getPresentationResult"]>
   ) => requireDefault().placements.getPresentationResult(...args),

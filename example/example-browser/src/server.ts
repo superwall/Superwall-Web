@@ -9,12 +9,24 @@ const port = Number(process.env.PORT ?? 3000);
 // every API call through this Bun server. The example's app.ts rewrites
 // upstream URLs (api.superwall.me, collector.superwall.me, …) to /proxy/*
 // so the browser only ever talks to localhost.
-const PROXY_HOSTS: Record<string, string> = {
-  api: "https://api.superwall.me",
-  collector: "https://collector.superwall.me",
-  enrichment: "https://enrichment-api.superwall.com",
-  subscriptions: "https://subscriptions-api.superwall.com",
-};
+// Set SW_REVIEW_LAB_HOST (e.g.
+// "ir-feat-web-sdk-support.prd.us-east-1.review-lab.superwall-services.com")
+// to route all four upstreams through one review-lab origin. Leave unset
+// for production hosts.
+const REVIEW_LAB = process.env.SW_REVIEW_LAB_HOST;
+const PROXY_HOSTS: Record<string, string> = REVIEW_LAB
+  ? {
+      api: `https://${REVIEW_LAB}`,
+      collector: `https://${REVIEW_LAB}`,
+      enrichment: `https://${REVIEW_LAB}`,
+      subscriptions: `https://${REVIEW_LAB}`,
+    }
+  : {
+      api: "https://api.superwall.me",
+      collector: "https://collector.superwall.me",
+      enrichment: "https://enrichment-api.superwall.com",
+      subscriptions: "https://subscriptions-api.superwall.com",
+    };
 
 const proxy = async (req: Request, target: string, rest: string): Promise<Response> => {
   const url = new URL(req.url);
@@ -36,6 +48,14 @@ const proxy = async (req: Request, target: string, rest: string): Promise<Respon
   responseHeaders.delete("content-encoding");
   responseHeaders.delete("content-length");
   responseHeaders.delete("transfer-encoding");
+  // Strip upstream cache directives — Superwall's static_config sets
+  // long-lived Cache-Control which had the browser serving stale config
+  // across page reloads even with `cache: "no-store"` on the SDK fetch.
+  // For local dev we always want fresh data through the proxy.
+  responseHeaders.delete("etag");
+  responseHeaders.delete("last-modified");
+  responseHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  responseHeaders.set("Pragma", "no-cache");
   responseHeaders.set("Access-Control-Allow-Origin", "*");
   responseHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   responseHeaders.set("Access-Control-Allow-Headers", "*");

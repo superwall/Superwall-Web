@@ -1,21 +1,12 @@
 {
-  "name": "@superwall/paywalls-js",
+  "name": "@superwall/server",
   "version": "0.0.0",
   "type": "module",
   "license": "MIT",
-  "sideEffects": ["./src/browser/auto.ts"],
   "exports": {
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./browser": {
-      "types": "./src/browser/index.ts",
-      "default": "./src/browser/index.ts"
-    },
-    "./browser/auto": {
-      "types": "./src/browser/auto.ts",
-      "default": "./src/browser/auto.ts"
     }
   },
   "scripts": {
@@ -25,13 +16,9 @@
     "clean": "rm -rf node_modules .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@superwall/core": "workspace:*",
-    "@superwall/superscript": "^0.2.5",
-    "effect": "^3.18.0"
+    "@superwall/core": "workspace:*"
   },
   "devDependencies": {
-    "@effect/language-service": "^0.40.0",
-    "@happy-dom/global-registrator": "^15.0.0",
     "@types/bun": "latest",
     "typescript": "^5.6.0"
   }

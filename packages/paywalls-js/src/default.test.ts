@@ -12,6 +12,7 @@ import {
   NoDefaultSuperwallError,
   placements,
   purchases,
+  register,
   type StorageAdapter,
   user,
 } from "./index.ts";
@@ -131,11 +132,11 @@ test("user.* delegates to the default instance after createSuperwall", async () 
   await sw.dispose();
 });
 
-test("placements.register routes to the default instance", async () => {
+test("register routes to the default instance", async () => {
   const sw = make();
   await sw.ready;
   // No presenter wired → returns { type: "error", error: NoPresenterRegisteredError }.
-  const r = await placements.register({ placement: "p" });
+  const r = await register({ placement: "p" });
   expect(r.type).toBe("error");
   await sw.dispose();
 });
@@ -192,7 +193,7 @@ test("after dispose, named exports throw NoDefaultSuperwallError again", async (
 
   expect(() => user.id.value).toThrow(NoDefaultSuperwallError);
   await expect(user.identify("u")).rejects.toBeInstanceOf(NoDefaultSuperwallError);
-  await expect(placements.register({ placement: "x" })).rejects.toBeInstanceOf(
+  await expect(register({ placement: "x" })).rejects.toBeInstanceOf(
     NoDefaultSuperwallError,
   );
 });

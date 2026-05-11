@@ -140,7 +140,7 @@ export const usePlacement = (
 
   const register = useCallback(
     async (args: RegisterPlacementArgs): Promise<RegisterPlacementResult> => {
-      const r = await sw.placements.register({
+      const r = await sw.register({
         ...args,
         handler: {
           onPresent: (info) => {

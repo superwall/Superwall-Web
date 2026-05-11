@@ -278,6 +278,14 @@ const mount = (
   // to render Apple/Google Pay sheets. `publickey-credentials-get *` enables
   // passkey-based Link autofill where supported.
   iframe.allow = "payment *; publickey-credentials-get *";
+  if (!ctx.bootstrap && typeof console !== "undefined") {
+    // No bootstrap = the paywall server can't tell we're the Web SDK and
+    // will route post-checkout completion via window.location.href inside
+    // this iframe. Loud warn so regressions surface immediately.
+    console.warn(
+      "[Superwall] presenter received no ctx.bootstrap — iframe URL will lack client_surface=web-sdk and post-checkout will trap-navigate inside the iframe.",
+    );
+  }
   iframe.src = buildPaywallUrl(info, options.testMode === true, ctx.bootstrap);
   Object.assign(iframe.style, {
     border: "0",

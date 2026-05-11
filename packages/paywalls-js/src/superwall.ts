@@ -146,7 +146,6 @@ export type RegisterPlacementResult =
   | { type: "error"; error: Error };
 
 export interface PlacementsNamespace {
-  register(args: RegisterPlacementArgs): Promise<RegisterPlacementResult>;
   getPresentationResult(
     placement: string,
     params?: PlacementParams,
@@ -193,6 +192,13 @@ export interface Superwall {
 
   readonly user: UserNamespace;
   readonly placements: PlacementsNamespace;
+
+  /** Evaluate a placement against current config + audience rules and, if
+   *  the user matches a paywall variant, present the paywall. Top-level
+   *  primary entry point — mirrors `Superwall.shared.register(...)` on
+   *  iOS / Android. Skipped reasons (no audience match, holdout, already
+   *  entitled, etc.) surface in the return value without throwing. */
+  register(args: RegisterPlacementArgs): Promise<RegisterPlacementResult>;
   readonly purchases: PurchasesNamespace;
   readonly entitlements: EntitlementsNamespace;
 
@@ -230,7 +236,7 @@ export interface CreateSuperwallOptions {
   options?: PartialSuperwallOptions;
   delegate?: SuperwallDelegate;
   storage?: StorageAdapter;
-  /** Required to call `sw.placements.register`. */
+  /** Required to call `sw.register`. */
   presenter?: PaywallPresenter;
   identity?: {
     aliasId?: string;
@@ -245,6 +251,39 @@ export interface CreateSuperwallOptions {
    *  paywall checkout flow + ?code= redemption + web_entitlements polling. */
   purchaseController?: PurchaseController;
 }
+
+// ---------------------------------------------------------------------------
+// Paywall host override (review-lab / PR-preview deployments)
+// ---------------------------------------------------------------------------
+
+/** Rewrite the paywall URL to point at `paywallHostOverride`. Preserves the
+ *  pathname + any existing query params and adds `?domain={slug}` so the
+ *  override host can route to the right tenant.
+ *
+ *  TEMPORARY: hardcoded to `gymscore` while we figure out why the
+ *  auto-extraction from the original host fails for the PR-preview setup
+ *  (the config's `paywall.url` doesn't carry the tenant subdomain in dev).
+ *  Returns the input unchanged when either URL is malformed or no override
+ *  is provided. */
+export const applyPaywallHostOverride = (
+  originalUrl: string,
+  override: string | undefined,
+): string => {
+  if (!override) return originalUrl;
+  let orig: URL;
+  let target: URL;
+  try {
+    orig = new URL(originalUrl);
+    target = new URL(override);
+  } catch {
+    return originalUrl;
+  }
+  const out = new URL(target.origin);
+  out.pathname = orig.pathname;
+  orig.searchParams.forEach((v, k) => out.searchParams.set(k, v));
+  out.searchParams.set("domain", "gymscore");
+  return out.toString();
+};
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -272,7 +311,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   // Build configUpstream explicitly: `networkLayer`'s declared type narrows
   // away StorageService even though it's there at runtime.
   const configUpstream = Layer.merge(networkLayer, storageLayer);
-  const configLayer = configServiceLayer(configUpstream);
+  const configLayer = configServiceLayer(opts.apiKey, configUpstream);
   const assignmentLayer = assignmentServiceLayer(storageLayer);
   const upstreamForBus = Layer.merge(networkLayer, computedLayer);
   const busLayer = eventBusLayerWithTarget(target, upstreamForBus);
@@ -896,6 +935,22 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       dest !== null &&
       dest.toUpperCase() !== "EMBEDDED";
     if (!isExternal) return null;
+    // Host precedence: explicit `paywallHostOverride` (review-lab / self-
+    // hosted checkout controller) > `restore_access_url` from config > null.
+    // When the override is set, inject `?domain=gymscore` (TEMPORARY hardcode
+    // — see `applyPaywallHostOverride` JSDoc) so the override host can route
+    // to the correct tenant.
+    const override = opts.options?.paywallHostOverride;
+    if (override) {
+      try {
+        const u = new URL(override);
+        const out = new URL(`${u.origin}/${encodeURIComponent(placement)}`);
+        out.searchParams.set("domain", "gymscore");
+        return out.toString();
+      } catch {
+        // Bad override falls through to restore_access_url.
+      }
+    }
     const restoreUrl = cfg.web2appConfig?.restoreAccessUrl;
     if (!restoreUrl) return null;
     try {
@@ -952,7 +1007,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     return {
       identifier: result.paywall.identifier,
       name: result.paywall.name,
-      url: result.paywall.url,
+      url: applyPaywallHostOverride(
+        result.paywall.url,
+        opts.options?.paywallHostOverride,
+      ),
       experiment,
       productIds: [...result.paywall.productIds],
       products,
@@ -1034,8 +1092,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     }
   };
 
-  const placements: PlacementsNamespace = {
-    register: async (args) => {
+  const register: Superwall["register"] = async (args) => {
       const { placement, params, handler, feature } = args;
       try {
         // Block until identity is Ready — closes the race where an
@@ -1289,8 +1346,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }
         throw err;
       }
-    },
+    };
 
+  const placements: PlacementsNamespace = {
     getPresentationResult: async (placement, params) => {
       try {
         const decision = await runtime.runPromise(
@@ -1677,6 +1735,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     user,
     placements,
+    register,
     purchases,
     entitlements,
 

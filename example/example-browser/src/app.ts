@@ -13,7 +13,6 @@ import {
 // SDK setup
 // ---------------------------------------------------------------------------
 
-const apiKey = "pk_8610a1b862d329cc0ce2076fba5b26bca1fcbdd4cd7279ee";
 
 // Superwall BE doesn't return CORS headers for browser origins, so route
 // every API call through the local Bun proxy (see server.ts).
@@ -84,21 +83,69 @@ const fmt = (v: unknown): string => {
   }
 };
 
+const fmtPretty = (v: unknown): string => {
+  if (v === undefined) return "undefined";
+  if (v === null) return "null";
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+};
+
+const previewOf = (v: unknown, max = 80): string => {
+  const s = fmt(v);
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+};
+
+const hasDetail = (v: unknown): boolean => {
+  if (v === undefined || v === null || v === "") return false;
+  if (typeof v === "object") return Object.keys(v as object).length > 0;
+  return true;
+};
+
 const log = (...args: unknown[]) => {
   // Surface structured logs both in the browser console and in the event log.
   // eslint-disable-next-line no-console
   console.log("[example]", ...args);
 };
 
+const MAX_EVENTS = 200;
+
 const eventLog = $<HTMLPreElement>("#event-log");
 const appendEvent = (type: string, detail: unknown) => {
   const ts = new Date().toISOString().slice(11, 23);
-  const line = document.createElement("div");
-  line.innerHTML =
-    `<span class="ts">${ts}</span> ` +
-    `<span class="ev">${type}</span> ` +
-    escapeHtml(fmt(detail));
-  eventLog.appendChild(line);
+  const expandable = hasDetail(detail);
+
+  const entry = document.createElement("div");
+  entry.className = expandable ? "entry collapsed" : "entry";
+
+  const head = document.createElement("div");
+  head.className = "head";
+  head.innerHTML =
+    `<span class="ts">${ts}</span>` +
+    `<span class="ev">${escapeHtml(type)}</span>` +
+    (expandable
+      ? `<span class="preview">${escapeHtml(previewOf(detail))}</span>`
+      : "");
+  entry.appendChild(head);
+
+  if (expandable) {
+    const body = document.createElement("div");
+    body.className = "body";
+    body.textContent = fmtPretty(detail);
+    entry.appendChild(body);
+    head.addEventListener("click", () => entry.classList.toggle("collapsed"));
+  }
+
+  eventLog.appendChild(entry);
+
+  while (eventLog.childElementCount > MAX_EVENTS) {
+    eventLog.firstElementChild?.remove();
+  }
+
   eventLog.scrollTop = eventLog.scrollHeight;
 };
 
@@ -173,7 +220,7 @@ for (const name of watch) {
 
 const lastResult = $<HTMLDivElement>("#last-result");
 const setLastResult = (v: unknown) => {
-  lastResult.textContent = fmt(v);
+  lastResult.textContent = fmtPretty(v);
 };
 
 const handlers: Record<string, () => Promise<void> | void> = {
@@ -202,8 +249,8 @@ const handlers: Record<string, () => Promise<void> | void> = {
     sw.purchases.setSubscriptionStatus({ status: "INACTIVE" });
   },
   register: async () => {
-    const result = await sw.placements.register({
-      placement: "test2",
+    const result = await sw.register({
+      placement: "test",
       feature: () => log("feature ran!"),
     });
     setLastResult(

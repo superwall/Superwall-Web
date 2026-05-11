@@ -2,6 +2,11 @@
 // (config, collector, enrichment, confirm_assignments). Per API.md §11.
 
 import { Context, Effect, Layer } from "effect";
+import {
+  resolveHosts,
+  isSandbox,
+  type WebEntitlementsResponse,
+} from "@superwall/core";
 import { SDK_VERSION } from "../version.ts";
 import type { JsonValue, NetworkEnvironment } from "../types.ts";
 import {
@@ -11,47 +16,8 @@ import {
 } from "./errors.ts";
 import { IdentityService } from "./identity.ts";
 
-interface EnvironmentHosts {
-  readonly base: string;
-  readonly collector: string;
-  readonly enrichment: string;
-  readonly subscriptions: string;
-}
-
-const RELEASE_HOSTS: EnvironmentHosts = {
-  base: "api.superwall.me",
-  collector: "collector.superwall.me",
-  enrichment: "enrichment-api.superwall.com",
-  subscriptions: "subscriptions-api.superwall.com",
-};
-
-const RC_HOSTS: EnvironmentHosts = {
-  base: "api.superwallcanary.com",
-  collector: "collector.superwallcanary.com",
-  enrichment: "enrichment-api.superwall.dev",
-  subscriptions: "subscriptions-api.superwall.dev",
-};
-
-const DEV_HOSTS: EnvironmentHosts = {
-  base: "api.superwall.dev",
-  collector: "collector.superwall.dev",
-  enrichment: "enrichment-api.superwall.dev",
-  subscriptions: "subscriptions-api.superwall.dev",
-};
-
-export const resolveHosts = (env: NetworkEnvironment): EnvironmentHosts => {
-  if (typeof env === "string") {
-    switch (env) {
-      case "release":
-        return RELEASE_HOSTS;
-      case "releaseCandidate":
-        return RC_HOSTS;
-      case "developer":
-        return DEV_HOSTS;
-    }
-  }
-  return env.custom;
-};
+export { resolveHosts, isSandbox };
+export type { WebEntitlementsResponse };
 
 export interface NetworkConfig {
   readonly apiKey: string;
@@ -123,10 +89,6 @@ const resolveInterfaceStyle = (): "light" | "dark" => {
   return "light";
 };
 
-// Custom environments are typically internal proxies → assume production.
-export const isSandbox = (env: NetworkEnvironment): boolean =>
-  typeof env === "string" ? env !== "release" : false;
-
 const make = (config: NetworkConfig) =>
   Effect.gen(function* () {
     const identity = yield* IdentityService;
@@ -189,7 +151,13 @@ const make = (config: NetworkConfig) =>
         const headers = yield* buildHeaders();
 
         const response = yield* Effect.tryPromise({
-          try: async () => requireFetch()(url, { method: "GET", headers }),
+          // `cache: "no-store"` bypasses the browser HTTP cache. The
+          // static_config endpoint sets long-lived cache headers, but we
+          // already do our own cache layer on top (storage-backed, scoped
+          // by api key) — the browser cache just serves stale config and
+          // breaks `register()` when placements change.
+          try: async () =>
+            requireFetch()(url, { method: "GET", headers, cache: "no-store" }),
           catch: (cause) =>
             new NetworkRequestError({
               method: "GET",
@@ -526,23 +494,6 @@ export interface RedeemResponse {
     }>;
   };
   readonly allCodes?: ReadonlyArray<{ code: string; firstRedemption?: boolean }>;
-}
-
-export interface WebEntitlementsResponse {
-  readonly customerInfo?: {
-    entitlements?: ReadonlyArray<{
-      id: string;
-      isActive?: boolean;
-      productIds?: string[];
-      type?: string;
-    }>;
-  };
-  readonly entitlements?: ReadonlyArray<{
-    id: string;
-    isActive?: boolean;
-    productIds?: string[];
-    type?: string;
-  }>;
 }
 
 /** Runtime-injected per `createSuperwall` (apiKey + environment vary per

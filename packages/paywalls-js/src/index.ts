@@ -36,6 +36,7 @@ export type {
 export {
   user,
   placements,
+  register,
   purchases,
   entitlements,
   events,

@@ -325,7 +325,7 @@ test("reset regenerates identity, clears subscription + paywall state", async ()
 });
 
 // ---------------------------------------------------------------------------
-// placements.register — real impl (§2h-§2i)
+// register — real impl (§2h-§2i)
 // ---------------------------------------------------------------------------
 
 import type {
@@ -352,7 +352,7 @@ const presenterThatResolves = (
 test("register without a presenter returns { type: 'error', error: NoPresenterRegisteredError }", async () => {
   const sw = makeWithPaywall();
   await sw.ready;
-  const r = await sw.placements.register({ placement: "checkout" });
+  const r = await sw.register({ placement: "checkout" });
   expect(r.type).toBe("error");
   if (r.type === "error") {
     expect(r.error).toBeInstanceOf(NoPresenterRegisteredError);
@@ -374,7 +374,7 @@ test("register: ACTIVE subscription → skipped { type: 'userSubscribed' } and r
 
   let featureRan = false;
   let skipReason: PaywallSkippedReason | null = null;
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     handler: { onSkip: (reason) => { skipReason = reason; } },
     feature: () => {
@@ -402,7 +402,7 @@ test("register presents, awaits result, fires lifecycle events + handler callbac
   let onDismiss: { info: PaywallInfo; result: PaywallResult } | null = null;
   let featureRan = false;
 
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     handler: {
       onPresent: (info) => {
@@ -488,7 +488,7 @@ test("register: declined result on a config-driven nonGated paywall RUNS the fea
   });
   await sw.ready;
 
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     feature: () => {
       featureRan = true;
@@ -558,7 +558,7 @@ test("register: declined result on a config-driven gated paywall does NOT run fe
   });
   await sw.ready;
 
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     feature: () => {
       featureRan = true;
@@ -578,7 +578,7 @@ test("register: declined result on a (default-gated) paywall does NOT run featur
   await sw.ready;
 
   let featureRan = false;
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     feature: () => {
       featureRan = true;
@@ -611,12 +611,12 @@ test("register enforces the single-paywall invariant — second call → Paywall
   const sw = makeWithPaywall({ presenter: slowPresenter });
   await sw.ready;
 
-  const first = sw.placements.register({ placement: "checkout" });
+  const first = sw.register({ placement: "checkout" });
   await started; // presenter has been invoked → isPaywallPresented is true
   expect(sw.isPaywallPresented.value).toBe(true);
 
   // Second register collides regardless of placement.
-  const second = await sw.placements.register({ placement: "checkout" });
+  const second = await sw.register({ placement: "checkout" });
   expect(second.type).toBe("error");
   if (second.type === "error") {
     expect(second.error).toBeInstanceOf(PaywallAlreadyPresentedError);
@@ -642,7 +642,7 @@ test("register: presenter throw → { type: 'error', error: PresenterError }, is
   await sw.ready;
 
   let onError: Error | null = null;
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     handler: {
       onError: (e) => {
@@ -673,7 +673,7 @@ test("register: presentation context exposes placement + params + signal + emit"
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
-  await sw.placements.register({
+  await sw.register({
     placement: "checkout",
     params: { screen: "home" } as never,
   });
@@ -706,7 +706,7 @@ test("dismiss aborts the in-flight presentation and tells the presenter", async 
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
-  const reg = sw.placements.register({ placement: "checkout" });
+  const reg = sw.register({ placement: "checkout" });
   await started; // presenter invoked → currentAbort wired
   expect(sw.isPaywallPresented.value).toBe(true);
 
@@ -1032,7 +1032,7 @@ test("paywall_open with stub info does NOT POST to collector (P0-3)", async () =
   // POSTs after register() are paywall_* events.
   const baseline = calls.length;
 
-  await sw.placements.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
   await tick();
 
   const newCalls = calls.slice(baseline);
@@ -1064,7 +1064,7 @@ test("paywall_decline fires on declined results (P1, parity with Android)", asyn
   let declineCount = 0;
   sw.events.addEventListener("paywall_decline", () => declineCount++);
 
-  await sw.placements.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
   await tick();
 
   expect(declineCount).toBe(1);
@@ -1081,7 +1081,7 @@ test("paywall_decline does NOT fire on purchased / restored results", async () =
 
   let declineCount = 0;
   sw.events.addEventListener("paywall_decline", () => declineCount++);
-  await sw.placements.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
   await tick();
   expect(declineCount).toBe(0);
   await sw.dispose();
@@ -1100,12 +1100,12 @@ test("after declined dismiss, isPaywallPresented resets to false (regression for
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
 
-  await sw.placements.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
   await tick();
   expect(sw.isPaywallPresented.value).toBe(false);
 
   // Second register works (proves signal isn't stuck).
-  const r = await sw.placements.register({ placement: "checkout" });
+  const r = await sw.register({ placement: "checkout" });
   expect(r.type).toBe("presented");
   await sw.dispose();
 });
@@ -1200,7 +1200,7 @@ test("register: empty audience matches → presents the config-driven paywall", 
   });
   await sw.ready;
 
-  const r = await sw.placements.register({ placement: "checkout" });
+  const r = await sw.register({ placement: "checkout" });
   expect(r.type).toBe("presented");
   if (r.type === "presented") {
     expect(r.info.identifier).toBe("pw_pro");
@@ -1243,7 +1243,7 @@ test("register: holdout variant → skipped { type: 'holdout', experiment }", as
   await sw.ready;
 
   let onSkipCalls = 0;
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout",
     handler: { onSkip: () => onSkipCalls++ },
   });
@@ -1277,7 +1277,7 @@ test("register: placement not in config → skipped placementNotFound", async ()
   await sw.ready;
 
   let featureRan = false;
-  const r = await sw.placements.register({
+  const r = await sw.register({
     placement: "checkout", // not in config
     feature: () => {
       featureRan = true;
@@ -1341,9 +1341,9 @@ test("register: variant pick is sticky — same alias re-evaluates → same payw
   });
   await sw.ready;
 
-  await sw.placements.register({ placement: "checkout" });
-  await sw.placements.register({ placement: "checkout" });
-  await sw.placements.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
+  await sw.register({ placement: "checkout" });
 
   // All three calls hit the same paywall — sticky variant.
   expect(new Set(presented).size).toBe(1);
@@ -1396,7 +1396,7 @@ test("register: rule expression evaluates against user attributes via Superscrip
   sw.user.setAttributes({ plan: "free" } as never);
   await tick();
 
-  const r = await sw.placements.register({ placement: "checkout" });
+  const r = await sw.register({ placement: "checkout" });
   expect(r.type).toBe("presented");
   if (r.type === "presented") {
     // Second rule (`plan == "free"`) matched, so we present `pw_upsell`.
@@ -1483,7 +1483,7 @@ test("paywall post_checkout_complete flows through PurchaseController.purchase()
   });
   // Trigger a paywall presentation in parallel — this hooks the same
   // ctx.onPurchaseEvent the controller subscribes to.
-  void sw.placements.register({ placement: "checkout" }).catch(() => {});
+  void sw.register({ placement: "checkout" }).catch(() => {});
   const r = await productPromise;
   expect(r.type).toBe("purchased");
   expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
@@ -1879,7 +1879,7 @@ test("refreshConfiguration: re-fetches static_config and re-runs eager assignmen
   expect(configCalls).toBe(2);
 
   // The fresh config carries pw_v2; verify register hits it.
-  const r = await sw.placements.register({ placement: "checkout" });
+  const r = await sw.register({ placement: "checkout" });
   expect(r.type).toBe("presented");
   if (r.type === "presented") {
     expect(r.info.identifier).toBe("pw_v2");
@@ -1960,10 +1960,75 @@ test("configure: cached config makes sw.ready resolve before a hanging fetch —
   // for CI variance but make sure we didn't hang.
   expect(elapsed).toBeLessThan(2500);
 
-  const r = await sw.placements.register({ placement: "checkout" });
+  const r = await sw.register({ placement: "checkout" });
   expect(r.type).toBe("presented");
   if (r.type === "presented") {
     expect(r.info.identifier).toBe("pw_cached");
   }
   await sw.dispose();
+});
+
+import { applyPaywallHostOverride } from "./superwall.ts";
+
+test("applyPaywallHostOverride returns input when no override", () => {
+  expect(
+    applyPaywallHostOverride("https://gymscore.superwall.app/p", undefined),
+  ).toBe("https://gymscore.superwall.app/p");
+});
+
+test("applyPaywallHostOverride swaps host and injects ?domain=", () => {
+  const out = applyPaywallHostOverride(
+    "https://gymscore.superwall.app/pro_export",
+    "https://paywall-app-pr-3123.workers.dev",
+  );
+  const u = new URL(out);
+  expect(u.host).toBe("paywall-app-pr-3123.workers.dev");
+  expect(u.pathname).toBe("/pro_export");
+  expect(u.searchParams.get("domain")).toBe("gymscore");
+});
+
+test("applyPaywallHostOverride preserves existing query params", () => {
+  const out = applyPaywallHostOverride(
+    "https://gymscore.superwall.app/p?foo=bar&baz=qux",
+    "https://override.example.com",
+  );
+  const u = new URL(out);
+  expect(u.searchParams.get("foo")).toBe("bar");
+  expect(u.searchParams.get("baz")).toBe("qux");
+  expect(u.searchParams.get("domain")).toBe("gymscore");
+});
+
+test("applyPaywallHostOverride drops the trailing port/path from the override origin", () => {
+  const out = applyPaywallHostOverride(
+    "https://gymscore.superwall.app/pro",
+    "https://override.example.com:8443/ignored?ignored=1",
+  );
+  const u = new URL(out);
+  expect(u.origin).toBe("https://override.example.com:8443");
+  expect(u.pathname).toBe("/pro");
+  expect(u.search).toBe("?domain=gymscore");
+});
+
+test("applyPaywallHostOverride hardcodes domain=gymscore (temporary)", () => {
+  const out = applyPaywallHostOverride(
+    "https://superwall.app/p",
+    "https://override.example.com",
+  );
+  const u = new URL(out);
+  expect(u.searchParams.get("domain")).toBe("gymscore");
+});
+
+test("applyPaywallHostOverride returns input on malformed override", () => {
+  expect(
+    applyPaywallHostOverride(
+      "https://gymscore.superwall.app/p",
+      "not-a-url",
+    ),
+  ).toBe("https://gymscore.superwall.app/p");
+});
+
+test("applyPaywallHostOverride returns input on malformed original URL", () => {
+  expect(
+    applyPaywallHostOverride("not-a-url", "https://override.example.com"),
+  ).toBe("not-a-url");
 });

@@ -498,7 +498,8 @@ export interface ConfigServiceImpl {
   readonly preload: () => Effect.Effect<void>;
 }
 
-const make = Effect.gen(function* () {
+const make = (apiKey: string) =>
+  Effect.gen(function* () {
   const network = yield* NetworkService;
   const storage = yield* StorageService;
   const actor = yield* makeActor<ConfigState>(ConfigState.None);
@@ -509,7 +510,10 @@ const make = Effect.gen(function* () {
 
   const persist = (cfg: RawConfig) =>
     storage
-      .set(CONFIG_KEY, JSON.stringify({ buildId: cfg.buildId, payload: cfg.raw }))
+      .set(
+        CONFIG_KEY,
+        JSON.stringify({ apiKey, buildId: cfg.buildId, payload: cfg.raw }),
+      )
       .pipe(Effect.catchAll(() => Effect.void));
 
   const hydrateFromStorage: ConfigServiceImpl["hydrateFromStorage"] = () =>
@@ -522,10 +526,20 @@ const make = Effect.gen(function* () {
         if (cached === null) return null;
         try {
           const decoded = JSON.parse(cached) as {
+            apiKey?: string;
             buildId?: string;
             payload?: JsonValue;
           };
           if (!decoded.payload) return null;
+          // Cache scoped by api key — switching keys (different app /
+          // environment) MUST NOT serve the previous app's config.
+          // Legacy entries without `apiKey` get evicted on next persist.
+          if (decoded.apiKey !== undefined && decoded.apiKey !== apiKey) {
+            yield* storage
+              .remove(CONFIG_KEY)
+              .pipe(Effect.catchAll(() => Effect.void));
+            return null;
+          }
           const parsed = parseConfig(decoded.payload);
           yield* update(ConfigUpdates.SetRetrieved(parsed));
           return parsed;
@@ -661,12 +675,14 @@ export class ConfigService extends Context.Tag("@superwall/ConfigService")<
 >() {}
 
 /** Build a Layer over an upstream that already provides `NetworkService`
- *  (which itself provides `StorageService`). */
+ *  (which itself provides `StorageService`). The `apiKey` scopes the
+ *  persisted config cache so switching keys never serves stale data. */
 export const configServiceLayer = (
+  apiKey: string,
   upstream: Layer.Layer<NetworkService | StorageService>,
 ): Layer.Layer<ConfigService | NetworkService | StorageService, never, never> =>
   Layer.provideMerge(
-    Layer.effect(ConfigService, make),
+    Layer.effect(ConfigService, make(apiKey)),
     upstream,
   ) as Layer.Layer<
     ConfigService | NetworkService | StorageService,

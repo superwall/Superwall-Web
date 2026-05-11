@@ -1,5 +1,31 @@
 // Public type surface for @superwall/paywalls-js. Pure types — no runtime.
 
+// Cross-SDK domain types live in @superwall/core. Imported for in-file
+// references and re-exported so the browser SDK's public surface is unchanged.
+import type {
+  JsonValue,
+  SubscriptionStatus,
+  ProductStore,
+  LatestSubscriptionState,
+  LatestSubscriptionOfferType,
+  Entitlement,
+  Entitlements,
+  CustomEnvironmentHosts,
+  NetworkEnvironment,
+} from "@superwall/core";
+
+export type {
+  JsonValue,
+  SubscriptionStatus,
+  ProductStore,
+  LatestSubscriptionState,
+  LatestSubscriptionOfferType,
+  Entitlement,
+  Entitlements,
+  CustomEnvironmentHosts,
+  NetworkEnvironment,
+};
+
 // Module-augmentation surfaces. Apps extend these via `declare module
 // "@superwall/paywalls-js"`. Defaults are `{}` so augmentation closes the shape.
 //
@@ -18,16 +44,6 @@ export interface CustomCallbackDefinition {
   input: unknown;
   output: unknown;
 }
-
-// Primitives
-
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
 
 export type ConfigurationStatus = "pending" | "configured" | "failed";
 
@@ -58,12 +74,10 @@ export type DeepPartial<T> = T extends object
   ? { [K in keyof T]?: DeepPartial<T[K]> }
   : T;
 
-// Subscription & entitlements
-
-export type SubscriptionStatus =
-  | { status: "UNKNOWN" }
-  | { status: "INACTIVE" }
-  | { status: "ACTIVE"; entitlements: Entitlement[] };
+// Subscription & entitlements types — see @superwall/core for the
+// canonical definitions (Entitlement, Entitlements, SubscriptionStatus,
+// ProductStore, LatestSubscriptionState, LatestSubscriptionOfferType).
+// Imported and re-exported at the top of this file.
 
 // Purchase controller — mirrors Android `PurchaseController`. Implement to
 // override SDK purchase + restore handling. SDK ships an automatic
@@ -87,49 +101,6 @@ export interface PurchaseController {
    *  The default automatic controller uses it to detect a returning
    *  redemption-code redirect and start polling for web entitlements. */
   onConfigured?(): Promise<void>;
-}
-
-export type ProductStore =
-  | "appStore"
-  | "stripe"
-  | "paddle"
-  | "playStore"
-  | "superwall"
-  | "other";
-
-export type LatestSubscriptionState =
-  | "inGracePeriod"
-  | "subscribed"
-  | "expired"
-  | "inBillingRetryPeriod"
-  | "revoked";
-
-export type LatestSubscriptionOfferType =
-  | "trial"
-  | "code"
-  | "promotional"
-  | "winback";
-
-export interface Entitlement {
-  id: string;
-  type: "SERVICE_LEVEL";
-  isActive: boolean;
-  productIds: string[];
-  latestProductId?: string;
-  store?: ProductStore;
-  startsAt?: number; // ms since epoch
-  renewedAt?: number;
-  expiresAt?: number;
-  isLifetime?: boolean;
-  willRenew?: boolean;
-  state?: LatestSubscriptionState;
-  offerType?: LatestSubscriptionOfferType;
-}
-
-export interface Entitlements {
-  active: Entitlement[];
-  inactive: Entitlement[];
-  all: Entitlement[];
 }
 
 export interface Product {
@@ -376,18 +347,8 @@ export type IntegrationAttribute =
 
 // Options
 
-export interface CustomEnvironmentHosts {
-  base: string;
-  collector: string;
-  enrichment: string;
-  subscriptions: string;
-}
-
-export type NetworkEnvironment =
-  | "release"
-  | "releaseCandidate"
-  | "developer"
-  | { custom: CustomEnvironmentHosts };
+// CustomEnvironmentHosts + NetworkEnvironment moved to @superwall/core;
+// re-exported at the top of this file.
 
 export interface PaywallOptions {
   presentation?: "modal" | "fullscreen";
@@ -407,6 +368,20 @@ export interface PaywallOptions {
 export interface SuperwallOptions {
   paywalls?: PaywallOptions;
   networkEnvironment?: NetworkEnvironment;
+  /** Override the origin used to load the paywall (iframe or external).
+   *  Default: `https://{tenant}.superwall.app/{placement}` from
+   *  `static_config.web2app_config.restore_access_url`.
+   *
+   *  When set, the SDK swaps the host and injects `?domain={tenant}` so
+   *  the override host can route to the correct project (the subdomain
+   *  carried that information; with the override it doesn't). Example:
+   *
+   *    default:  https://gymscore.superwall.app/<placement>?...
+   *    override: https://paywall-app-pr-3123.workers.dev/<placement>?domain=gymscore&...
+   *
+   *  Value must be a full origin (scheme + host[:port]). Temporary tool
+   *  for review-lab / PR-preview deployments of the paywall app. */
+  paywallHostOverride?: string;
   localeIdentifier?: string;
   logging?: { level?: LogLevel; scopes?: LogScope[] };
   testModeBehavior?: "automatic" | "whenEnabledForUser" | "never" | "always";
