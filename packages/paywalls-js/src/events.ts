@@ -6,13 +6,16 @@ import type {
   CustomerInfo,
   IntegrationAttribute,
   JsonValue,
+  PaywallCloseReason,
   PaywallInfo,
   PaywallPresentationRequestStatusReason,
   PaywallPresentationRequestStatusType,
   PaywallResult,
   Product,
+  RedemptionResult,
   RestoreType,
   StoreTransaction,
+  Survey,
   SubscriptionStatus,
   TransactionProduct,
   TriggerResult,
@@ -55,7 +58,7 @@ export interface SuperwallEventMap {
   // paywall lifecycle
   paywall_open: { paywall_info: PaywallInfo };
   paywall_page_view: { paywallInfo: PaywallInfo };
-  paywall_close: { paywall_info: PaywallInfo };
+  paywall_close: { paywall_info: PaywallInfo; close_reason: PaywallCloseReason };
   paywall_decline: { paywall_info: PaywallInfo };
   paywallPreload_start: { paywallCount: number };
   paywallPreload_complete: { paywallCount: number };
@@ -86,6 +89,15 @@ export interface SuperwallEventMap {
   paywallResourceLoad_fail: { url: string; error: string };
   shimmerView_start: {};
   shimmerView_complete: { duration: number };
+
+  // surveys
+  survey_response: {
+    survey: Survey;
+    selected_option: { id: string; title: string };
+    custom_response: string | null;
+    paywall_info: PaywallInfo;
+  };
+  survey_close: { survey: Survey; paywall_info: PaywallInfo };
 
   // transactions
   transaction_start: { product: Product; paywall_info: PaywallInfo };
@@ -255,6 +267,11 @@ export interface SuperwallDelegate {
 
   // legacy `custom` postMessage
   onCustomPaywallAction?(name: string): void;
+
+  // redemption — fires when a `?code=` (web entitlement) redirect arrives
+  // and the SDK is about to POST it / has finished POSTing it.
+  onWillRedeemLink?(): void;
+  onDidRedeemLink?(result: RedemptionResult): void;
 
   // logging
   onLog?(

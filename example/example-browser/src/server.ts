@@ -17,9 +17,12 @@ const REVIEW_LAB = process.env.SW_REVIEW_LAB_HOST;
 const PROXY_HOSTS: Record<string, string> = REVIEW_LAB
   ? {
       api: `https://${REVIEW_LAB}`,
-      collector: `https://${REVIEW_LAB}`,
+      // Collector stays on prod even under review-lab — review envs don't
+      // ingest events; collector POSTs would just 404 there.
+      collector: "https://collector.superwall.me",
       enrichment: `https://${REVIEW_LAB}`,
-      subscriptions: `https://${REVIEW_LAB}`,
+      // Review-lab branch doesn't mount /subscriptions-api/*. Forward to dev.
+      subscriptions: "https://subscriptions-api.superwall.dev",
     }
   : {
       api: "https://api.superwall.me",
@@ -59,6 +62,19 @@ const proxy = async (req: Request, target: string, rest: string): Promise<Respon
   responseHeaders.set("Access-Control-Allow-Origin", "*");
   responseHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   responseHeaders.set("Access-Control-Allow-Headers", "*");
+  // TEMPORARY HACK — review-lab static_config returns `"store": "PLAY_STORE"`
+  // for products that are actually Stripe-backed. Rewrite to "STRIPE" on the
+  // fly so the SDK's parser flags them correctly. Remove once the BE serves
+  // the right value for Web apps.
+  if (rest.includes("/api/v1/static_config")) {
+    const text = await response.text();
+    const patched = text.replace(/"store"\s*:\s*"PLAY_STORE"/g, '"store":"STRIPE"');
+    return new Response(patched, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  }
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

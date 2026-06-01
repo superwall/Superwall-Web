@@ -36,6 +36,12 @@ export interface EventBusImpl {
     fn: (delegate: SuperwallDelegate) => void,
     onError?: (cause: unknown) => void,
   ): Effect.Effect<void>;
+  /** Set a function returning auto-context params (e.g. `$client_surface`,
+   *  `$host_origin`, `$presentation_id`). Merged into every wire-emitted
+   *  envelope's `parameters` field with caller params winning on key clash. */
+  setContextProvider(
+    provider: (() => Record<string, JsonValue>) | null,
+  ): Effect.Effect<void>;
 }
 
 const make = (target: SuperwallEventTarget) =>
@@ -43,6 +49,9 @@ const make = (target: SuperwallEventTarget) =>
     const network = yield* NetworkService;
     const computed = yield* ComputedProperties;
     const delegateRef = yield* Ref.make<SuperwallDelegate | null>(null);
+    const contextProviderRef = yield* Ref.make<
+      (() => Record<string, JsonValue>) | null
+    >(null);
 
     const publish = <K extends keyof AllSuperwallEvents>(
       name: K,
@@ -70,10 +79,23 @@ const make = (target: SuperwallEventTarget) =>
 
         if (opts?.wireEmit === false) return;
 
+        // Merge auto-context (`$client_surface`, `$host_origin`,
+        // `$presentation_id`, …) under the caller's params so explicit
+        // params always win on key collision.
+        const provider = yield* Ref.get(contextProviderRef);
+        let context: Record<string, JsonValue> = {};
+        if (provider) {
+          try {
+            context = provider();
+          } catch {}
+        }
         const envelope = {
           event_id: newEventId(),
           event_name: name,
-          parameters: detail as unknown as Record<string, JsonValue>,
+          parameters: {
+            ...context,
+            ...(detail as unknown as Record<string, JsonValue>),
+          },
           created_at: new Date().toISOString(),
         };
         yield* network
@@ -86,6 +108,13 @@ const make = (target: SuperwallEventTarget) =>
     ): Effect.Effect<void> =>
       Ref.set(delegateRef, delegate).pipe(
         Effect.withSpan("EventBus.setDelegate"),
+      );
+
+    const setContextProvider = (
+      provider: (() => Record<string, JsonValue>) | null,
+    ): Effect.Effect<void> =>
+      Ref.set(contextProviderRef, provider).pipe(
+        Effect.withSpan("EventBus.setContextProvider"),
       );
 
     const withDelegate = (
@@ -109,6 +138,7 @@ const make = (target: SuperwallEventTarget) =>
       publish,
       setDelegate,
       withDelegate,
+      setContextProvider,
     } satisfies EventBusImpl;
   });
 

@@ -3,6 +3,7 @@
 
 import type {
   PaywallInfo,
+  PaywallPresentationStyle,
   PaywallResult,
   Product,
 } from "../types.ts";
@@ -13,12 +14,10 @@ import type {
 } from "../presenter.ts";
 
 export interface BrowserPresenterOptions {
-  /** "modal" centers the iframe with a backdrop; "fullscreen" fills the
-   *  viewport. Default: "modal". */
-  presentation?: "modal" | "fullscreen";
   /** Where to mount the overlay portal. Default: `document.body`. */
   container?: HTMLElement | (() => HTMLElement);
-  /** Backdrop click closes the paywall (modal only). Default: true. */
+  /** Backdrop click closes the paywall (styles with a scrim only).
+   *  Default: true. */
   closeOnBackdrop?: boolean;
   /** z-index for the overlay container. Default: 2147483000. */
   zIndex?: number;
@@ -95,7 +94,7 @@ export const createBrowserPresenter = (
         resolve();
         return;
       }
-      const url = buildPaywallUrl(info, options.testMode === true, undefined);
+      const url = buildPaywallUrl(info, options.testMode === true, undefined, undefined);
       const iframe = document.createElement("iframe");
       iframe.dataset["swPreload"] = info.identifier;
       iframe.setAttribute("aria-hidden", "true");
@@ -157,15 +156,39 @@ const resolveContainer = (
   return document.body;
 };
 
-/** Append §7.3 query params + identity bootstrap. User context is also
- *  re-injected post-load via `paywall.accept64`; the URL params are what
- *  the SSR loader uses to mint the placement session token AND what the
- *  paywall server uses to switch routing (`client_surface=web-sdk`). */
+/** Weighted random pick across `url_config.endpoints`. Single endpoint or
+ *  none → uses the canonical `info.url`. Total weights normalise to whatever
+ *  the BE sends; we don't enforce sum=100. */
+const pickEndpoint = (info: PaywallInfo): string => {
+  const endpoints = info.urlEndpoints;
+  if (!endpoints || endpoints.length === 0) return info.url;
+  if (endpoints.length === 1) return endpoints[0]!.url;
+  const total = endpoints.reduce((acc, e) => acc + Math.max(e.percentage, 0), 0);
+  if (total <= 0) return endpoints[0]!.url;
+  const roll = Math.random() * total;
+  let cursor = 0;
+  for (const e of endpoints) {
+    cursor += Math.max(e.percentage, 0);
+    if (roll < cursor) return e.url;
+  }
+  return endpoints[endpoints.length - 1]!.url;
+};
+
+/** Append bootstrap query params + the `#init=<base64(JSON)>` hash. Query
+ *  params stay as they were (`platform`, `transport`, `debug`, `api_key`,
+ *  `client_surface`, identity); the hash carries runtime config the
+ *  in-iframe controller needs at boot (`placementSessionToken`, `hostOrigin`,
+ *  `cancelUrl`, `identity`, `collector`, `apiBase`). Hash > query for these
+ *  because (a) hash isn't logged by intermediate proxies, (b) the artifact
+ *  schema kept `placementSessionToken` as a field name for compat — see the
+ *  paywall app's `packages/web-paywalls/src/schema/controller.ts`. */
 const buildPaywallUrl = (
   info: PaywallInfo,
   debug: boolean,
   bootstrap: PaywallBootstrap | undefined,
+  initPayload: Record<string, unknown> | undefined,
 ): string => {
+  const base = pickEndpoint(info);
   const apply = (url: URL) => {
     url.searchParams.set("platform", "web");
     url.searchParams.set("transport", "web");
@@ -189,18 +212,55 @@ const buildPaywallUrl = (
       if (bootstrap.hostOrigin) {
         url.searchParams.set("host_origin", bootstrap.hostOrigin);
       }
+      // SDK-built payload takes precedence; fallback shape is the legacy
+      // bootstrap-derived hash (used by tests that don't construct the
+      // full payload).
+      // Standard base64 (not base64url) — the in-iframe controller decodes
+      // with plain `atob()` which rejects URL-safe alphabet / missing
+      // padding. Fragment characters `+` `/` `=` are RFC-3986-safe.
+      url.hash = initPayload
+        ? `init=${base64OfJson(initPayload)}`
+        : buildInitHash(bootstrap);
     }
   };
   try {
-    const url = new URL(info.url);
+    const url = new URL(base);
     apply(url);
     return url.toString();
   } catch {
-    // Relative or malformed URL — fall back to manual append. Best-effort,
-    // skip bootstrap to avoid double-encoding edge cases.
-    const sep = info.url.includes("?") ? "&" : "?";
-    return `${info.url}${sep}platform=web&transport=web&debug=${debug ? "true" : "false"}`;
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}platform=web&transport=web&debug=${debug ? "true" : "false"}`;
   }
+};
+
+/** Build the `#init=<base64>` hash payload. Mirrors the controller schema
+ *  at `packages/web-paywalls/src/schema/controller.ts:49-69` — identity
+ *  nests under `collector`, `userId` is a discriminated union, `deviceId`
+ *  is always the persisted UUID. */
+const buildInitHash = (b: PaywallBootstrap): string => {
+  // `userId` flips to `appUserId` only when the merchant has explicitly
+  // called `sw.identify(...)`. Anonymous users get the alias variant —
+  // never both, never omitted (controller destructures non-defensively).
+  const userId =
+    b.appUserId && b.appUserId !== b.aliasId
+      ? ({ type: "appUserId" as const, appUserId: b.appUserId })
+      : ({ type: "aliasId" as const, aliasId: b.aliasId ?? "" });
+  const payload: Record<string, unknown> = {
+    // Field name kept for artifact-schema stability — in WEBAPP mode this
+    // carries the raw pk_*, not a signed session token.
+    placementSessionToken: b.apiKey,
+    hostOrigin: b.hostOrigin ?? "",
+    cancelUrl: b.cancelUrl ?? b.hostOrigin ?? "",
+    apiBase: b.apiBase,
+    collector: {
+      url: b.collector,
+      identity: {
+        userId,
+        deviceId: b.deviceId ?? "",
+      },
+    },
+  };
+  return `init=${base64OfJson(payload)}`;
 };
 
 /** One-time dev-mode advisory: browsers can't expose top-frame
@@ -248,6 +308,108 @@ const originOf = (urlStr: string): string => {
   }
 };
 
+interface PresentationSpec {
+  readonly overlayAlignItems: "flex-end" | "center" | "stretch";
+  readonly overlayJustifyContent: "center" | "stretch";
+  readonly overlayBackground: string;
+  readonly iframeWidth: string;
+  readonly iframeHeight: string;
+  readonly iframeBorderRadius: string;
+  readonly iframeBoxShadow: string;
+  /** Per-frame initial transform/opacity, animated to identity on mount. */
+  readonly enter: "none" | "fade" | "slide-up" | "slide-right";
+}
+
+const DROP_SHADOW = "0 16px 48px rgba(0,0,0,0.32)";
+const SCRIM = "rgba(0,0,0,0.6)";
+const ENTER_DURATION_MS = 220;
+
+const specFor = (style: PaywallPresentationStyle): PresentationSpec => {
+  switch (style.type) {
+    case "MODAL":
+      // Bottom sheet — full-width, tall content sheet that pins to the
+      // bottom of the viewport.
+      return {
+        overlayAlignItems: "flex-end",
+        overlayJustifyContent: "center",
+        overlayBackground: SCRIM,
+        iframeWidth: "min(480px, 96vw)",
+        iframeHeight: "min(900px, 96vh)",
+        iframeBorderRadius: "12px 12px 0 0",
+        iframeBoxShadow: "0 -16px 48px rgba(0,0,0,0.32)",
+        enter: "slide-up",
+      };
+    case "DRAWER":
+      return {
+        overlayAlignItems: "flex-end",
+        overlayJustifyContent: "center",
+        overlayBackground: SCRIM,
+        iframeWidth: "100vw",
+        iframeHeight: `${style.height}vh`,
+        iframeBorderRadius: `${style.cornerRadius}px ${style.cornerRadius}px 0 0`,
+        iframeBoxShadow: "0 -16px 48px rgba(0,0,0,0.32)",
+        enter: "slide-up",
+      };
+    case "POPUP":
+      return {
+        overlayAlignItems: "center",
+        overlayJustifyContent: "center",
+        overlayBackground: SCRIM,
+        iframeWidth: `${style.width}vw`,
+        iframeHeight: `${style.height}vh`,
+        iframeBorderRadius: `${style.cornerRadius}px`,
+        iframeBoxShadow: DROP_SHADOW,
+        enter: "fade",
+      };
+    case "FULLSCREEN":
+      return {
+        overlayAlignItems: "stretch",
+        overlayJustifyContent: "stretch",
+        overlayBackground: "transparent",
+        iframeWidth: "100vw",
+        iframeHeight: "100vh",
+        iframeBorderRadius: "0",
+        iframeBoxShadow: "none",
+        enter: "fade",
+      };
+    case "PUSH":
+      return {
+        overlayAlignItems: "stretch",
+        overlayJustifyContent: "stretch",
+        overlayBackground: "transparent",
+        iframeWidth: "100vw",
+        iframeHeight: "100vh",
+        iframeBorderRadius: "0",
+        iframeBoxShadow: "none",
+        enter: "slide-right",
+      };
+    case "NO_ANIMATION":
+    case "NONE":
+      return {
+        overlayAlignItems: "stretch",
+        overlayJustifyContent: "stretch",
+        overlayBackground: "transparent",
+        iframeWidth: "100vw",
+        iframeHeight: "100vh",
+        iframeBorderRadius: "0",
+        iframeBoxShadow: "none",
+        enter: "none",
+      };
+  }
+};
+
+const initialTransformFor = (enter: PresentationSpec["enter"]): string => {
+  switch (enter) {
+    case "slide-up":
+      return "translateY(100%)";
+    case "slide-right":
+      return "translateX(100%)";
+    case "fade":
+    case "none":
+      return "none";
+  }
+};
+
 const mount = (
   info: PaywallInfo,
   ctx: PresentationContext,
@@ -256,7 +418,9 @@ const mount = (
   _reject: (e: Error) => void,
   onTearDown: (a: ActivePresentation) => void,
 ): ActivePresentation => {
-  const isModal = (options.presentation ?? "modal") === "modal";
+  const style: PaywallPresentationStyle =
+    info.presentationStyle ?? { type: "MODAL" };
+  const spec = specFor(style);
   const closeOnBackdrop = options.closeOnBackdrop ?? true;
   const zIndex = options.zIndex ?? DEFAULT_Z_INDEX;
 
@@ -267,9 +431,9 @@ const mount = (
     inset: "0",
     zIndex: String(zIndex),
     display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: isModal ? "rgba(0,0,0,0.6)" : "transparent",
+    alignItems: spec.overlayAlignItems,
+    justifyContent: spec.overlayJustifyContent,
+    background: spec.overlayBackground,
   });
 
   const iframe = document.createElement("iframe");
@@ -286,23 +450,42 @@ const mount = (
       "[Superwall] presenter received no ctx.bootstrap — iframe URL will lack client_surface=web-sdk and post-checkout will trap-navigate inside the iframe.",
     );
   }
-  iframe.src = buildPaywallUrl(info, options.testMode === true, ctx.bootstrap);
+  iframe.src = buildPaywallUrl(
+    info,
+    options.testMode === true,
+    ctx.bootstrap,
+    ctx.initPayload,
+  );
+  const initialTransform = initialTransformFor(spec.enter);
+  const initialOpacity = spec.enter === "fade" ? "0" : "1";
   Object.assign(iframe.style, {
     border: "0",
     background: "transparent",
-    // Modal: tall sheet sized for typical paywall content. Was 420x640;
-    // most production paywalls bottom-out around 1100px tall on desktop
-    // and need at least ~480px wide for product cards to lay out.
-    width: isModal ? "min(480px, 96vw)" : "100vw",
-    height: isModal ? "min(900px, 96vh)" : "100vh",
-    borderRadius: isModal ? "12px" : "0",
-    boxShadow: isModal ? "0 16px 48px rgba(0,0,0,0.32)" : "none",
+    width: spec.iframeWidth,
+    height: spec.iframeHeight,
+    borderRadius: spec.iframeBorderRadius,
+    boxShadow: spec.iframeBoxShadow,
     display: "block",
+    transform: initialTransform,
+    opacity: initialOpacity,
+    transition:
+      spec.enter === "none"
+        ? "none"
+        : `transform ${ENTER_DURATION_MS}ms ease-out, opacity ${ENTER_DURATION_MS}ms ease-out`,
   });
   overlay.appendChild(iframe);
 
   const container = resolveContainer(options);
   container.appendChild(overlay);
+
+  // Animate to identity on next frame so the browser actually transitions
+  // from the initial transform/opacity to the rest state.
+  if (spec.enter !== "none" && typeof requestAnimationFrame !== "undefined") {
+    requestAnimationFrame(() => {
+      iframe.style.transform = "none";
+      iframe.style.opacity = "1";
+    });
+  }
 
   const paywallOrigin = originOf(iframe.src);
 
@@ -317,7 +500,7 @@ const mount = (
     tearDown(a);
   };
 
-  if (isModal && closeOnBackdrop) {
+  if (spec.overlayBackground !== "transparent" && closeOnBackdrop) {
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay && slot.a) {
         const a = slot.a;
@@ -329,8 +512,32 @@ const mount = (
 
   const messageListener = (event: MessageEvent) => {
     if (!slot.a) return;
-    if (event.source !== iframe.contentWindow) return;
-    if (paywallOrigin && event.origin !== paywallOrigin) return;
+    // Surface every paywall postMessage so we can diagnose missing /
+    // unexpected events without instrumenting the inner controller.
+    // Logs the event_name + filter outcome so it's clear whether the
+    // message reached our switch.
+    const data = event.data as { event_name?: unknown; version?: unknown };
+    const evtName =
+      typeof data?.event_name === "string"
+        ? data.event_name
+        : data && typeof data === "object" && "payload" in data
+          ? "<v1-envelope>"
+          : "<unknown>";
+    if (event.source !== iframe.contentWindow) {
+      console.debug(
+        "[Superwall:presenter] dropped postMessage from non-paywall source",
+        { evtName, origin: event.origin },
+      );
+      return;
+    }
+    if (paywallOrigin && event.origin !== paywallOrigin) {
+      console.debug(
+        "[Superwall:presenter] dropped postMessage from foreign origin",
+        { evtName, origin: event.origin, expected: paywallOrigin },
+      );
+      return;
+    }
+    console.debug("[Superwall:presenter] inbound", evtName, event.data);
     handleInbound(
       event.data,
       info,
@@ -456,12 +663,24 @@ const handleInbound = (
   cleanup: () => void,
   active: ActivePresentation,
 ): void => {
-  const env = data as V1Envelope;
-  if (!env || typeof env !== "object") return;
-  const version = env.version ?? 1;
-  if (version !== 1) return;
-  const events = env.payload?.events;
-  if (!Array.isArray(events)) return;
+  if (!data || typeof data !== "object") return;
+  // Two wire shapes from the paywall side:
+  //   (a) v1 envelope — `{ version: 1, payload: { events: [{event_name, ...}] } }`
+  //       used for templates / lifecycle batches.
+  //   (b) flat single event — `{ event_name, ...fields }` used by the in-iframe
+  //       WebPaywallController's `postMessageToHost` (e.g. `post_checkout_complete`).
+  // Normalise both into an `events` array before dispatch.
+  const env = data as V1Envelope & { event_name?: unknown };
+  let events: ReadonlyArray<{ event_name?: string; [k: string]: unknown }>;
+  if (typeof env.event_name === "string") {
+    events = [env as { event_name?: string; [k: string]: unknown }];
+  } else {
+    const version = env.version ?? 1;
+    if (version !== 1) return;
+    const payloadEvents = env.payload?.events;
+    if (!Array.isArray(payloadEvents)) return;
+    events = payloadEvents;
+  }
 
   for (const evt of events) {
     if (!evt || typeof evt !== "object") continue;
@@ -570,46 +789,25 @@ const handleInbound = (
       // is the real success signal.
       // ---------------------------------------------------------------
       case "post_checkout_complete": {
+        // Terminal success on the web-sdk surface. Per BE contract:
+        //  - `transaction_data` and `redirect_url` are ALWAYS undefined here
+        //    (controller strips them for web-sdk; details live in
+        //    `/entitlements` instead).
+        //  - The backend has ALREADY emitted `transaction_complete` server-
+        //    side before posting this — do NOT re-emit it locally or
+        //    consumers see double events.
+        // APC handler reads `/entitlements` after this fires to populate
+        // the entitlement set + transaction details.
         const productId =
           readString(evt, "product_identifier") ??
           readTransactionField(evt, "productIdentifier") ??
           "";
         const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
-        const redirectUrl = readString(evt, "redirectUrl");
-        const transactionData = readTransactionData(evt);
         ctx.onPurchaseEvent?.({
           type: "postCheckout",
           productId,
           checkoutContextId,
-          ...(transactionData && { transactionData }),
-          ...(redirectUrl !== null && { redirectUrl }),
         });
-        const product: Product = {
-          id: productId,
-          store: "stripe",
-          entitlements: [],
-        };
-        ctx.emit("transaction_complete", {
-          product,
-          paywall_info: info,
-          product_identifier: productId,
-          ...(transactionData?.transactionId && {
-            transaction_id: transactionData.transactionId,
-          }),
-          ...(transactionData?.currency && { currency: transactionData.currency }),
-          ...(typeof transactionData?.value === "number" && {
-            value: transactionData.value,
-          }),
-        });
-        ctx.emit("subscription_start", { product, paywall_info: info });
-        if (redirectUrl) {
-          // Merchant-configured post-purchase URL. We surface but never
-          // navigate the host frame — the consumer decides.
-          ctx.emit(
-            "paywallWillOpenURL" as never,
-            { url: redirectUrl } as never,
-          );
-        }
         cleanup();
         resolve({ type: "purchased", productId });
         return;
@@ -818,12 +1016,17 @@ const postRawAccept64 = (a: ActivePresentation, base64: string): void => {
   } catch {}
 };
 
-const base64UrlOfJson = (value: unknown): string => {
+const base64OfJson = (value: unknown): string => {
   const json = JSON.stringify(value);
   // btoa only handles latin1; encode UTF-8 bytes first.
   const bytes = new TextEncoder().encode(json);
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
-  const b64 = typeof btoa === "function" ? btoa(bin) : Buffer.from(bin, "binary").toString("base64");
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return typeof btoa === "function" ? btoa(bin) : Buffer.from(bin, "binary").toString("base64");
 };
+
+const base64UrlOfJson = (value: unknown): string =>
+  base64OfJson(value)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");

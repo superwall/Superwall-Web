@@ -60,6 +60,15 @@ export interface Entitlements {
   all: Entitlement[];
 }
 
+export type PaywallPresentationStyle =
+  | { type: "MODAL" }
+  | { type: "FULLSCREEN" }
+  | { type: "NO_ANIMATION" }
+  | { type: "PUSH" }
+  | { type: "DRAWER"; height: number; cornerRadius: number }
+  | { type: "POPUP"; height: number; width: number; cornerRadius: number }
+  | { type: "NONE" };
+
 // Network environment selector. Both SDKs accept this on construction.
 
 export interface CustomEnvironmentHosts {

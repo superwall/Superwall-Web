@@ -11,8 +11,131 @@ import {
 
 const tick = () => new Promise<void>((r) => queueMicrotask(r));
 
-const noopFetch = (() =>
-  Promise.resolve(new Response("", { status: 204 }))) as unknown as typeof fetch;
+const EMPTY_STATIC_CONFIG = JSON.stringify({
+  build_id: "test_build",
+  trigger_options: [],
+  paywall_responses: [],
+  products: [],
+  toggles: [],
+});
+
+// Default fetch for tests that don't exercise the network: returns a valid
+// empty static_config so configure() flips to "configured", and 204 for
+// everything else.
+import { buildInitPayload } from "./superwall.ts";
+
+test("buildInitPayload includes all controller-required slices + resolveVariables:true", () => {
+  const payload = buildInitPayload({
+    info: {
+      identifier: "pw_init",
+      name: "Init Test",
+      url: "https://user-content.test/runtime/x",
+      productIds: ["price_1", "price_2"],
+      products: [],
+      productsV2: [
+        {
+          sw_composite_product_id: "stripe:price_1",
+          reference_name: "primary",
+          store_product: {
+            store: "STRIPE",
+            product_identifier: "price_1",
+            trial_days: 7,
+          },
+        },
+      ],
+      backgroundColorHex: "#ffffff",
+      darkBackgroundColorHex: "#000000",
+    },
+    placement: "checkout",
+    params: { src: "home" },
+    decision: {
+      kind: "paywall",
+      experiment: {
+        id: "exp_1",
+        groupId: "grp_1",
+        variant: { id: "var_1", type: "treatment", paywallId: "pw_init" },
+      },
+    },
+    application: { name: "Acme", iconUrl: "https://cdn/acme.png" },
+    bootstrap: {
+      apiKey: "pk_test",
+      sdkVersion: "1.0.0",
+      collector: "https://collector.superwall.me",
+      apiBase: "https://api.superwall.me",
+      clientSurface: "web-sdk",
+      hostOrigin: "https://merchant.test",
+      cancelUrl: "https://merchant.test/cancel",
+    },
+    aliasId: "$SuperwallAlias:abc",
+    appUserId: undefined,
+    deviceId: "11111111-1111-1111-1111-111111111111",
+    email: undefined,
+    userAttributes: { plan: "free" },
+    deviceAttributes: { deviceLocale: "en-US", appVersion: "1.0.0" },
+  });
+  // Top-level shape
+  expect(payload["placementSessionToken"]).toBe("pk_test");
+  expect(payload["resolveVariables"]).toBe(true);
+  expect(payload["transactionAbandon"]).toBeNull();
+  expect(payload["integrations"]).toEqual([]);
+  expect(payload["isFirstAssignment"]).toBe(false);
+  expect(payload["application"]).toEqual({
+    name: "Acme",
+    iconUrl: "https://cdn/acme.png",
+  });
+  expect(payload["backgroundColorHex"]).toEqual({
+    light: "#ffffff",
+    dark: "#000000",
+  });
+  expect(Array.isArray(payload["products"])).toBe(true);
+  expect((payload["products"] as unknown[]).length).toBe(1);
+  // Collector slices
+  const c = payload["collector"] as Record<string, unknown>;
+  // Events route through the paywall app's CORS-enabled proxy, built
+  // absolute against `apiBase` so it follows whatever host the iframe
+  // controller is configured against.
+  expect((c["url"] as string)).toBe("https://api.superwall.me/api/proxy/events");
+  expect(c["headers"]).toMatchObject({
+    "x-public-api-key": "pk_test",
+    "x-device-id": "11111111-1111-1111-1111-111111111111",
+    "x-platform": "web",
+    "x-sdk-version": "1.0.0",
+  });
+  expect((c["placementEventId"] as string).length).toBeGreaterThan(0);
+  expect((c["identity"] as { userId: { type: string } }).userId.type).toBe(
+    "aliasId",
+  );
+  expect(c["experimentSlice"]).toEqual({
+    experimentId: "exp_1",
+    variantId: "var_1",
+  });
+  expect(c["paywallSlice"]).toMatchObject({
+    paywallId: "pw_init",
+    paywallProductIds: "price_1,price_2",
+    paywallUrl: "https://user-content.test/runtime/x",
+  });
+  expect((c["presentmentSlice"] as { isFreeTrialAvailable: boolean }).isFreeTrialAvailable).toBe(true);
+  expect((c["presentmentSlice"] as { presentationSourceType: string }).presentationSourceType).toBe("register");
+  expect((c["presentmentSlice"] as { presentedBy: string }).presentedBy).toBe("placement");
+  expect(c["placementParamsSlice"]).toEqual({ placementParams: { src: "home" } });
+  expect(c["productSlice"]).toEqual({});
+  // CheckoutContext
+  const cc = payload["checkoutContext"] as Record<string, unknown>;
+  expect(cc["paywall"]).toMatchObject({ paywallId: "pw_init" });
+  expect(cc["experiment"]).toEqual({ experimentId: "exp_1", variantId: "var_1" });
+  expect((cc["identity"] as { userId: { type: string } }).userId.type).toBe(
+    "aliasId",
+  );
+  expect(cc["products"]).toEqual({});
+});
+
+const noopFetch = ((input: RequestInfo | URL) => {
+  const url = typeof input === "string" ? input : input.toString();
+  if (url.includes("/api/v1/static_config")) {
+    return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+  }
+  return Promise.resolve(new Response("", { status: 204 }));
+}) as unknown as typeof fetch;
 
 const newAdapter = (): StorageAdapter => {
   const m = new Map<string, string>();
@@ -776,6 +899,9 @@ const fetchRecorder = () => {
     const body = init?.body as string | undefined;
     calls.push({ url, body });
     if (url.includes("/api/v1/enrich")) return enrichmentResponder();
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(EMPTY_STATIC_CONFIG);
+    }
     return new Response("", { status: 204 });
   }) as unknown as typeof globalThis.fetch;
   return {
@@ -1486,6 +1612,9 @@ test("paywall post_checkout_complete flows through PurchaseController.purchase()
   void sw.register({ placement: "checkout" }).catch(() => {});
   const r = await productPromise;
   expect(r.type).toBe("purchased");
+  // Optimistic flip from config-derived entitlements — synchronous on
+  // the postCheckout event, no need to wait for the /entitlements
+  // refresh to land.
   expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
   await sw.dispose();
 });
@@ -1968,67 +2097,3 @@ test("configure: cached config makes sw.ready resolve before a hanging fetch —
   await sw.dispose();
 });
 
-import { applyPaywallHostOverride } from "./superwall.ts";
-
-test("applyPaywallHostOverride returns input when no override", () => {
-  expect(
-    applyPaywallHostOverride("https://gymscore.superwall.app/p", undefined),
-  ).toBe("https://gymscore.superwall.app/p");
-});
-
-test("applyPaywallHostOverride swaps host and injects ?domain=", () => {
-  const out = applyPaywallHostOverride(
-    "https://gymscore.superwall.app/pro_export",
-    "https://paywall-app-pr-3123.workers.dev",
-  );
-  const u = new URL(out);
-  expect(u.host).toBe("paywall-app-pr-3123.workers.dev");
-  expect(u.pathname).toBe("/pro_export");
-  expect(u.searchParams.get("domain")).toBe("gymscore");
-});
-
-test("applyPaywallHostOverride preserves existing query params", () => {
-  const out = applyPaywallHostOverride(
-    "https://gymscore.superwall.app/p?foo=bar&baz=qux",
-    "https://override.example.com",
-  );
-  const u = new URL(out);
-  expect(u.searchParams.get("foo")).toBe("bar");
-  expect(u.searchParams.get("baz")).toBe("qux");
-  expect(u.searchParams.get("domain")).toBe("gymscore");
-});
-
-test("applyPaywallHostOverride drops the trailing port/path from the override origin", () => {
-  const out = applyPaywallHostOverride(
-    "https://gymscore.superwall.app/pro",
-    "https://override.example.com:8443/ignored?ignored=1",
-  );
-  const u = new URL(out);
-  expect(u.origin).toBe("https://override.example.com:8443");
-  expect(u.pathname).toBe("/pro");
-  expect(u.search).toBe("?domain=gymscore");
-});
-
-test("applyPaywallHostOverride hardcodes domain=gymscore (temporary)", () => {
-  const out = applyPaywallHostOverride(
-    "https://superwall.app/p",
-    "https://override.example.com",
-  );
-  const u = new URL(out);
-  expect(u.searchParams.get("domain")).toBe("gymscore");
-});
-
-test("applyPaywallHostOverride returns input on malformed override", () => {
-  expect(
-    applyPaywallHostOverride(
-      "https://gymscore.superwall.app/p",
-      "not-a-url",
-    ),
-  ).toBe("https://gymscore.superwall.app/p");
-});
-
-test("applyPaywallHostOverride returns input on malformed original URL", () => {
-  expect(
-    applyPaywallHostOverride("not-a-url", "https://override.example.com"),
-  ).toBe("not-a-url");
-});

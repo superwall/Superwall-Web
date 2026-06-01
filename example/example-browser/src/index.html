@@ -199,12 +199,44 @@
           <button data-act="signOut">Sign out</button>
           <button data-act="subActive">Set subscription ACTIVE</button>
           <button data-act="subInactive">Set subscription INACTIVE</button>
-          <button data-act="register" class="primary">Register test2 placement</button>
+          <button data-act="register" class="primary">Register home placement</button>
           <button data-act="dismiss">Dismiss</button>
           <button data-act="reset">Reset</button>
         </div>
         <h2 style="margin-top: 16px;">Last register() result</h2>
         <div id="last-result">—</div>
+      </section>
+
+      <section class="panel" id="entitled-panel" hidden>
+        <h2>🎉 Pro feature unlocked</h2>
+        <p style="margin: 0 0 12px; color: var(--muted); font-size: 13px;">
+          This panel is gated behind <code>register({ feature })</code>.
+          The callback runs only when the user is entitled (or the paywall is
+          non-gated). Click below for a sample "pro" interaction.
+        </p>
+        <div class="actions">
+          <button data-act="genReport" class="primary">Generate weekly report</button>
+          <button data-act="openDocs">Open pro docs (new tab)</button>
+        </div>
+        <pre id="pro-output" style="margin-top: 12px;"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>Presentation style overrides</h2>
+        <p style="margin: 0 0 8px; color: var(--muted); font-size: 12px;">
+          Each button calls <code>register()</code> with a different
+          <code>overrides.presentationStyle</code>, overriding whatever the
+          paywall config says.
+        </p>
+        <div class="actions">
+          <button data-act="styleModal">MODAL</button>
+          <button data-act="styleFullscreen">FULLSCREEN</button>
+          <button data-act="styleNoAnimation">NO_ANIMATION</button>
+          <button data-act="stylePush">PUSH</button>
+          <button data-act="styleDrawer">DRAWER (60% h)</button>
+          <button data-act="stylePopup">POPUP (50×70%)</button>
+          <button data-act="styleNone">NONE</button>
+        </div>
       </section>
 
       <section class="panel">

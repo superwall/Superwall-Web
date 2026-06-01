@@ -85,6 +85,105 @@ test("test mode flips debug=true in the iframe URL", async () => {
   await presentation;
 });
 
+test("iframe URL carries #init=<base64> hash with placementSessionToken + identity + apiBase + collector", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_init"),
+    newCtx({
+      bootstrap: {
+        apiKey: "pk_test_abc",
+        appUserId: "user_1",
+        aliasId: "alias_1",
+        email: "u@example.test",
+        deviceId: "11111111-1111-1111-1111-111111111111",
+        hostOrigin: "https://merchant.test",
+        cancelUrl: "https://merchant.test/checkout",
+        apiBase: "https://api.superwall.me",
+        collector: "https://collector.superwall.me",
+        sdkVersion: "1.2.3",
+        clientSurface: "web-sdk",
+      },
+    }),
+  );
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const url = new URL(iframe.src);
+  expect(url.hash).toMatch(/^#init=/);
+  // Hash carries standard base64 (controller decodes with plain atob).
+  const json = JSON.parse(atob(url.hash.slice("#init=".length)));
+  expect(json.placementSessionToken).toBe("pk_test_abc");
+  expect(json.apiBase).toBe("https://api.superwall.me");
+  expect(json.hostOrigin).toBe("https://merchant.test");
+  expect(json.cancelUrl).toBe("https://merchant.test/checkout");
+  // collector.identity carries the discriminated userId + deviceId UUID;
+  // top-level identity is gone (lived under collector now to match the
+  // controller's destructure).
+  expect(json.collector).toEqual({
+    url: "https://collector.superwall.me",
+    identity: {
+      userId: { type: "appUserId", appUserId: "user_1" },
+      deviceId: "11111111-1111-1111-1111-111111111111",
+    },
+  });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+test("anonymous user → collector.identity.userId is the aliasId variant", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_anon"),
+    newCtx({
+      bootstrap: {
+        apiKey: "pk_anon",
+        // appUserId omitted (anonymous).
+        aliasId: "$SuperwallAlias:abc",
+        deviceId: "11111111-1111-1111-1111-111111111111",
+        hostOrigin: "https://merchant.test",
+        apiBase: "https://api.superwall.me",
+        collector: "https://collector.superwall.me",
+        sdkVersion: "1.0.0",
+        clientSurface: "web-sdk",
+      },
+    }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const json = JSON.parse(
+    atob(new URL(iframe.src).hash.slice("#init=".length)),
+  );
+  expect(json.collector.identity.userId).toEqual({
+    type: "aliasId",
+    aliasId: "$SuperwallAlias:abc",
+  });
+  expect(json.collector.identity.deviceId).toBe(
+    "11111111-1111-1111-1111-111111111111",
+  );
+  presenter.dismiss();
+  await presentation;
+});
+
+test("weighted endpoint pick uses urlEndpoints when present", async () => {
+  // Single endpoint = always picked, regardless of weight.
+  const presenter = createBrowserPresenter();
+  const info: PaywallInfo = {
+    ...stubInfo("pw_ep"),
+    url: "https://default.test/fallback",
+    urlEndpoints: [
+      { url: "https://endpoint-a.test/x", percentage: 100 },
+    ],
+  };
+  const presentation = presenter.present(info, newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  expect(iframe.src).toContain("endpoint-a.test/x");
+  expect(iframe.src).not.toContain("default.test/fallback");
+  presenter.dismiss();
+  await presentation;
+});
+
 test("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.bootstrap is set", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
@@ -97,6 +196,8 @@ test("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.boot
         email: "u@example.test",
         deviceId: "11111111-1111-1111-1111-111111111111",
         hostOrigin: "https://merchant.test",
+        apiBase: "https://api.superwall.me",
+        collector: "https://collector.superwall.me",
         sdkVersion: "1.2.3",
         clientSurface: "web-sdk",
       },
@@ -125,13 +226,12 @@ test("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.boot
   await presentation;
 });
 
-test("post_checkout_complete enriches transaction_complete with currency / value / transaction_id", async () => {
-  const emitted: Array<[string, Record<string, unknown>]> = [];
+test("post_checkout_complete (flat shape from controller's postMessageToHost) resolves purchased", async () => {
+  // The in-iframe controller posts a flat `{event_name, ...}` message — NOT
+  // the v1 envelope. Our handler accepts both shapes.
   const presenter = createBrowserPresenter();
-  const info = stubInfo("pw_pcr");
-  const ctx = newCtx({
-    emit: (name, detail) => emitted.push([name as string, detail as Record<string, unknown>]),
-  });
+  const info = stubInfo("pw_flat");
+  const ctx = newCtx();
   const presentation = presenter.present(info, ctx);
   await tick();
 
@@ -140,34 +240,19 @@ test("post_checkout_complete enriches transaction_complete with currency / value
   window.dispatchEvent(
     new MessageEvent("message", {
       data: {
-        version: 1,
-        payload: {
-          events: [
-            {
-              event_name: "post_checkout_complete",
-              checkout_context_id: "ckctx_x",
-              product_identifier: "pro_yearly",
-              transactionData: {
-                transactionId: "tx_revenue",
-                productIdentifier: "pro_yearly",
-                currency: "EUR",
-                value: 49.5,
-              },
-            },
-          ],
-        },
+        event_name: "post_checkout_complete",
+        checkout_context_id: "ckctx_flat",
+        product_identifier: "pro_yearly",
+        transaction_data: undefined,
+        redirect_url: undefined,
       },
       origin,
       source: iframe.contentWindow,
     } as MessageEventInit),
   );
-
-  await presentation;
-  const tc = emitted.find(([n]) => n === "transaction_complete");
-  expect(tc).toBeDefined();
-  expect(tc![1]["transaction_id"]).toBe("tx_revenue");
-  expect(tc![1]["currency"]).toBe("EUR");
-  expect(tc![1]["value"]).toBe(49.5);
+  const r = await presentation;
+  expect(r.type).toBe("purchased");
+  if (r.type === "purchased") expect(r.productId).toBe("pro_yearly");
 });
 
 test("redirect_required calls window.open and emits paywallWillOpenURL", async () => {
@@ -214,7 +299,7 @@ test("redirect_required calls window.open and emits paywallWillOpenURL", async (
   }
 });
 
-test("post_checkout_complete resolves purchased + emits transaction_complete and routes via onPurchaseEvent", async () => {
+test("post_checkout_complete resolves purchased + routes via onPurchaseEvent + does NOT emit transaction_complete (BE does it)", async () => {
   const emitted: Array<[string, unknown]> = [];
   const purchaseEvents: unknown[] = [];
   const presenter = createBrowserPresenter();
@@ -228,27 +313,15 @@ test("post_checkout_complete resolves purchased + emits transaction_complete and
 
   const iframe = document.querySelector("iframe") as HTMLIFrameElement;
   const origin = new URL(iframe.src).origin;
-  // Simulate the paywall iframe posting `post_checkout_complete`.
+  // Flat shape — what the controller's `postMessageToHost` actually sends.
   window.dispatchEvent(
     new MessageEvent("message", {
       data: {
-        version: 1,
-        payload: {
-          events: [
-            {
-              event_name: "post_checkout_complete",
-              checkout_context_id: "ckctx_42",
-              product_identifier: "pro_yearly",
-              transactionData: {
-                transactionId: "tx_abc",
-                productIdentifier: "pro_yearly",
-                currency: "USD",
-                value: 99.99,
-              },
-              redirectUrl: "https://merchant.test/thanks",
-            },
-          ],
-        },
+        event_name: "post_checkout_complete",
+        checkout_context_id: "ckctx_42",
+        product_identifier: "pro_yearly",
+        transaction_data: undefined,
+        redirect_url: undefined,
       },
       origin,
       source: iframe.contentWindow,
@@ -260,26 +333,17 @@ test("post_checkout_complete resolves purchased + emits transaction_complete and
   if (r.type === "purchased") {
     expect(r.productId).toBe("pro_yearly");
   }
-  // Surfaced lifecycle.
-  expect(emitted.map(([n]) => n)).toContain("transaction_complete");
-  expect(emitted.map(([n]) => n)).toContain("subscription_start");
-  expect(emitted.map(([n]) => n)).toContain("paywallWillOpenURL");
-  // Internal channel saw the postCheckout event with the transaction data.
+  // BE emits transaction_complete server-side before sending this event —
+  // local emission would duplicate consumer callbacks.
+  expect(emitted.map(([n]) => n)).not.toContain("transaction_complete");
+  expect(emitted.map(([n]) => n)).not.toContain("subscription_start");
+  // Internal channel still routes the postCheckout signal to APC.
   const pc = purchaseEvents.find(
     (e) => (e as { type: string }).type === "postCheckout",
-  ) as
-    | undefined
-    | {
-        type: string;
-        productId: string;
-        checkoutContextId: string;
-        transactionData?: { transactionId: string };
-        redirectUrl?: string;
-      };
+  ) as undefined | { type: string; productId: string; checkoutContextId: string };
   expect(pc).toBeDefined();
+  expect(pc!.productId).toBe("pro_yearly");
   expect(pc!.checkoutContextId).toBe("ckctx_42");
-  expect(pc!.transactionData?.transactionId).toBe("tx_abc");
-  expect(pc!.redirectUrl).toBe("https://merchant.test/thanks");
 });
 
 test("custom container option mounts the overlay there instead of body", async () => {

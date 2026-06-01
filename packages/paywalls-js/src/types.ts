@@ -12,6 +12,7 @@ import type {
   Entitlements,
   CustomEnvironmentHosts,
   NetworkEnvironment,
+  PaywallPresentationStyle,
 } from "@superwall/core";
 
 export type {
@@ -24,6 +25,7 @@ export type {
   Entitlements,
   CustomEnvironmentHosts,
   NetworkEnvironment,
+  PaywallPresentationStyle,
 };
 
 // Module-augmentation surfaces. Apps extend these via `declare module
@@ -180,6 +182,80 @@ export interface PageViewData {
 
 // Paywall
 
+// Surveys
+
+/** When a survey should be shown relative to the paywall's outcome. */
+export type SurveyShowCondition = "ON_MANUAL_CLOSE" | "ON_PURCHASE";
+
+export interface SurveyOption {
+  id: string;
+  title: string;
+}
+
+/**
+ * Post-paywall questionnaire attached to a paywall in the dashboard.
+ * Up to one survey is shown per `assignmentKey`; subsequent paywall
+ * dismissals dedupe via persisted storage.
+ *
+ * `presentationProbability` (0–1) is the chance the survey is shown
+ * when its `presentationCondition` is met; the remainder is the
+ * holdout group.
+ */
+export interface Survey {
+  id: string;
+  /** Stable key — once persisted, the SDK never re-shows for the same one. */
+  assignmentKey: string;
+  title: string;
+  message: string;
+  options: SurveyOption[];
+  presentationCondition: SurveyShowCondition;
+  /** 0–1. 0 = always holdout; 1 = always shown. */
+  presentationProbability: number;
+  /** Append an "Other" option that opens a free-text input. */
+  includeOtherOption: boolean;
+  /** Append a "Close" option that dismisses without selection. */
+  includeCloseOption: boolean;
+}
+
+/** Outcome of `SurveyManager.presentSurveyIfAvailable`. */
+export type SurveyPresentationResult = "show" | "holdout" | "noShow";
+
+/** Outcome of a redemption-code redeem call. Surfaced on
+ *  `SuperwallDelegate.onDidRedeemLink`. */
+export type RedemptionResult =
+  | {
+      type: "success";
+      code: string;
+      entitlements: Entitlement[];
+    }
+  | {
+      type: "error";
+      code: string;
+      error: string;
+    }
+  | {
+      type: "expired";
+      code: string;
+    }
+  | {
+      type: "invalid";
+      code: string;
+    };
+
+/** Why a paywall closed. */
+export type PaywallCloseReason =
+  | "systemLogic"
+  | "forNextPaywall"
+  | "webViewFailedToLoad"
+  | "manualClose"
+  | "none";
+
+/** Whether a given close reason should complete the registration result —
+ *  i.e. invoke the feature block / resolve the result handler. `forNextPaywall`
+ *  and `none` short-circuit because another paywall is taking over. */
+export const closeReasonShouldComplete = (r: PaywallCloseReason): boolean =>
+  r !== "forNextPaywall" && r !== "none";
+
 export interface PaywallInfo {
   identifier: string;
   name: string;
@@ -216,15 +292,34 @@ export interface PaywallInfo {
    *  styles). Sent to the iframe as a separate `accept64` after the main
    *  templates bundle. */
   paywalljsEvent?: string;
-  /** Where the paywall should render: `"EXTERNAL"` ⇒ navigate to the
-   *  Superwall Web Project hosted URL; `"EMBEDDED"`/null ⇒ in-page iframe. */
+  /** Dashboard "web checkout destination" flag from config. SDK no longer
+   *  branches on it for URL derivation (every paywall iframes its own
+   *  editor URL), but kept on the type for downstream / analytics use. */
   webCheckoutDestination?: string;
-  closeReason?:
-    | "systemLogic"
-    | "forNextPaywall"
-    | "webViewFailedToLoad"
-    | "manualClose"
-    | "none";
+  /** Per-paywall presentation style from `presentation_style_v3`. The
+   *  presenter selects dimensions, position, and animation from this.
+   *  Defaults to `{ type: "MODAL" }` when the wire omits / sends an
+   *  unrecognized value. */
+  presentationStyle?: PaywallPresentationStyle;
+  /** Post-paywall surveys. The first survey whose `presentationCondition`
+   *  matches the paywall outcome wins. The SDK dedupes via
+   *  `assignmentKey` so a returning user only sees each survey once. */
+  surveys?: Survey[];
+  /** Weighted load-balanced editor URLs. When present with >1 entry, the
+   *  presenter picks one by cumulative-weight random selection at mount
+   *  time. When absent or single-entry, `url` is used. */
+  urlEndpoints?: ReadonlyArray<{
+    url: string;
+    percentage: number;
+    timeoutMs?: number;
+  }>;
+  backgroundColorHex?: string;
+  darkBackgroundColorHex?: string;
+  /** Raw v2 product list, forwarded verbatim into the iframe `#init=`
+   *  payload alongside `resolveVariables: true`. Server resolves the
+   *  per-locale `ProductVariables` instead of the SDK. */
+  productsV2?: ReadonlyArray<Record<string, JsonValue>>;
+  closeReason?: PaywallCloseReason;
   computedPropertyRequests?: ComputedPropertyRequest[];
   state?: Record<string, JsonValue>;
 }
@@ -351,7 +446,6 @@ export type IntegrationAttribute =
 // re-exported at the top of this file.
 
 export interface PaywallOptions {
-  presentation?: "modal" | "fullscreen";
   container?: HTMLElement | (() => HTMLElement);
   shouldPreload?: boolean;
   closeOnBackdrop?: boolean;
@@ -368,20 +462,6 @@ export interface PaywallOptions {
 export interface SuperwallOptions {
   paywalls?: PaywallOptions;
   networkEnvironment?: NetworkEnvironment;
-  /** Override the origin used to load the paywall (iframe or external).
-   *  Default: `https://{tenant}.superwall.app/{placement}` from
-   *  `static_config.web2app_config.restore_access_url`.
-   *
-   *  When set, the SDK swaps the host and injects `?domain={tenant}` so
-   *  the override host can route to the correct project (the subdomain
-   *  carried that information; with the override it doesn't). Example:
-   *
-   *    default:  https://gymscore.superwall.app/<placement>?...
-   *    override: https://paywall-app-pr-3123.workers.dev/<placement>?domain=gymscore&...
-   *
-   *  Value must be a full origin (scheme + host[:port]). Temporary tool
-   *  for review-lab / PR-preview deployments of the paywall app. */
-  paywallHostOverride?: string;
   localeIdentifier?: string;
   logging?: { level?: LogLevel; scopes?: LogScope[] };
   testModeBehavior?: "automatic" | "whenEnabledForUser" | "never" | "always";
@@ -443,6 +523,9 @@ export const STORAGE_KEYS = {
   /** Latest redemption response (JSON-encoded). Replayed on configure so
    *  the entitlements granted via web checkout survive page reloads. */
   latestRedemption: "superwall.latestRedemption",
+  /** Last shown survey's `assignmentKey`. Dedupes survey presentation —
+   *  the SDK never re-shows for the same key once it's persisted. */
+  surveyAssignmentKey: "superwall.surveyAssignmentKey",
 } as const;
 
 export type StorageKeyName = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

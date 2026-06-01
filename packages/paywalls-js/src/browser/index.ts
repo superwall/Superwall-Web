@@ -9,6 +9,10 @@ export {
   type BrowserPresenterOptions,
 } from "./presenter.ts";
 export {
+  createBrowserSurveyPresenter,
+  type BrowserSurveyPresenterOptions,
+} from "./surveyPresenter.ts";
+export {
   readCookie,
   writeCookie,
   deleteCookie,

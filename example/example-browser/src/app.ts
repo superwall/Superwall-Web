@@ -3,7 +3,11 @@
 // Demonstrates: factory wiring, reactive Readable<T> bindings, namespace
 // methods, and the typed event target. No framework — vanilla DOM only.
 
-import { createSuperwall, type Readable } from "@superwall/paywalls-js";
+import {
+  createSuperwall,
+  type PaywallPresentationStyle,
+  type Readable,
+} from "@superwall/paywalls-js";
 import {
   createBrowserPresenter,
   createBrowserStorage,
@@ -13,11 +17,23 @@ import {
 // SDK setup
 // ---------------------------------------------------------------------------
 
+const apiKey = "pk_ZNLGF8AlO2V50YDvC1y0c";
+
+// Review-lab override: when this host is set, the SDK builds URLs against
+// it (via `networkEnvironment.custom`) AND the local proxy forwards there
+// (server.ts reads SW_REVIEW_LAB_HOST). Keep both in sync — same string
+// here as in the env var.
+const REVIEW_LAB =
+  "ir-feat-web-sdk-support.prd.us-east-1.review-lab.superwall-services.com";
 
 // Superwall BE doesn't return CORS headers for browser origins, so route
-// every API call through the local Bun proxy (see server.ts).
+// every API call through the local Bun proxy (see server.ts). The proxy
+// rewrites prod hosts AND review-lab → /proxy/* so flipping REVIEW_LAB
+// requires no per-host wiring.
 const PROXY_BASE = location.origin;
 const PROXY_REWRITES: Array<[RegExp, string]> = [
+  [/^https:\/\/subscriptions-api\.superwall\.dev/, `${PROXY_BASE}/proxy/subscriptions`],
+  [new RegExp(`^https://${REVIEW_LAB}`), `${PROXY_BASE}/proxy/api`],
   [/^https:\/\/api\.superwall\.me/, `${PROXY_BASE}/proxy/api`],
   [/^https:\/\/collector\.superwall\.me/, `${PROXY_BASE}/proxy/collector`],
   [/^https:\/\/enrichment-api\.superwall\.com/, `${PROXY_BASE}/proxy/enrichment`],
@@ -49,12 +65,32 @@ const sw = createSuperwall({
   apiKey,
   fetch: proxiedFetch,
   presenter: createBrowserPresenter({
-    presentation: "modal",
     testMode: true,
   }),
   storage: createBrowserStorage(),
   options: {
     testModeBehavior: "always",
+    // Load the iframe from the PR-preview paywall worker instead of the
+    // editor preview host. Also makes the iframe's relative collector URL
+    // (`/api/proxy/events`) resolve against the worker.
+    paywallHostOverride:
+      "https://superwall-web-paywall-app-pr-3123.superstaging.workers.dev",
+    // Point all four upstreams at the review-lab. The SDK's own fetches
+    // are rewritten through the local proxy by `proxiedFetch` above; the
+    // value here also drives `apiBase` / `collector` in the iframe's
+    // `#init=` hash so the in-iframe controller's fetches land on the
+    // same backend (those go direct, no proxy possible cross-origin).
+    networkEnvironment: {
+      custom: {
+        base: REVIEW_LAB,
+        // Collector stays on prod — review-lab doesn't ingest events.
+        collector: "collector.superwall.me",
+        enrichment: REVIEW_LAB,
+        // Review-lab branch doesn't mount /subscriptions-api/*. Point at the
+        // dev subscriptions host instead.
+        subscriptions: "subscriptions-api.superwall.dev",
+      },
+    },
   },
 });
 
@@ -177,6 +213,14 @@ bind(sw.user.id, $("#s-user-id"), (v) => v || "(empty)");
 bind(sw.user.aliasId, $("#s-user-alias"), (v) => v || "(empty)");
 bind(sw.user.effectiveId, $("#s-user-effective"), (v) => v || "(empty)");
 bind(sw.subscriptionStatus, $("#s-sub"));
+// Auto-unhide the pro panel whenever sub status flips ACTIVE (covers
+// page reload after a previous purchase + post-purchase flip from APC).
+const cleanupProGate = sw.subscriptionStatus.subscribe((status) => {
+  const panel = document.getElementById("entitled-panel");
+  if (!panel) return;
+  if (status.status === "ACTIVE") panel.hidden = false;
+});
+ac.signal.addEventListener("abort", cleanupProGate, { once: true });
 bind(sw.isPaywallPresented, $("#s-presented"), String);
 
 const configBadge = $<HTMLDivElement>("#config-badge");
@@ -223,6 +267,24 @@ const setLastResult = (v: unknown) => {
   lastResult.textContent = fmtPretty(v);
 };
 
+/** Fire `register()` against the `home` placement with a per-call
+ *  presentation-style override. The SDK applies the override after
+ *  resolving the paywall config so it wins over `presentation_style_v3`. */
+const registerWithStyle = async (
+  presentationStyle: PaywallPresentationStyle,
+): Promise<void> => {
+  const result = await sw.register({
+    placement: "home",
+    overrides: { presentationStyle },
+    feature: () => log("feature ran!"),
+  });
+  setLastResult(
+    result.type === "error"
+      ? { type: "error", error: result.error.name + ": " + result.error.message }
+      : result,
+  );
+};
+
 const handlers: Record<string, () => Promise<void> | void> = {
   identify: async () => {
     await sw.user.identify("test_user_42");
@@ -250,8 +312,18 @@ const handlers: Record<string, () => Promise<void> | void> = {
   },
   register: async () => {
     const result = await sw.register({
-      placement: "test",
-      feature: () => log("feature ran!"),
+      placement: "home",
+      // Real feature gate — unhides the "pro feature unlocked" panel.
+      // For gated paywalls this runs only after a successful purchase /
+      // when the user is already entitled. For non-gated paywalls it
+      // runs on close too. See `RegisterPlacementArgs.feature` docs.
+      feature: () => {
+        log("feature ran! unlocking pro panel");
+        const panel = document.getElementById("entitled-panel");
+        if (panel) panel.hidden = false;
+        const out = document.getElementById("pro-output");
+        if (out) out.textContent = "Pro features unlocked at " + new Date().toLocaleTimeString();
+      },
     });
     setLastResult(
       result.type === "error"
@@ -259,6 +331,55 @@ const handlers: Record<string, () => Promise<void> | void> = {
         : result,
     );
   },
+
+  // Direct purchase outside a paywall presentation. With the default
+  // automaticPurchaseController, this awaits a `post_checkout_complete`
+  // event for the given product id — so it only resolves if a paywall
+  // is open in parallel and the user completes Stripe checkout. To use
+  // this standalone, supply a custom PurchaseController that initiates
+  // Stripe checkout directly.
+  purchase: async () => {
+    log("calling sw.purchases.purchase(pro_yearly)…");
+    const result = await sw.purchases.purchase({
+      id: "pro_yearly",
+      store: "stripe",
+      entitlements: [],
+    });
+    setLastResult(result);
+    log("purchase resolved:", result);
+  },
+
+  // "Pro feature" demo handlers — wired only after the user is entitled.
+  genReport: () => {
+    const out = document.getElementById("pro-output");
+    if (!out) return;
+    const rows = Array.from({ length: 5 }, (_, i) => {
+      const day = new Date(Date.now() - i * 86_400_000).toDateString();
+      const value = Math.round(40 + Math.random() * 120);
+      return `${day.padEnd(20)}  ${String(value).padStart(4)} pts`;
+    }).join("\n");
+    out.textContent =
+      "Weekly Report — generated " +
+      new Date().toLocaleTimeString() +
+      "\n────────────────────────────────────\n" +
+      rows;
+  },
+  openDocs: () => {
+    window.open("https://superwall.com/docs", "_blank", "noopener");
+  },
+
+  // Presentation-style override gallery. Each fires register() with a
+  // different `overrides.presentationStyle` so the paywall renders in that
+  // style regardless of what `presentation_style_v3` says in the config.
+  styleModal: () => registerWithStyle({ type: "MODAL" }),
+  styleFullscreen: () => registerWithStyle({ type: "FULLSCREEN" }),
+  styleNoAnimation: () => registerWithStyle({ type: "NO_ANIMATION" }),
+  stylePush: () => registerWithStyle({ type: "PUSH" }),
+  styleDrawer: () =>
+    registerWithStyle({ type: "DRAWER", height: 60, cornerRadius: 16 }),
+  stylePopup: () =>
+    registerWithStyle({ type: "POPUP", height: 70, width: 50, cornerRadius: 16 }),
+  styleNone: () => registerWithStyle({ type: "NONE" }),
   dismiss: () => {
     sw.dismiss();
   },

@@ -3,7 +3,14 @@
 // consumed are modeled; the rest is preserved on `.raw`.
 
 import { Context, Effect, Layer, SubscriptionRef } from "effect";
-import { STORAGE_KEYS, type JsonValue } from "../types.ts";
+import {
+  STORAGE_KEYS,
+  type JsonValue,
+  type PaywallPresentationStyle,
+  type Survey,
+  type SurveyOption,
+  type SurveyShowCondition,
+} from "../types.ts";
 import { makeActor } from "./actor.ts";
 import { asStorageKey } from "./brands.ts";
 import { ConfigParseError } from "./errors.ts";
@@ -27,6 +34,10 @@ export interface RawConfig {
    *  (e.g. `https://{tenant}.superwall.app/{placement}`) instead of
    *  presenting an iframe. */
   readonly web2appConfig?: RawWeb2AppConfig;
+  /** Application metadata from the BE — shipped into the iframe's
+   *  `#init=` hash so the controller can render the app name + icon
+   *  on default/error chrome. */
+  readonly application?: { readonly name?: string; readonly iconUrl?: string };
   /** Untyped backing payload — preserves fields we don't model. */
   readonly raw: Record<string, JsonValue>;
 }
@@ -82,11 +93,33 @@ export interface RawPaywallResponse {
    *  `accept64` message after the templates bundle. Decoded + re-sent
    *  verbatim by the presenter. */
   readonly paywalljsEvent?: string;
-  /** Per-paywall override of how to present:
-   *    `"web"` (or any non-`"embedded"` value) → navigate to the Web
-   *      Project paywall URL instead of presenting an iframe.
-   *    `"embedded"` / null → SDK iframe (current default). */
+  /** Weighted load-balanced endpoints. When >1, picked by cumulative-weight
+   *  random selection at iframe-mount time; when absent or empty, falls back
+   *  to `url`. */
+  readonly urlEndpoints?: ReadonlyArray<{
+    readonly url: string;
+    readonly percentage: number;
+    readonly timeoutMs?: number;
+  }>;
+  readonly backgroundColorHex?: string;
+  readonly darkBackgroundColorHex?: string;
+  /** v2 product list — `[{ sw_composite_product_id, reference_name,
+   *  store_product, entitlements }]`. Forwarded verbatim into the init
+   *  payload alongside `resolveVariables: true` so the server resolves
+   *  per-locale `ProductVariables`. */
+  readonly productsV2?: ReadonlyArray<Record<string, JsonValue>>;
+  /** Per-paywall destination flag from the dashboard. Kept on the type for
+   *  downstream consumers; the SDK no longer branches on it for URL
+   *  derivation — every paywall is iframed at its own editor URL. */
   readonly webCheckoutDestination?: string;
+  /** Per-paywall presentation style from the dashboard
+   *  (`presentation_style_v3`). Drawer/Popup carry their own dimensions.
+   *  Defaults to `{ type: "MODAL" }` when the wire omits / sends an
+   *  unrecognized value. */
+  readonly presentationStyle?: PaywallPresentationStyle;
+  /** Post-paywall surveys attached at the paywall level. Empty when the
+   *  wire omits the field. */
+  readonly surveys?: ReadonlyArray<Survey>;
 }
 
 export interface RawProductItem {
@@ -226,6 +259,120 @@ const parseTrigger = (raw: unknown): RawTrigger | null => {
   };
 };
 
+const parsePresentationStyle = (
+  raw: Record<string, unknown>,
+): PaywallPresentationStyle | undefined => {
+  const v3 = raw["presentation_style_v3"] ?? raw["presentationStyleV3"];
+  if (isObject(v3)) {
+    const type = pickString(v3, ["type"]).toUpperCase();
+    const num = (k: string, fallback: number): number => {
+      const v = v3[k];
+      return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+    };
+    switch (type) {
+      case "MODAL":
+        return { type: "MODAL" };
+      case "FULLSCREEN":
+        return { type: "FULLSCREEN" };
+      case "NO_ANIMATION":
+        return { type: "NO_ANIMATION" };
+      case "PUSH":
+        return { type: "PUSH" };
+      case "NONE":
+        return { type: "NONE" };
+      case "DRAWER":
+        return {
+          type: "DRAWER",
+          height: num("height", 0),
+          cornerRadius: num("corner_radius", 0),
+        };
+      case "POPUP":
+        return {
+          type: "POPUP",
+          height: num("height", 0),
+          width: num("width", 0),
+          cornerRadius: num("corner_radius", 0),
+        };
+    }
+  }
+  const v2 = pickString(raw, [
+    "presentation_style_v2",
+    "presentationStyleV2",
+    "presentation_style",
+    "presentationStyle",
+  ]).toUpperCase();
+  switch (v2) {
+    case "MODAL":
+      return { type: "MODAL" };
+    case "FULLSCREEN":
+      return { type: "FULLSCREEN" };
+    case "NO_ANIMATION":
+      return { type: "NO_ANIMATION" };
+    case "PUSH":
+      return { type: "PUSH" };
+    case "NONE":
+      return { type: "NONE" };
+    default:
+      return undefined;
+  }
+};
+
+const parseSurveyOption = (raw: unknown): SurveyOption | null => {
+  if (!isObject(raw)) return null;
+  const id = pickString(raw, ["id"]);
+  const title = pickString(raw, ["title"]);
+  if (!id || !title) return null;
+  return { id, title };
+};
+
+const parseSurveyCondition = (
+  raw: unknown,
+): SurveyShowCondition | null => {
+  if (typeof raw !== "string") return null;
+  const v = raw.toUpperCase();
+  return v === "ON_MANUAL_CLOSE" || v === "ON_PURCHASE" ? v : null;
+};
+
+const parseSurvey = (raw: unknown): Survey | null => {
+  if (!isObject(raw)) return null;
+  const id = pickString(raw, ["id"]);
+  const assignmentKey = pickString(raw, [
+    "assignment_key",
+    "assignmentKey",
+  ]);
+  const title = pickString(raw, ["title"]);
+  const message = pickString(raw, ["message"]);
+  const condition = parseSurveyCondition(
+    raw["presentation_condition"] ?? raw["presentationCondition"],
+  );
+  if (!id || !assignmentKey || !condition) return null;
+  const optionsRaw = pickArray(raw, ["options"]);
+  const options = optionsRaw
+    .map(parseSurveyOption)
+    .filter((o): o is SurveyOption => o !== null);
+  const probabilityRaw =
+    raw["presentation_probability"] ?? raw["presentationProbability"];
+  const presentationProbability =
+    typeof probabilityRaw === "number" && Number.isFinite(probabilityRaw)
+      ? Math.max(0, Math.min(1, probabilityRaw))
+      : 0;
+  const includeOtherOption =
+    (raw["include_other_option"] ?? raw["includeOtherOption"]) === true;
+  const includeCloseOption =
+    (raw["include_close_option"] ?? raw["includeCloseOption"]) === true;
+  return {
+    id,
+    assignmentKey,
+    title,
+    message,
+    options,
+    presentationCondition: condition,
+    presentationProbability,
+    includeOtherOption,
+    includeCloseOption,
+  };
+};
+
 const parsePaywallResponse = (raw: unknown): RawPaywallResponse | null => {
   if (!isObject(raw)) return null;
   const identifier = pickString(raw, ["identifier"]);
@@ -257,6 +404,48 @@ const parsePaywallResponse = (raw: unknown): RawPaywallResponse | null => {
     "web_checkout_destination",
     "webCheckoutDestination",
   ]);
+  // Weighted load-balanced endpoints (`url_config.endpoints`).
+  const urlConfigRaw = (raw as { url_config?: unknown; urlConfig?: unknown })[
+    "url_config"
+  ] ?? (raw as { urlConfig?: unknown })["urlConfig"];
+  const endpointsRaw = isObject(urlConfigRaw)
+    ? pickArray(urlConfigRaw, ["endpoints"])
+    : [];
+  const urlEndpoints = endpointsRaw
+    .map((e) => {
+      if (!isObject(e)) return null;
+      const url = pickString(e, ["url"]);
+      if (!url) return null;
+      const pct = e["percentage"];
+      const percentage = typeof pct === "number" ? pct : 100;
+      const t = e["timeout_ms"] ?? e["timeoutMs"];
+      const out: { url: string; percentage: number; timeoutMs?: number } = {
+        url,
+        percentage,
+      };
+      if (typeof t === "number") out.timeoutMs = t;
+      return out;
+    })
+    .filter(
+      (e): e is { url: string; percentage: number; timeoutMs?: number } =>
+        e !== null,
+    );
+  const backgroundColorHex = pickString(raw, [
+    "background_color_hex",
+    "backgroundColorHex",
+  ]);
+  const darkBackgroundColorHex = pickString(raw, [
+    "dark_background_color_hex",
+    "darkBackgroundColorHex",
+  ]);
+  const productsV2Raw = pickArray(raw, ["products_v2", "productsV2"]);
+  const productsV2 = productsV2Raw.filter(isObject) as ReadonlyArray<
+    Record<string, JsonValue>
+  >;
+  const presentationStyle = parsePresentationStyle(raw);
+  const surveys = pickArray(raw, ["surveys"])
+    .map(parseSurvey)
+    .filter((s): s is Survey => s !== null);
   const out: RawPaywallResponse = {
     identifier,
     name: pickString(raw, ["name"], identifier),
@@ -265,6 +454,12 @@ const parsePaywallResponse = (raw: unknown): RawPaywallResponse | null => {
     ...(products.length > 0 && { products }),
     ...(paywalljsEvent && { paywalljsEvent }),
     ...(webCheckoutDestination && { webCheckoutDestination }),
+    ...(urlEndpoints.length > 0 && { urlEndpoints }),
+    ...(backgroundColorHex && { backgroundColorHex }),
+    ...(darkBackgroundColorHex && { darkBackgroundColorHex }),
+    ...(productsV2.length > 0 && { productsV2 }),
+    ...(presentationStyle && { presentationStyle }),
+    ...(surveys.length > 0 && { surveys }),
     ...((): { featureGatingBehavior?: "gated" | "nonGated" } => {
       const fg = featureGatingFromWire(
         raw["feature_gating"] ?? raw["featureGatingBehavior"],
@@ -390,6 +585,16 @@ export const parseConfig = (input: JsonValue): RawConfig => {
         )
         .filter((x): x is string => x !== null);
     })(),
+    ...((): { application?: { name?: string; iconUrl?: string } } => {
+      const app = input["application"];
+      if (!isObject(app)) return {};
+      const out: { name?: string; iconUrl?: string } = {};
+      const name = pickString(app, ["name"]);
+      if (name) out.name = name;
+      const iconUrl = pickString(app, ["icon_url", "iconUrl"]);
+      if (iconUrl) out.iconUrl = iconUrl;
+      return Object.keys(out).length > 0 ? { application: out } : {};
+    })(),
     ...((): { web2appConfig?: RawWeb2AppConfig } => {
       const w2a = input["web2app_config"] ?? input["web2appConfig"];
       if (!isObject(w2a)) return {};
@@ -474,6 +679,39 @@ export const extractEntitlementsByProductId = (
   return out;
 };
 
+/** Build a `reference_name → entitlementIds[]` map by walking every paywall's
+ *  `products_v2` entries. `post_checkout_complete.product_identifier` carries
+ *  the slot reference name (e.g. `"primary"`), NOT the Stripe product id —
+ *  this map is the right lookup for the post-purchase entitlement flip. */
+export const extractEntitlementsByReferenceName = (
+  paywallResponses: ReadonlyArray<RawPaywallResponse>,
+): Map<string, string[]> => {
+  const out = new Map<string, string[]>();
+  for (const pw of paywallResponses) {
+    for (const p of pw.productsV2 ?? []) {
+      const referenceName =
+        typeof p["reference_name"] === "string"
+          ? p["reference_name"]
+          : typeof p["referenceName"] === "string"
+            ? (p["referenceName"] as string)
+            : null;
+      if (!referenceName) continue;
+      const ents = Array.isArray(p["entitlements"])
+        ? (p["entitlements"] as ReadonlyArray<unknown>)
+        : [];
+      const ids = ents
+        .map((e) =>
+          e && typeof e === "object" && typeof (e as { id?: unknown }).id === "string"
+            ? (e as { id: string }).id
+            : null,
+        )
+        .filter((s): s is string => s !== null);
+      if (ids.length > 0) out.set(referenceName, ids);
+    }
+  }
+  return out;
+};
+
 export interface ConfigServiceImpl {
   /** Fetch fresh config, parse, publish state transitions, persist. */
   readonly fetch: () => Effect.Effect<RawConfig, ConfigParseError | Error>;
@@ -523,18 +761,31 @@ const make = (apiKey: string) =>
         const cached = yield* storage
           .get(CONFIG_KEY)
           .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
-        if (cached === null) return null;
+        if (cached === null) {
+          console.warn("[Superwall][hydrate] cache miss — no superwall.config key");
+          return null;
+        }
         try {
           const decoded = JSON.parse(cached) as {
             apiKey?: string;
             buildId?: string;
             payload?: JsonValue;
           };
-          if (!decoded.payload) return null;
+          if (!decoded.payload) {
+            console.warn(
+              "[Superwall][hydrate] cached entry has no `payload` field",
+              { keys: Object.keys(decoded) },
+            );
+            return null;
+          }
           // Cache scoped by api key — switching keys (different app /
           // environment) MUST NOT serve the previous app's config.
           // Legacy entries without `apiKey` get evicted on next persist.
           if (decoded.apiKey !== undefined && decoded.apiKey !== apiKey) {
+            console.warn(
+              "[Superwall][hydrate] apiKey mismatch — evicting cache",
+              { cachedApiKey: decoded.apiKey, currentApiKey: apiKey },
+            );
             yield* storage
               .remove(CONFIG_KEY)
               .pipe(Effect.catchAll(() => Effect.void));
@@ -543,7 +794,8 @@ const make = (apiKey: string) =>
           const parsed = parseConfig(decoded.payload);
           yield* update(ConfigUpdates.SetRetrieved(parsed));
           return parsed;
-        } catch {
+        } catch (err) {
+          console.warn("[Superwall][hydrate] threw during decode/parse", err);
           return null;
         }
       }),

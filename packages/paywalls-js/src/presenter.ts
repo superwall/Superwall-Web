@@ -35,6 +35,12 @@ export interface PresentationContext {
    *  verbatim by the default browser presenter; custom presenters can
    *  ignore this. */
   readonly bootstrap?: PaywallBootstrap;
+  /** Pre-built payload for the iframe's `#init=<base64>` hash. SDK builds
+   *  it in `register()` (where decision + identity + user/device attrs +
+   *  placement context are all known); presenter is responsible only for
+   *  base64-encoding and appending. When absent, presenter falls back to
+   *  building a minimal shape from `bootstrap` (legacy path / tests). */
+  readonly initPayload?: Record<string, unknown>;
 }
 
 /** Identity + host context passed via iframe URL params to the paywall SSR
@@ -43,11 +49,23 @@ export interface PresentationContext {
  *  instead of the legacy `window.location.href` redirect. */
 export interface PaywallBootstrap {
   readonly apiKey: string;
+  /** Defaults to `aliasId` when the user is anonymous so the BE always has a
+   *  stable identifier. */
   readonly appUserId?: string;
   readonly aliasId?: string;
   readonly email?: string;
+  /** Raw vendor UUID. The BE's `deviceId` field expects the unhashed value. */
   readonly deviceId?: string;
   readonly hostOrigin?: string;
+  /** Where the user goes if they bail. Defaults to `window.location.href`.
+   *  Validated server-side against the per-app `allowedOrigins` artifact. */
+  readonly cancelUrl?: string;
+  /** Full origin (scheme + host) of the Superwall API. Threaded into the
+   *  iframe's `#init=` hash so the in-iframe controller knows where to POST
+   *  `/api/checkout/initiate`. Tracks `networkEnvironment`. */
+  readonly apiBase: string;
+  /** Full origin of the events collector. Threaded into the same hash. */
+  readonly collector: string;
   readonly sdkVersion: string;
   readonly clientSurface: "web-sdk";
 }
@@ -98,3 +116,10 @@ export interface PaywallPresenter {
   /** Optional: warm a paywall before it's needed. */
   preload?(info: PaywallInfo): Promise<void>;
 }
+
+// Re-export for consumers building custom survey UIs.
+export type {
+  SurveyAnswer,
+  SurveyPresenter,
+  SurveyPresenterOutcome,
+} from "./internal/survey.ts";

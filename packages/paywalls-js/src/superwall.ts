@@ -16,13 +16,19 @@ import {
   SuperwallEventTarget,
   type SuperwallDelegate,
 } from "./events.ts";
-import type { PaywallPresenter, PresentationContext } from "./presenter.ts";
+import type {
+  PaywallPresenter,
+  PresentationContext,
+  SurveyPresenter,
+} from "./presenter.ts";
+import { presentSurveyIfAvailable } from "./internal/survey.ts";
 import { asReadable, createSignal, type Readable } from "./signal.ts";
 import {
   STORAGE_KEYS,
   type ConfigurationStatus,
   type ConfirmedAssignment,
   type Entitlement,
+  type RedemptionResult,
   type Experiment,
   type IdentityOptions,
   type IntegrationAttribute,
@@ -30,7 +36,10 @@ import {
   type LogLevel,
   type LogScope,
   type PartialSuperwallOptions,
+  closeReasonShouldComplete,
+  type PaywallCloseReason,
   type PaywallInfo,
+  type PaywallPresentationStyle,
   type PaywallResult,
   type PaywallSkippedReason,
   type PlacementParams,
@@ -59,6 +68,7 @@ import {
   ConfigService,
   configServiceLayer,
   extractEntitlementsByProductId,
+  extractEntitlementsByReferenceName,
   type ConfigServiceImpl,
 } from "./internal/config.ts";
 import {
@@ -81,6 +91,7 @@ import {
   isSandbox,
   networkServiceLayer,
   NetworkService,
+  resolveHosts,
   type NetworkConfig,
 } from "./internal/network.ts";
 import {
@@ -138,6 +149,15 @@ export interface RegisterPlacementArgs {
   /** Runs when the user is entitled OR the resolved paywall was non-gated
    *  and skipped/dismissed without purchase. */
   feature?: () => void | Promise<void>;
+  /** Per-call overrides applied before the presenter mounts the iframe.
+   *  Fields are individually optional; unset ones fall back to the
+   *  paywall's config. */
+  overrides?: PaywallOverrides;
+}
+
+export interface PaywallOverrides {
+  /** Replace the paywall's `presentation_style_v3` for this call. */
+  presentationStyle?: PaywallPresentationStyle;
 }
 
 export type RegisterPlacementResult =
@@ -150,7 +170,13 @@ export interface PlacementsNamespace {
     placement: string,
     params?: PlacementParams,
   ): Promise<PresentationResult>;
-  /** Returns the locally-cached `ConfirmedAssignment[]`. */
+  /** Returns the locally-cached `ConfirmedAssignment[]`. Pure read; no
+   *  network. Useful for analytics integrations that want to observe
+   *  variant rollout without forcing a confirm round-trip. */
+  getAssignments(): Promise<ConfirmedAssignment[]>;
+  /** POST every cached assignment to the backend (idempotent) and return
+   *  the same set. Use when you want the BE's view of `confirmed_at` to
+   *  catch up — analytics pipelines often gate on that. */
   confirmAllAssignments(): Promise<ConfirmedAssignment[]>;
   preloadAll(): Promise<void>;
   preloadFor(placementNames: string[]): Promise<void>;
@@ -215,9 +241,25 @@ export interface Superwall {
   setLogLevel(level: LogLevel): void;
   setLocale(locale: string | null): void;
   setDelegate(delegate: SuperwallDelegate | null): void;
+  /**
+   * Force the SDK's reported interface style to `"light"` or `"dark"`,
+   * overriding the automatic `prefers-color-scheme` detection used for the
+   * `X-Device-Interface-Style` header and threaded into paywall templates.
+   * Pass `null` to clear the override and revert to system.
+   */
+  setInterfaceStyle(style: "light" | "dark" | null): void;
 
   reset(): Promise<void>;
-  dismiss(): void;
+  /**
+   * Force-close the active paywall. Optionally record *why* — surfaces on
+   * `paywall_close` event params + `PaywallInfo.closeReason`.
+   *
+   * Default: `"systemLogic"` (programmatic close after some app event).
+   * Use `"manualClose"` when the user dismissed via your own UI affordance.
+   * `"forNextPaywall"` short-circuits the feature block because another
+   * paywall is queued. `"webViewFailedToLoad"` is for iframe load errors.
+   */
+  dismiss(reason?: PaywallCloseReason): void;
 
   /** Re-fetch static config and re-run eager assignment. Re-entrancy-safe:
    *  concurrent calls share the in-flight transition. */
@@ -238,6 +280,12 @@ export interface CreateSuperwallOptions {
   storage?: StorageAdapter;
   /** Required to call `sw.register`. */
   presenter?: PaywallPresenter;
+  /** Optional renderer for post-paywall surveys. Absent ⇒ the SDK skips
+   *  survey presentation (the assignment key is still consumed so the
+   *  user isn't pestered with the same survey twice on revisit). The
+   *  browser default lives in `@superwall/paywalls-js/browser`
+   *  (`createBrowserSurveyPresenter`). */
+  surveyPresenter?: SurveyPresenter;
   identity?: {
     aliasId?: string;
     appUserId?: string;
@@ -253,36 +301,209 @@ export interface CreateSuperwallOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Paywall host override (review-lab / PR-preview deployments)
+// Subscription status equality — dedupes `subscriptionStatus_didChange`
+// when nothing actually changed (e.g. the 60s entitlements poll re-applies
+// the same set). Compares status tag + sorted active entitlement ids.
 // ---------------------------------------------------------------------------
 
-/** Rewrite the paywall URL to point at `paywallHostOverride`. Preserves the
- *  pathname + any existing query params and adds `?domain={slug}` so the
- *  override host can route to the right tenant.
- *
- *  TEMPORARY: hardcoded to `gymscore` while we figure out why the
- *  auto-extraction from the original host fails for the PR-preview setup
- *  (the config's `paywall.url` doesn't carry the tenant subdomain in dev).
- *  Returns the input unchanged when either URL is malformed or no override
- *  is provided. */
-export const applyPaywallHostOverride = (
-  originalUrl: string,
-  override: string | undefined,
-): string => {
-  if (!override) return originalUrl;
-  let orig: URL;
-  let target: URL;
-  try {
-    orig = new URL(originalUrl);
-    target = new URL(override);
-  } catch {
-    return originalUrl;
+const subscriptionStatusEqual = (
+  a: import("./types.ts").SubscriptionStatus,
+  b: import("./types.ts").SubscriptionStatus,
+): boolean => {
+  if (a.status !== b.status) return false;
+  if (a.status !== "ACTIVE" || b.status !== "ACTIVE") return true;
+  if (a.entitlements.length !== b.entitlements.length) return false;
+  const idsA = a.entitlements.map((e) => `${e.id}:${e.isActive ? 1 : 0}`).sort();
+  const idsB = b.entitlements.map((e) => `${e.id}:${e.isActive ? 1 : 0}`).sort();
+  for (let i = 0; i < idsA.length; i++) {
+    if (idsA[i] !== idsB[i]) return false;
   }
-  const out = new URL(target.origin);
-  out.pathname = orig.pathname;
-  orig.searchParams.forEach((v, k) => out.searchParams.set(k, v));
-  out.searchParams.set("domain", "gymscore");
-  return out.toString();
+  return true;
+};
+
+// ---------------------------------------------------------------------------
+// Iframe init payload builder
+// ---------------------------------------------------------------------------
+
+interface InitPayloadInput {
+  info: PaywallInfo;
+  placement: string;
+  params: PlacementParams;
+  decision: {
+    kind: "paywall";
+    experiment: Experiment;
+  };
+  application: { name?: string; iconUrl?: string } | undefined;
+  bootstrap: {
+    apiKey: string;
+    sdkVersion: string;
+    collector: string;
+    apiBase: string;
+    clientSurface: "web-sdk";
+    hostOrigin?: string;
+    cancelUrl?: string;
+  };
+  aliasId: string | undefined;
+  appUserId: string | undefined;
+  deviceId: string | undefined;
+  email: string | undefined;
+  userAttributes: Record<string, unknown>;
+  deviceAttributes: Record<string, unknown>;
+}
+
+const randomUuid = (): string => {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  // SSR / older runtime fallback — non-cryptographic, OK for event ids.
+  return `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
+
+/** Build the `#init=` payload for the paywall iframe. Shape per
+ *  `packages/web-paywalls/src/schema/controller.ts` +
+ *  `apps/subscriptions-api/src/schema/CheckoutContext.ts:InitializationPropsSchema`.
+ *  Many fields are optional with `?? null` / `?? ""` fallbacks because the
+ *  controller's destructure is non-defensive (missing required fields
+ *  crash on boot). Products are forwarded raw with `resolveVariables: true`
+ *  so the server resolves per-locale `ProductVariables` instead of the SDK. */
+export const buildInitPayload = (input: InitPayloadInput): Record<string, unknown> => {
+  const {
+    info,
+    placement,
+    params,
+    decision,
+    application,
+    bootstrap,
+    aliasId,
+    appUserId,
+    deviceId,
+    email,
+    userAttributes,
+    deviceAttributes,
+  } = input;
+  const placementEventId = randomUuid();
+  const presentedByEventId = randomUuid();
+  const userId =
+    appUserId !== undefined
+      ? ({ type: "appUserId" as const, appUserId })
+      : ({ type: "aliasId" as const, aliasId: aliasId ?? "" });
+  const identity = {
+    userId,
+    deviceId: deviceId ?? "",
+    ...(email && { email }),
+    ...(aliasId && { aliasId }),
+    ...(appUserId && { appUserId }),
+  };
+  const productIds = info.productIds ?? [];
+  const products = info.productsV2 ?? [];
+  const paywallSlice = {
+    paywallId: info.identifier,
+    paywallIdentifier: info.identifier,
+    paywallName: info.name,
+    paywallProductIds: productIds.join(","),
+    paywallUrl: info.url,
+  };
+  const experimentSlice = {
+    experimentId: decision.experiment.id,
+    variantId: decision.experiment.variant.id,
+  };
+  const presentmentSlice = {
+    // Free-trial availability defaults to false when no v2 product
+    // declares `trial_days`; refined once product variables resolve.
+    isFreeTrialAvailable: products.some((p) => {
+      const sp = (p as { store_product?: Record<string, unknown>; storeProduct?: Record<string, unknown> })
+        .store_product ?? (p as { storeProduct?: Record<string, unknown> }).storeProduct;
+      return typeof sp === "object" && sp !== null && (sp as { trial_days?: unknown; trialDays?: unknown })["trial_days"] != null;
+    }),
+    presentationSourceType: "register" as const,
+    presentedBy: "placement" as const,
+    presentedByEventId,
+    presentedByEventName: placement,
+    presentedByEventTimestamp: new Date().toISOString(),
+  };
+  const placementParamsSlice = { placementParams: params };
+  const collector: Record<string, unknown> = {
+    // Events route through the paywall app's CORS-enabled proxy at
+    // `/api/proxy/events` (paywall-next: `MainResolver.ts:75`). Absolute
+    // against `apiBase` so it points at the paywall worker regardless of
+    // where the iframe itself is loaded from.
+    url: `${bootstrap.apiBase}/api/proxy/events`,
+    headers: {
+      "x-public-api-key": bootstrap.apiKey,
+      "x-alias-id": aliasId ?? "",
+      "x-device-id": deviceId ?? "",
+      "x-platform": "web",
+      "x-sdk-version": bootstrap.sdkVersion,
+    },
+    placementEventId,
+    identity: { userId, deviceId: deviceId ?? "" },
+    userAttributes,
+    deviceAttributes,
+    experimentSlice,
+    paywallSlice,
+    productSlice: {},
+    presentmentSlice,
+    placementParamsSlice,
+  };
+  const checkoutContext: Record<string, unknown> = {
+    paywall: paywallSlice,
+    experiment: experimentSlice,
+    presentment: presentmentSlice,
+    placementParams: placementParamsSlice,
+    identity,
+    device: {
+      publicApiKey: bootstrap.apiKey,
+      platform: "web",
+      appVersion: (deviceAttributes["appVersion"] as string) ?? "",
+      osVersion: (deviceAttributes["osVersion"] as string) ?? "",
+      deviceModel: (deviceAttributes["deviceModel"] as string) ?? "",
+      deviceLocale: (deviceAttributes["deviceLocale"] as string) ?? "",
+      deviceLanguageCode: (deviceAttributes["deviceLanguageCode"] as string) ?? "",
+      deviceCurrencyCode: (deviceAttributes["deviceCurrencyCode"] as string) ?? "",
+      deviceCurrencySymbol: (deviceAttributes["deviceCurrencySymbol"] as string) ?? "",
+      timezoneOffset: (deviceAttributes["timezoneOffset"] as number) ?? 0,
+    },
+    products: {},
+  };
+  return {
+    placementSessionToken: bootstrap.apiKey,
+    clientSurface: bootstrap.clientSurface,
+    hostOrigin: bootstrap.hostOrigin ?? "",
+    cancelUrl: bootstrap.cancelUrl ?? bootstrap.hostOrigin ?? "",
+    apiBase: bootstrap.apiBase,
+    // Server-side ProductVariables resolution. SDK ships raw products from
+    // static_config + this flag instead of computing variables locally
+    // (would need the schema-next decoder + per-locale price logic).
+    resolveVariables: true,
+    products,
+    application: {
+      name: application?.name ?? "",
+      iconUrl: application?.iconUrl ?? "",
+    },
+    backgroundColorHex: {
+      light: info.backgroundColorHex ?? null,
+      dark: info.darkBackgroundColorHex ?? null,
+    },
+    variables: {
+      deviceProperties: deviceAttributes,
+      // Controller iterates `variables.products` via `.reduce` — array, not
+      // record (despite the dev's "Record<refName, ProductVariables>" note;
+      // the controller's `acceptVariables` is the source of truth and it
+      // calls `.reduce`). Server fills with resolved variables via
+      // `resolveVariables: true`; ship empty array as a safe seed.
+      products: [],
+      params,
+    },
+    checkoutContext,
+    transactionAbandon: null,
+    isFirstAssignment: false,
+    integrations: [],
+    collector,
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -293,10 +514,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const target = new SuperwallEventTarget();
 
   // Layer composition: storage → identity → network → eventBus
-  const storageLayer = StorageService.fromAdapter(
-    opts.storage ?? createMemoryStorage(),
-  );
+  // Capture the raw adapter too — the survey path bypasses Effect since
+  // it's invoked from an async handler, not an Effect.gen scope.
+  const rawStorageAdapter = opts.storage ?? createMemoryStorage();
+  const storageLayer = StorageService.fromAdapter(rawStorageAdapter);
   const identityLayer = identityWithStorage(storageLayer);
+  // Mutable interface-style override. Closure-read per request by the
+  // network layer so `sw.setInterfaceStyle(...)` takes effect immediately.
+  let interfaceStyleOverride: "light" | "dark" | null = null;
   // PartialSuperwallOptions deeply-partializes `networkEnvironment`'s
   // `{ custom: ... }` shape; trust the caller and cast back.
   const networkConfig: NetworkConfig = {
@@ -305,6 +530,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     ...(opts.options?.appVersion !== undefined && { appVersion: opts.options.appVersion }),
     ...(opts.options?.bundleId !== undefined && { bundleId: opts.options.bundleId }),
     ...(opts.fetch !== undefined && { fetch: opts.fetch }),
+    interfaceStyleOverride: () => interfaceStyleOverride,
   };
   const networkLayer = networkServiceLayer(networkConfig, identityLayer);
   const computedLayer = computedPropertiesLayer(storageLayer);
@@ -515,6 +741,23 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     yield* hydrateCounters();
 
+    // Auto-context for every wire-emitted event. Merged under caller params
+    // so explicit keys always win. `$presentation_id` is empty between
+    // register() calls — analytics consumers can filter on its presence.
+    yield* bus.setContextProvider(() => {
+      const ctx: Record<string, JsonValue> = {
+        $client_surface: "web-sdk",
+      };
+      try {
+        const loc = (globalThis as { location?: { origin?: string } }).location;
+        if (typeof loc?.origin === "string") ctx.$host_origin = loc.origin;
+      } catch {}
+      if (currentPresentationId) {
+        ctx.$presentation_id = currentPresentationId;
+      }
+      return ctx;
+    });
+
     yield* bus.publish("first_seen", {});
     yield* bus.publish("session_start", {});
     yield* bus.publish("app_launch", {});
@@ -550,6 +793,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         yield* warmPaywalls(config);
       });
 
+    // Track whether we have a usable config (cache OR fresh). Status flips
+    // to "failed" if neither lands — register() against `null` config is
+    // a misconfiguration we should signal clearly, not pretend to succeed.
+    let haveConfig = hydrated !== null;
+
     if (hydrated) {
       // Fire revalidation + enrichment in the background — don't await.
       yield* Effect.forkDaemon(
@@ -570,19 +818,26 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       // First-ever load — must await the network so register() has data.
       yield* Effect.all(
         [
-          config.fetch().pipe(Effect.catchAll(() => Effect.void)),
+          config
+            .fetch()
+            .pipe(
+              Effect.tap(() => Effect.sync(() => { haveConfig = true; })),
+              Effect.catchAll(() => Effect.void),
+            ),
           enrichmentEffect,
         ],
         { concurrency: "unbounded" },
       );
-      yield* applyFreshConfig();
+      if (haveConfig) {
+        yield* applyFreshConfig();
+      }
     }
 
     // Drain the initial Configuration pending item — register() blocks on
     // phase=Ready until this clears.
     yield* IdentityService.endPending(IdentityPending.Configuration);
-    configuredSig.set(true);
-    statusSig.set("configured");
+    configuredSig.set(haveConfig);
+    statusSig.set(haveConfig ? "configured" : "failed");
   });
 
   /** Hand every trigger experiment to AssignmentService.chooseAllVariants. */
@@ -918,48 +1173,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     },
   };
 
-  /** Compute the external Superwall-hosted paywall URL for a placement, or
-   *  null when the paywall isn't configured for external mode (or web2app
-   *  config is missing). External mode ⇒ register() navigates the browser
-   *  to `https://{web2app-host}/{placement}` instead of presenting iframe.
-   *  Mirrors the dashboard's "Web Checkout Destination" choice. */
-  const deriveExternalPaywallUrl = (
-    info: PaywallInfo,
-    cfg: import("./internal/config.ts").RawConfig,
-    placement: string,
-  ): string | null => {
-    const dest = info.webCheckoutDestination;
-    // Anything other than null / "EMBEDDED" / "embedded" → external.
-    const isExternal =
-      dest !== undefined &&
-      dest !== null &&
-      dest.toUpperCase() !== "EMBEDDED";
-    if (!isExternal) return null;
-    // Host precedence: explicit `paywallHostOverride` (review-lab / self-
-    // hosted checkout controller) > `restore_access_url` from config > null.
-    // When the override is set, inject `?domain=gymscore` (TEMPORARY hardcode
-    // — see `applyPaywallHostOverride` JSDoc) so the override host can route
-    // to the correct tenant.
-    const override = opts.options?.paywallHostOverride;
-    if (override) {
-      try {
-        const u = new URL(override);
-        const out = new URL(`${u.origin}/${encodeURIComponent(placement)}`);
-        out.searchParams.set("domain", "gymscore");
-        return out.toString();
-      } catch {
-        // Bad override falls through to restore_access_url.
-      }
-    }
-    const restoreUrl = cfg.web2appConfig?.restoreAccessUrl;
-    if (!restoreUrl) return null;
-    try {
-      const u = new URL(restoreUrl);
-      return `${u.origin}/${encodeURIComponent(placement)}`;
-    } catch {
-      return null;
-    }
-  };
 
   /** Look up a paywall by id in the loaded config + project to PaywallInfo.
    *  Returns null when (a) no config is loaded, or (b) the paywallId isn't
@@ -1007,10 +1220,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     return {
       identifier: result.paywall.identifier,
       name: result.paywall.name,
-      url: applyPaywallHostOverride(
-        result.paywall.url,
-        opts.options?.paywallHostOverride,
-      ),
+      url: result.paywall.url,
       experiment,
       productIds: [...result.paywall.productIds],
       products,
@@ -1026,6 +1236,23 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       ...(result.paywall.webCheckoutDestination && {
         webCheckoutDestination: result.paywall.webCheckoutDestination,
       }),
+      ...(result.paywall.presentationStyle && {
+        presentationStyle: result.paywall.presentationStyle,
+      }),
+      ...(result.paywall.surveys &&
+        result.paywall.surveys.length > 0 && {
+          surveys: [...result.paywall.surveys],
+        }),
+      ...(result.paywall.urlEndpoints && {
+        urlEndpoints: result.paywall.urlEndpoints,
+      }),
+      ...(result.paywall.backgroundColorHex && {
+        backgroundColorHex: result.paywall.backgroundColorHex,
+      }),
+      ...(result.paywall.darkBackgroundColorHex && {
+        darkBackgroundColorHex: result.paywall.darkBackgroundColorHex,
+      }),
+      ...(result.paywall.productsV2 && { productsV2: result.paywall.productsV2 }),
     };
   };
 
@@ -1094,6 +1321,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   const register: Superwall["register"] = async (args) => {
       const { placement, params, handler, feature } = args;
+      currentPresentationId = randomUuid();
       try {
         // Block until identity is Ready — closes the race where an
         // in-flight identify/reset/configure lets audience eval read stale data.
@@ -1178,24 +1406,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           );
         }
 
-        // Web Project routing — when the paywall (or default mode) says
-        // "external", iframe the Superwall-hosted paywall URL instead of
-        // the editor URL. The hosted page handles its own checkout (Stripe
-        // Embedded inside that iframe) and deep-links back via `?code=`
-        // on completion. The Superwall Web Project has no X-Frame-Options
-        // so iframing is permitted.
-        const externalUrl = await runtime.runPromise(
-          Effect.gen(function* () {
-            const config = yield* ConfigService;
-            const cfg = yield* config.current();
-            return cfg ? deriveExternalPaywallUrl(info, cfg, placement) : null;
-          }),
-        );
-        if (externalUrl) {
-          // Mutate the info so the presenter loads the hosted URL into the
-          // iframe instead of the editor URL.
-          (info as { url: string }).url = externalUrl;
-        }
+        // No URL derivation — every paywall iframes its own editor URL
+        // (`paywall_responses[].url` / `url_config.endpoints`). The
+        // presenter picks an endpoint, appends bootstrap query params,
+        // and adds the `#init=...` hash with identity + apiBase /
+        // collector / hostOrigin / cancelUrl.
 
         const wireOpts = undefined;
 
@@ -1233,33 +1448,79 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         // Identity bootstrap for the iframe URL — lets the paywall SSR loader
         // mint the placement token, and `client_surface=web-sdk` flips the
         // post-checkout redirect to a postMessage.
-        const idSnap = await runtime.runPromise(
-          IdentityService.current().pipe(
-            Effect.catchAll(() => Effect.succeed(null as IdentitySnapshot | null)),
-          ),
+        const { idSnap, application } = await runtime.runPromise(
+          Effect.gen(function* () {
+            const id = yield* IdentityService.current().pipe(
+              Effect.catchAll(() => Effect.succeed(null as IdentitySnapshot | null)),
+            );
+            const cfg = yield* ConfigService.pipe(
+              Effect.flatMap((c) => c.current()),
+              Effect.catchAll(() => Effect.succeed(null)),
+            );
+            return {
+              idSnap: id,
+              application: cfg?.application ?? undefined,
+            };
+          }),
         );
         const userAttrs = attrsSig.value as Record<string, unknown>;
         const emailAttr = typeof userAttrs["email"] === "string"
           ? (userAttrs["email"] as string)
           : undefined;
+        const loc = (globalThis as { location?: { origin?: string; href?: string } })
+          .location;
         const hostOrigin =
-          typeof globalThis !== "undefined" &&
-          typeof (globalThis as { location?: { origin?: string } }).location
-            ?.origin === "string"
-            ? (globalThis as { location: { origin: string } }).location.origin
+          typeof loc?.origin === "string" ? loc.origin : undefined;
+        // Cancel URL = the current merchant page; defensive default to origin.
+        // Per BE contract, validated against `allowedOrigins` on /checkout/initiate.
+        const cancelUrl =
+          (typeof loc?.href === "string" ? loc.href : undefined) ??
+          hostOrigin;
+        const env = (opts.options?.networkEnvironment ?? "release") as
+          import("./types.ts").NetworkEnvironment;
+        const hosts = resolveHosts(env);
+        // appUserId stays empty/undefined when anonymous — the iframe
+        // controller uses it as the discriminator for userId.type
+        // ("appUserId" vs "aliasId"). Falling back to alias here would
+        // misreport every anonymous session as a logged-in user.
+        // vendorId == deviceId == raw UUID.
+        const appUserIdRaw =
+          idSnap?.appUserId && idSnap.appUserId !== ""
+            ? (idSnap.appUserId as string)
             : undefined;
         const bootstrap = {
           apiKey: opts.apiKey,
-          ...(idSnap?.appUserId && idSnap.appUserId !== "" && {
-            appUserId: idSnap.appUserId as string,
-          }),
+          ...(appUserIdRaw && { appUserId: appUserIdRaw }),
           ...(idSnap?.aliasId && { aliasId: idSnap.aliasId as string }),
           ...(emailAttr && { email: emailAttr }),
-          ...(idSnap?.vendorId && { deviceId: idSnap.vendorId as string }),
+          ...(idSnap?.vendorId && {
+            deviceId: `$SuperwallDevice:${idSnap.vendorId as string}`,
+          }),
           ...(hostOrigin && { hostOrigin }),
+          ...(cancelUrl && { cancelUrl }),
+          // TEMPORARY: hardcoded to the PR-preview worker.
+          apiBase: "https://superwall-web-paywall-app-pr-3123.superstaging.workers.dev",
+          collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: "web-sdk" as const,
         };
+
+        const initPayload = buildInitPayload({
+          info,
+          placement,
+          params: params ?? {},
+          // At this point `decision.kind === "paywall"` (other kinds returned
+          // above), but TS can't narrow through the closure — cast.
+          decision: decision as { kind: "paywall"; experiment: Experiment },
+          application,
+          bootstrap,
+          aliasId: idSnap?.aliasId as string | undefined,
+          appUserId: appUserIdRaw,
+          deviceId: idSnap?.vendorId as string | undefined,
+          email: emailAttr,
+          userAttributes: userAttrs,
+          deviceAttributes: snapshotDeviceAttributes() as Record<string, unknown>,
+        });
 
         const ctx: PresentationContext = {
           placement,
@@ -1284,7 +1545,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             });
           },
           bootstrap,
+          initPayload,
         };
+
+        // Per-call presentation-style override wins over the paywall config.
+        if (args.overrides?.presentationStyle) {
+          (info as { presentationStyle?: PaywallPresentationStyle }).presentationStyle =
+            args.overrides.presentationStyle;
+        }
 
         let result: PaywallResult;
         try {
@@ -1295,11 +1563,18 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
               ? new PresenterError(cause.message, cause)
               : new PresenterError(String(cause));
           presentedSig.set(false);
+          const reason: PaywallCloseReason =
+            pendingCloseReason ?? "webViewFailedToLoad";
+          (info as { closeReason?: PaywallCloseReason }).closeReason = reason;
           await runtime.runPromise(
             Effect.gen(function* () {
               const bus = yield* EventBus;
               yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
-              yield* bus.publish("paywall_close", { paywall_info: info }, wireOpts);
+              yield* bus.publish(
+                "paywall_close",
+                { paywall_info: info, close_reason: reason },
+                wireOpts,
+              );
               yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
             }),
           );
@@ -1309,10 +1584,15 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return { type: "error", error: err };
         } finally {
           currentAbort = null;
+          pendingCloseReason = null;
         }
 
         // Emit paywall_decline alongside paywall_close on explicit decline.
         presentedSig.set(false);
+        const closeReason: PaywallCloseReason =
+          pendingCloseReason ??
+          (result.type === "declined" ? "manualClose" : "systemLogic");
+        (info as { closeReason?: PaywallCloseReason }).closeReason = closeReason;
         await runtime.runPromise(
           Effect.gen(function* () {
             const bus = yield* EventBus;
@@ -1320,7 +1600,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             if (result.type === "declined") {
               yield* bus.publish("paywall_decline", { paywall_info: info }, wireOpts);
             }
-            yield* bus.publish("paywall_close", { paywall_info: info }, wireOpts);
+            yield* bus.publish(
+              "paywall_close",
+              { paywall_info: info, close_reason: closeReason },
+              wireOpts,
+            );
             yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
           }),
         );
@@ -1328,10 +1612,64 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           handler?.onDismiss?.(info, result);
         } catch {}
 
+        // Survey gate — blocks completion until the user answers / closes.
+        // Skipped when there's no `surveyPresenter` wired (rather than
+        // burning the assignment key for nothing).
+        if (
+          opts.surveyPresenter &&
+          info.surveys &&
+          info.surveys.length > 0 &&
+          closeReasonShouldComplete(closeReason)
+        ) {
+          await presentSurveyIfAvailable({
+            surveys: info.surveys,
+            result,
+            closeReason,
+            storage: {
+              get: (k) => rawStorageAdapter.get(k),
+              set: (k, v) => rawStorageAdapter.set(k, v),
+            },
+            storageKey: STORAGE_KEYS.surveyAssignmentKey,
+            presenter: opts.surveyPresenter,
+            onResponse: (answer) => {
+              runFireAndForget(
+                "paywallEvents",
+                "survey_response publish failed",
+                Effect.gen(function* () {
+                  const bus = yield* EventBus;
+                  yield* bus.publish("survey_response", {
+                    survey: answer.survey,
+                    selected_option: answer.selectedOption,
+                    custom_response: answer.customResponse,
+                    paywall_info: info,
+                  });
+                }),
+              );
+            },
+            onClose: (survey) => {
+              runFireAndForget(
+                "paywallEvents",
+                "survey_close publish failed",
+                Effect.gen(function* () {
+                  const bus = yield* EventBus;
+                  yield* bus.publish("survey_close", {
+                    survey,
+                    paywall_info: info,
+                  });
+                }),
+              );
+            },
+          });
+        }
+
         // Run feature on purchased/restored, or when paywall is non-gated.
+        // ForNextPaywall short-circuits because another paywall is taking over.
         // Undefined featureGatingBehavior is treated as gated.
         const nonGated = info.featureGatingBehavior === "nonGated";
-        if (result.type === "purchased" || result.type === "restored" || nonGated) {
+        if (
+          closeReasonShouldComplete(closeReason) &&
+          (result.type === "purchased" || result.type === "restored" || nonGated)
+        ) {
           await runFeature(feature);
         }
 
@@ -1345,6 +1683,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return { type: "error", error: err };
         }
         throw err;
+      } finally {
+        // Always clear so subsequent non-register events don't leak the id.
+        currentPresentationId = null;
       }
     };
 
@@ -1369,10 +1710,19 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       }
     },
 
+    getAssignments: () =>
+      runPublic(
+        Effect.gen(function* () {
+          const a = yield* AssignmentService;
+          return yield* a.getAll();
+        }) as unknown as Effect.Effect<ConfirmedAssignment[], unknown, never>,
+      ),
+
     confirmAllAssignments: () =>
       runPublic(
         Effect.gen(function* () {
           const a = yield* AssignmentService;
+          yield* confirmAssignments(a);
           return yield* a.getAll();
         }) as unknown as Effect.Effect<ConfirmedAssignment[], unknown, never>,
       ),
@@ -1388,6 +1738,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   /** AbortController for the in-flight presentation. dismiss() triggers it. */
   let currentAbort: AbortController | null = null;
+  /** Reason set by `dismiss(reason)`; read by the register() finally-block
+   *  to populate `PaywallInfo.closeReason` + `paywall_close` params. */
+  let pendingCloseReason: PaywallCloseReason | null = null;
+  /** Per-`register()` presentation id. Threaded into every event's
+   *  `$presentation_id` auto-context so an analytics consumer can correlate
+   *  `register → paywall_open → transaction_complete` as one session. */
+  let currentPresentationId: string | null = null;
 
   // Internal pub-sub for paywall stripe_checkout_* postMessages. The
   // PurchaseController subscribes to these to await checkout completion.
@@ -1410,6 +1767,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     createAutomaticPurchaseController({
       subscribe: subscribeToPaywallPurchaseEvents,
       redeem: async (code) => {
+        runFireAndForget(
+          "transactions",
+          "delegate.onWillRedeemLink threw",
+          Effect.gen(function* () {
+            const bus = yield* EventBus;
+            yield* bus.withDelegate((d) => d.onWillRedeemLink?.());
+          }),
+        );
         const res = await runtime
           .runPromise(
             Effect.gen(function* () {
@@ -1421,7 +1786,22 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             logViaRuntime("transactions", "redemption.redeem failed", cause);
             return null;
           });
+        const emitDidRedeem = (result: RedemptionResult): void => {
+          runFireAndForget(
+            "transactions",
+            "delegate.onDidRedeemLink threw",
+            Effect.gen(function* () {
+              const bus = yield* EventBus;
+              yield* bus.withDelegate((d) => d.onDidRedeemLink?.(result));
+            }),
+          );
+        };
         if (!res) {
+          emitDidRedeem({
+            type: "error",
+            code,
+            error: "redemption request failed",
+          });
           return { status: "error", entitlements: [] };
         }
         const codeResult = res.codes?.find((c) => c.code === code);
@@ -1439,6 +1819,17 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             : codeResult?.status === "ERROR" || codeResult?.status === "INVALID"
               ? ("error" as const)
               : ("success" as const);
+        if (status === "success") {
+          emitDidRedeem({ type: "success", code, entitlements: ents });
+        } else if (status === "expired") {
+          emitDidRedeem({ type: "expired", code });
+        } else {
+          emitDidRedeem({
+            type: codeResult?.status === "INVALID" ? "invalid" : "error",
+            code,
+            error: codeResult?.error?.message ?? "redemption failed",
+          });
+        }
         return { status, entitlements: ents };
       },
       refreshEntitlements: async () => {
@@ -1462,6 +1853,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       setSubscriptionStatus: (s) => {
         // Reuse the public-facing setter so delegate / event chain fires.
         const prev = subStatusSig.value;
+        if (subscriptionStatusEqual(prev, s)) return;
         subStatusSig.set(s);
         runFireAndForget(
           "transactions",
@@ -1492,8 +1884,12 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           .catch(() => {});
       },
       resolveEntitlementsForProduct: (productId) => {
-        // Synchronous read of the cached config — `current()` is a Ref get,
-        // safe under runSync. Returns [] when config hasn't loaded yet.
+        // `productId` here is what arrived in `post_checkout_complete.product_identifier`
+        // — by BE contract that's the slot reference_name (e.g. "primary"),
+        // NOT the Stripe product id. Look it up against the per-paywall
+        // `products_v2` map; fall back to the Stripe-id-keyed top-level
+        // products in case a caller (sw.purchases.purchase) passed a real
+        // product id. Synchronous Ref read — safe under runSync.
         const cfg = runtime.runSync(
           Effect.gen(function* () {
             const config = yield* ConfigService;
@@ -1501,6 +1897,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }).pipe(Effect.catchAll(() => Effect.succeed(null))),
         );
         if (!cfg) return [];
+        const byRef = extractEntitlementsByReferenceName(cfg.paywallResponses);
+        const fromRef = byRef.get(productId);
+        if (fromRef && fromRef.length > 0) return fromRef;
         return (
           extractEntitlementsByProductId(cfg.products).get(productId) ?? []
         );
@@ -1561,6 +1960,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       Promise.reject(new NotConfiguredError(new Error("purchases not yet wired"))),
     setSubscriptionStatus: (s) => {
       const prev = subStatusSig.value;
+      if (subscriptionStatusEqual(prev, s)) return;
       subStatusSig.set(s);
       runFireAndForget(
         "superwallCore",
@@ -1761,6 +2161,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       );
     },
     setLocale: (locale) => localeSig.set(locale),
+    setInterfaceStyle: (style) => {
+      interfaceStyleOverride = style;
+    },
     setDelegate: (delegate) => {
       runFireAndForget(
         "superwallCore",
@@ -1808,9 +2211,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }) as Effect.Effect<void, unknown, never>,
       ),
 
-    dismiss: () => {
-      // Both: abort the presenter signal, and call dismiss() directly. The
-      // in-flight register() call's finally-block clears state.
+    dismiss: (reason: PaywallCloseReason = "systemLogic") => {
+      // Stash the reason so the register() finally-block can read it and
+      // surface it on `paywall_close` event params + `PaywallInfo`.
+      pendingCloseReason = reason;
       currentAbort?.abort();
       try {
         opts.presenter?.dismiss();

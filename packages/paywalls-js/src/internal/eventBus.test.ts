@@ -99,7 +99,10 @@ test("publish posts wire-bound events to the collector", async () => {
     Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const bus = yield* EventBus;
-      yield* bus.publish("paywall_close", { paywall_info: stubPaywall("pw_1") });
+      yield* bus.publish("paywall_close", {
+        paywall_info: stubPaywall("pw_1"),
+        close_reason: "manualClose",
+      });
     }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
   );
 

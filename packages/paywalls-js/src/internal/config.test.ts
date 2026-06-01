@@ -7,6 +7,7 @@ import {
   ConfigUpdates,
   configServiceLayer,
   extractEntitlementsByProductId,
+  extractEntitlementsByReferenceName,
   getConfig,
   parseConfig,
   type RawConfig,
@@ -383,6 +384,38 @@ test("extractEntitlementsByProductId: empty input → empty map", () => {
   expect(extractEntitlementsByProductId([]).size).toBe(0);
 });
 
+test("extractEntitlementsByReferenceName: builds reference_name → entitlementIds map from per-paywall productsV2", () => {
+  const map = extractEntitlementsByReferenceName([
+    {
+      identifier: "pw_a",
+      name: "A",
+      url: "https://x",
+      productIds: [],
+      productsV2: [
+        {
+          reference_name: "primary",
+          entitlements: [{ id: "pro" }, { id: "premium" }],
+        },
+        { reference_name: "secondary", entitlements: [{ id: "basic" }] },
+        // camelCase variant + no entitlements skipped.
+        { referenceName: "tertiary", entitlements: [] },
+      ],
+    },
+    {
+      identifier: "pw_b",
+      name: "B",
+      url: "https://y",
+      productIds: [],
+      productsV2: [
+        { reference_name: "primary", entitlements: [{ id: "pro" }] },
+      ],
+    },
+  ]);
+  expect(map.get("primary")).toEqual(["pro"]);
+  expect(map.get("secondary")).toEqual(["basic"]);
+  expect(map.has("tertiary")).toBe(false);
+});
+
 test("ConfigUpdates.SetRetrieving transitions any prior state to Retrieving", () => {
   expect(ConfigUpdates.SetRetrieving(ConfigState.None)).toEqual({
     _tag: "Retrieving",
@@ -586,4 +619,93 @@ test("ConfigService.reset wipes both ref + storage", async () => {
     }).pipe(Effect.provide(layer)) as Effect.Effect<void, never, never>,
   );
   expect(await adapter.get(STORAGE_KEYS.config)).toBeNull();
+});
+
+test("parseConfig parses paywall.surveys with snake_case wire fields", () => {
+  const cfg = parseConfig({
+    build_id: "b",
+    paywall_responses: [
+      {
+        identifier: "pw_1",
+        url: "https://paywalls.example/pw_1",
+        surveys: [
+          {
+            id: "s_1",
+            assignment_key: "ak_1",
+            title: "Why are you leaving?",
+            message: "Pick one",
+            options: [{ id: "a", title: "Too expensive" }],
+            presentation_condition: "ON_MANUAL_CLOSE",
+            presentation_probability: 0.5,
+            include_other_option: true,
+            include_close_option: true,
+          },
+        ],
+      },
+    ],
+  });
+  const surveys = cfg.paywallResponses[0]!.surveys;
+  expect(surveys).toHaveLength(1);
+  expect(surveys![0]).toEqual({
+    id: "s_1",
+    assignmentKey: "ak_1",
+    title: "Why are you leaving?",
+    message: "Pick one",
+    options: [{ id: "a", title: "Too expensive" }],
+    presentationCondition: "ON_MANUAL_CLOSE",
+    presentationProbability: 0.5,
+    includeOtherOption: true,
+    includeCloseOption: true,
+  });
+});
+
+test("parseConfig skips surveys without required fields", () => {
+  const cfg = parseConfig({
+    build_id: "b",
+    paywall_responses: [
+      {
+        identifier: "pw_1",
+        url: "https://x",
+        surveys: [
+          { /* no id */ assignment_key: "ak_1", title: "t", message: "m", presentation_condition: "ON_PURCHASE" },
+          { id: "s_2", /* no assignmentKey */ title: "t", message: "m", presentation_condition: "ON_PURCHASE" },
+          { id: "s_3", assignment_key: "ak_3", title: "t", message: "m", presentation_condition: "INVALID" },
+        ],
+      },
+    ],
+  });
+  expect(cfg.paywallResponses[0]!.surveys ?? []).toHaveLength(0);
+});
+
+test("parseConfig clamps presentation_probability to [0,1]", () => {
+  const cfg = parseConfig({
+    build_id: "b",
+    paywall_responses: [
+      {
+        identifier: "pw_1",
+        url: "https://x",
+        surveys: [
+          {
+            id: "s_lo",
+            assignment_key: "ak_lo",
+            title: "t",
+            message: "m",
+            presentation_condition: "ON_PURCHASE",
+            presentation_probability: -1,
+          },
+          {
+            id: "s_hi",
+            assignment_key: "ak_hi",
+            title: "t",
+            message: "m",
+            presentation_condition: "ON_PURCHASE",
+            presentation_probability: 5,
+          },
+        ],
+      },
+    ],
+  });
+  const surveys = cfg.paywallResponses[0]!.surveys!;
+  expect(surveys[0]!.presentationProbability).toBe(0);
+  expect(surveys[1]!.presentationProbability).toBe(1);
 });

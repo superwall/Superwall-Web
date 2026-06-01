@@ -63,6 +63,51 @@ export const createAutomaticPurchaseController = (
     );
   };
 
+  /** Optimistic ACTIVE flip from config-derived entitlement ids + a
+   *  background `/entitlements` reconcile. Idempotent — safe to invoke
+   *  from both the persistent subscription (every postCheckout, even
+   *  outside an in-flight purchase() promise) and the per-purchase
+   *  subscription. */
+  const applyPostCheckout = (productId: string): void => {
+    // Try config-derived entitlement ids first; fall back to a single
+    // synthesized placeholder using `productId` as the id. The BE often
+    // sends the slot reference name (e.g. "primary") here, not the Stripe
+    // id, AND the merchant's product→entitlement mapping in dashboard may
+    // be empty — both lead to `[]` from `resolveEntitlementsForProduct`.
+    // The /entitlements refresh below replaces the placeholder with the
+    // authoritative set within seconds; meanwhile the consumer's UI flips
+    // ACTIVE immediately instead of staying INACTIVE on a successful
+    // purchase.
+    const ids = deps.resolveEntitlementsForProduct(productId);
+    const entitlements: Entitlement[] =
+      ids.length > 0
+        ? ids.map((id) => ({
+            id,
+            type: "SERVICE_LEVEL",
+            isActive: true,
+            productIds: [productId],
+          } satisfies Entitlement))
+        : [
+            {
+              id: productId,
+              type: "SERVICE_LEVEL",
+              isActive: true,
+              productIds: [productId],
+            } satisfies Entitlement,
+          ];
+    console.debug(
+      "[Superwall:APC] postCheckout received",
+      { productId, configEntitlements: ids, optimisticEntitlements: entitlements.map((e) => e.id) },
+    );
+    deps.setSubscriptionStatus({ status: "ACTIVE", entitlements });
+    void deps
+      .refreshEntitlements()
+      .then((ents) => {
+        if (ents !== null && ents.length > 0) applyRefresh(ents);
+      })
+      .catch(() => {});
+  };
+
   const purchase = async (product: Product): Promise<PurchaseResult> =>
     new Promise<PurchaseResult>((resolve) => {
       const off = deps.subscribe((ev) => {
@@ -74,35 +119,12 @@ export const createAutomaticPurchaseController = (
         // (session/complete + redemption) succeeded. `stripe_checkout_complete`
         // is an in-flight signal — don't resolve on it; the controller
         // still has work to do and may yet fail.
+        // Note: the persistent subscription in onConfigured() handles the
+        // sub-status flip + refresh. This per-purchase handler only
+        // resolves the promise. Same event hits both subscribers; the
+        // flip is idempotent so the double-call is fine.
         if (ev.type === "postCheckout") {
           off();
-          // Resolve the entitlement ids the purchased product grants from
-          // the active paywall config. Mirrors how the mobile SDKs build
-          // the post-purchase status: product → config.entitlements → set.
-          // The next /entitlements poll will return the same set; both
-          // sources are authoritative and agree by contract.
-          const ids = deps.resolveEntitlementsForProduct(product.id);
-          if (ids.length > 0) {
-            deps.setSubscriptionStatus({
-              status: "ACTIVE",
-              entitlements: ids.map((id) => ({
-                id,
-                type: "SERVICE_LEVEL",
-                isActive: true,
-                productIds: [product.id],
-              } satisfies Entitlement)),
-            });
-          } else {
-            // No config entry (legacy / unmapped product). Fall back to a
-            // refresh to learn the entitlement set; status stays whatever
-            // it was until the response lands.
-            void deps
-              .refreshEntitlements()
-              .then((ents) => {
-                if (ents !== null) applyRefresh(ents);
-              })
-              .catch(() => {});
-          }
           resolve({ type: "purchased" });
         } else if (ev.type === "fail") {
           off();
@@ -134,6 +156,19 @@ export const createAutomaticPurchaseController = (
       };
     }
   };
+
+  // Persistent purchase-event subscription — handles every postCheckout
+  // independent of any in-flight `purchase()` promise. The typical
+  // `sw.register()` flow (user clicks Stripe in the iframe, never calls
+  // `sw.purchases.purchase`) needs this to flip subscriptionStatus to
+  // ACTIVE on success; without it the per-purchase subscription is the
+  // only listener and it doesn't exist outside a `purchase()` call.
+  // Wired at controller construction so it's active from boot.
+  deps.subscribe((ev) => {
+    if (ev.type === "postCheckout" && ev.productId) {
+      applyPostCheckout(ev.productId);
+    }
+  });
 
   const onConfigured = async (): Promise<void> => {
     // Auto-detect a returning redemption-code redirect.

@@ -27,6 +27,11 @@ export interface NetworkConfig {
   readonly urlScheme?: string;
   /** Override fetch (tests); falls back to `globalThis.fetch`. */
   readonly fetch?: typeof fetch;
+  /** Optional getter for the device interface style override. Called fresh
+   *  per request — returning `null` falls back to `prefers-color-scheme`
+   *  detection. Wired so `sw.setInterfaceStyle(...)` can flip the SDK's
+   *  reported style at runtime. */
+  readonly interfaceStyleOverride?: () => "light" | "dark" | null;
 }
 
 const safeReadString = (read: () => string | undefined): string => {
@@ -74,7 +79,15 @@ const resolveCurrency = (locale: string): string => {
 const resolveTimezoneOffsetSeconds = (): number =>
   -new Date().getTimezoneOffset() * 60;
 
-const resolveInterfaceStyle = (): "light" | "dark" => {
+const resolveInterfaceStyle = (
+  override?: () => "light" | "dark" | null,
+): "light" | "dark" => {
+  if (override) {
+    try {
+      const v = override();
+      if (v === "light" || v === "dark") return v;
+    } catch {}
+  }
   try {
     if (
       typeof globalThis !== "undefined" &&
@@ -121,7 +134,9 @@ const make = (config: NetworkConfig) =>
         "X-Device-Language-Code": resolveLanguageCode(locale),
         "X-Device-Currency-Code": resolveCurrency(locale),
         "X-Device-Timezone-Offset": String(resolveTimezoneOffsetSeconds()),
-        "X-Device-Interface-Style": resolveInterfaceStyle(),
+        "X-Device-Interface-Style": resolveInterfaceStyle(
+          config.interfaceStyleOverride,
+        ),
         "X-SDK-Version": SDK_VERSION,
         "X-Bundle-ID": resolveBundleId(config),
         "X-Is-Sandbox": String(isSandbox(config.environment)),

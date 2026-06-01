@@ -24,6 +24,7 @@ export {
   type PurchasesNamespace,
   type EntitlementsNamespace,
   type PaywallPresentationHandler,
+  type PaywallOverrides,
   type RegisterPlacementArgs,
   type RegisterPlacementResult,
 } from "./superwall.ts";

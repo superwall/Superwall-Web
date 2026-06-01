@@ -64,10 +64,10 @@ test("Entitlement.type is the closed literal SERVICE_LEVEL", () => {
 
 test("PartialSuperwallOptions accepts deeply partial input", () => {
   const opts: PartialSuperwallOptions = {
-    paywalls: { presentation: "modal" },
+    paywalls: { closeOnBackdrop: false },
     logging: { level: "debug" },
   };
-  expect(opts.paywalls?.presentation).toBe("modal");
+  expect(opts.paywalls?.closeOnBackdrop).toBe(false);
 });
 
 test("SuperwallOptions networkEnvironment accepts custom hosts", () => {
