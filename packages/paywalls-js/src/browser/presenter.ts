@@ -141,6 +141,7 @@ interface ActivePresentation {
   readonly iframe: HTMLIFrameElement;
   readonly paywallOrigin: string;
   readonly messageListener: (e: MessageEvent) => void;
+  readonly keydownListener: (e: KeyboardEvent) => void;
   readonly resolve: (r: PaywallResult) => void;
   readonly ctx: PresentationContext;
 }
@@ -501,14 +502,36 @@ const mount = (
   };
 
   if (spec.overlayBackground !== "transparent" && closeOnBackdrop) {
+    // Dismiss when the click lands on the backdrop itself OR anywhere
+    // outside the iframe card. `e.target === overlay` alone is too strict
+    // when the overlay holds extra wrapper elements (close button, etc.);
+    // checking that the target isn't inside the iframe is the more
+    // reliable test.
     overlay.addEventListener("click", (e) => {
-      if (e.target === overlay && slot.a) {
-        const a = slot.a;
-        cleanupOnce();
-        a.resolve({ type: "declined" });
-      }
+      if (!slot.a) return;
+      const target = e.target as Node | null;
+      if (target && iframe.contains(target)) return;
+      const a = slot.a;
+      console.debug("[Superwall:presenter] backdrop click → dismiss");
+      cleanupOnce();
+      a.resolve({ type: "declined" });
     });
   }
+  // Escape key as a backup close — useful when the backdrop click handler
+  // can't fire (transparent overlay, fullscreen iframe, etc.). Listener is
+  // removed in tearDown so multiple paywalls don't accumulate keymaps.
+  const onKeydown = (e: KeyboardEvent) => {
+    if (e.key !== "Escape") return;
+    if (!slot.a) return;
+    const a = slot.a;
+    console.debug("[Superwall:presenter] Escape key → dismiss");
+    cleanupOnce();
+    a.resolve({ type: "declined" });
+  };
+  (globalThis as unknown as EventTarget).addEventListener(
+    "keydown",
+    onKeydown as EventListener,
+  );
 
   const messageListener = (event: MessageEvent) => {
     if (!slot.a) return;
@@ -559,6 +582,7 @@ const mount = (
     iframe,
     paywallOrigin,
     messageListener,
+    keydownListener: onKeydown,
     resolve,
     ctx,
   };
@@ -571,6 +595,12 @@ const tearDown = (a: ActivePresentation) => {
     (globalThis as unknown as EventTarget).removeEventListener(
       "message",
       a.messageListener as EventListener,
+    );
+  } catch {}
+  try {
+    (globalThis as unknown as EventTarget).removeEventListener(
+      "keydown",
+      a.keydownListener as EventListener,
     );
   } catch {}
   try {
@@ -589,39 +619,6 @@ const readString = (
   evt: { [k: string]: unknown },
   key: string,
 ): string | null => (typeof evt[key] === "string" ? (evt[key] as string) : null);
-
-const readTransactionData = (
-  evt: { [k: string]: unknown },
-):
-  | {
-      transactionId: string;
-      productIdentifier: string;
-      currency?: string;
-      value?: number;
-    }
-  | undefined => {
-  const td = evt["transactionData"];
-  if (!td || typeof td !== "object") return undefined;
-  const obj = td as Record<string, unknown>;
-  if (
-    typeof obj["transactionId"] !== "string" ||
-    typeof obj["productIdentifier"] !== "string"
-  ) {
-    return undefined;
-  }
-  const out: {
-    transactionId: string;
-    productIdentifier: string;
-    currency?: string;
-    value?: number;
-  } = {
-    transactionId: obj["transactionId"],
-    productIdentifier: obj["productIdentifier"],
-  };
-  if (typeof obj["currency"] === "string") out.currency = obj["currency"];
-  if (typeof obj["value"] === "number") out.value = obj["value"];
-  return out;
-};
 
 const readTransactionField = (
   evt: { [k: string]: unknown },
