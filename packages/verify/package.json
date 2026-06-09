@@ -1,5 +1,5 @@
 {
-  "name": "@superwall/server",
+  "name": "@superwall/verify",
   "version": "0.0.0",
   "type": "module",
   "license": "MIT",
@@ -7,21 +7,17 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./verify": {
-      "types": "./src/verify.ts",
-      "default": "./src/verify.ts"
     }
   },
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "echo 'no-op for v0; consumers import .ts directly via Bun/Vite/Next ESM'",
+    "sync-keys": "bun run scripts/sync-keys.ts",
     "clean": "rm -rf node_modules .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@superwall/core": "workspace:*",
-    "@superwall/verify": "workspace:*"
+    "jose": "^5.9.6"
   },
   "devDependencies": {
     "@types/bun": "latest",
