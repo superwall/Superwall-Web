@@ -21,12 +21,12 @@ export interface BrowserPresenterOptions {
   closeOnBackdrop?: boolean;
   /** z-index for the overlay container. Default: 2147483000. */
   zIndex?: number;
-  /** Test-mode override: instead of `window.confirm`, call this with the
-   *  product. Resolve with `"purchased"` to simulate a successful purchase
-   *  or `"declined"` to cancel. */
+  /** When the SDK is in test mode (`options.testModeBehavior`, threaded via
+   *  `ctx.testMode`), purchase clicks are intercepted with a confirm()
+   *  shim instead of real checkout. Supply this to replace the confirm()
+   *  with custom UI: resolve `"purchased"` to simulate success or
+   *  `"declined"` to cancel. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
-  /** Whether the SDK is in test mode; intercepts purchase clicks. Default: false. */
-  testMode?: boolean;
 }
 
 const DEFAULT_Z_INDEX = 2147483000;
@@ -94,7 +94,8 @@ export const createBrowserPresenter = (
         resolve();
         return;
       }
-      const url = buildPaywallUrl(info, options.testMode === true, undefined, undefined);
+      // Cache-warm only — debug flag irrelevant, no ctx available here.
+      const url = buildPaywallUrl(info, false, undefined, undefined);
       const iframe = document.createElement("iframe");
       iframe.dataset["swPreload"] = info.identifier;
       iframe.setAttribute("aria-hidden", "true");
@@ -453,7 +454,7 @@ const mount = (
   }
   iframe.src = buildPaywallUrl(
     info,
-    options.testMode === true,
+    ctx.testMode === true,
     ctx.bootstrap,
     ctx.initPayload,
   );
@@ -512,7 +513,6 @@ const mount = (
       const target = e.target as Node | null;
       if (target && iframe.contains(target)) return;
       const a = slot.a;
-      console.debug("[Superwall:presenter] backdrop click → dismiss");
       cleanupOnce();
       a.resolve({ type: "declined" });
     });
@@ -524,7 +524,6 @@ const mount = (
     if (e.key !== "Escape") return;
     if (!slot.a) return;
     const a = slot.a;
-    console.debug("[Superwall:presenter] Escape key → dismiss");
     cleanupOnce();
     a.resolve({ type: "declined" });
   };
@@ -535,32 +534,9 @@ const mount = (
 
   const messageListener = (event: MessageEvent) => {
     if (!slot.a) return;
-    // Surface every paywall postMessage so we can diagnose missing /
-    // unexpected events without instrumenting the inner controller.
-    // Logs the event_name + filter outcome so it's clear whether the
-    // message reached our switch.
-    const data = event.data as { event_name?: unknown; version?: unknown };
-    const evtName =
-      typeof data?.event_name === "string"
-        ? data.event_name
-        : data && typeof data === "object" && "payload" in data
-          ? "<v1-envelope>"
-          : "<unknown>";
-    if (event.source !== iframe.contentWindow) {
-      console.debug(
-        "[Superwall:presenter] dropped postMessage from non-paywall source",
-        { evtName, origin: event.origin },
-      );
-      return;
-    }
-    if (paywallOrigin && event.origin !== paywallOrigin) {
-      console.debug(
-        "[Superwall:presenter] dropped postMessage from foreign origin",
-        { evtName, origin: event.origin, expected: paywallOrigin },
-      );
-      return;
-    }
-    console.debug("[Superwall:presenter] inbound", evtName, event.data);
+    // Origin + source guards: only accept messages from the paywall iframe.
+    if (event.source !== iframe.contentWindow) return;
+    if (paywallOrigin && event.origin !== paywallOrigin) return;
     handleInbound(
       event.data,
       info,
@@ -928,7 +904,7 @@ const handlePurchase = (
     }
   };
 
-  if (options.testMode) {
+  if (ctx.testMode) {
     if (options.onTestPurchase) {
       options
         .onTestPurchase(product)

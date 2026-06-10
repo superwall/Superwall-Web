@@ -103,6 +103,10 @@ export interface PurchaseController {
    *  The default automatic controller uses it to detect a returning
    *  redemption-code redirect and start polling for web entitlements. */
   onConfigured?(): Promise<void>;
+  /** Optional teardown called from `sw.dispose()`. The default automatic
+   *  controller clears its entitlements-polling interval here so timers
+   *  don't leak past the SDK instance's lifetime. */
+  dispose?(): void;
 }
 
 export interface Product {

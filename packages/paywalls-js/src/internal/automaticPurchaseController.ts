@@ -95,10 +95,6 @@ export const createAutomaticPurchaseController = (
               productIds: [productId],
             } satisfies Entitlement,
           ];
-    console.debug(
-      "[Superwall:APC] postCheckout received",
-      { productId, configEntitlements: ids, optimisticEntitlements: entitlements.map((e) => e.id) },
-    );
     deps.setSubscriptionStatus({ status: "ACTIVE", entitlements });
     void deps
       .refreshEntitlements()
@@ -228,7 +224,14 @@ export const createAutomaticPurchaseController = (
     }
   };
 
-  return { purchase, restorePurchases, onConfigured };
+  const dispose = (): void => {
+    // Stop the entitlements-polling interval so the timer (and its fetch
+    // loop) doesn't outlive the SDK instance.
+    stopPolling?.();
+    stopPolling = null;
+  };
+
+  return { purchase, restorePurchases, onConfigured, dispose };
 };
 
 const readGlobalLocation = ():

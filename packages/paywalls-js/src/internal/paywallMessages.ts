@@ -112,6 +112,11 @@ export interface PostCheckoutCompleteMessage {
     value?: number;
   };
   redirectUrl?: string;
+  /** Short-lived Superwall-signed entitlements JWT for offline server-side
+   *  verification (`@superwall/verify`). Best-effort — absent when signing is
+   *  unavailable. The steady-state `/entitlements` read also carries it, so a
+   *  page that didn't just purchase can still obtain a fresh one. */
+  entitlements_token?: string;
 }
 
 export interface OpenUrlMessage {

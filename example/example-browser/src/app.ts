@@ -8,10 +8,7 @@ import {
   type PaywallPresentationStyle,
   type Readable,
 } from "@superwall/paywalls-js";
-import {
-  createBrowserPresenter,
-  createBrowserStorage,
-} from "@superwall/paywalls-js/browser";
+import { createBrowserStorage } from "@superwall/paywalls-js/browser";
 
 // ---------------------------------------------------------------------------
 // SDK setup
@@ -64,17 +61,12 @@ const proxiedFetch: typeof fetch = (input, init) => {
 const sw = createSuperwall({
   apiKey,
   fetch: proxiedFetch,
-  presenter: createBrowserPresenter({
-    testMode: true,
-  }),
   storage: createBrowserStorage(),
+  // No `presenter` — the SDK uses the default browser iframe presenter
+  // automatically. Pass a custom one (or a `paywall` render callback) per
+  // `register()` call when you need to override.
   options: {
     testModeBehavior: "always",
-    // Load the iframe from the PR-preview paywall worker instead of the
-    // editor preview host. Also makes the iframe's relative collector URL
-    // (`/api/proxy/events`) resolve against the worker.
-    paywallHostOverride:
-      "https://superwall-web-paywall-app-pr-3123.superstaging.workers.dev",
     // Point all four upstreams at the review-lab. The SDK's own fetches
     // are rewritten through the local proxy by `proxiedFetch` above; the
     // value here also drives `apiBase` / `collector` in the iframe's

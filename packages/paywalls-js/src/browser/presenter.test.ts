@@ -73,8 +73,8 @@ test("iframe URL has platform=web&transport=web&debug=false appended (§7.3)", a
 });
 
 test("test mode flips debug=true in the iframe URL", async () => {
-  const presenter = createBrowserPresenter({ testMode: true });
-  const presentation = presenter.present(stubInfo("pw_a"), newCtx());
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo("pw_a"), newCtx({ testMode: true }));
   await tick();
 
   const iframe = document.querySelector("iframe") as HTMLIFrameElement;
@@ -505,10 +505,9 @@ test("unknown version is dropped", async () => {
 
 test("test mode purchase with onTestPurchase=purchased resolves as purchased", async () => {
   const presenter = createBrowserPresenter({
-    testMode: true,
     onTestPurchase: async () => "purchased",
   });
-  const result = presenter.present(stubInfo(), newCtx());
+  const result = presenter.present(stubInfo(), newCtx({ testMode: true }));
   await tick();
   const iframe = document.querySelector("iframe") as HTMLIFrameElement;
 
@@ -527,12 +526,12 @@ test("test mode purchase with onTestPurchase=purchased resolves as purchased", a
 test("test mode purchase with onTestPurchase=declined keeps paywall open", async () => {
   let abandonCount = 0;
   const presenter = createBrowserPresenter({
-    testMode: true,
     onTestPurchase: async () => "declined",
   });
   const presentation = presenter.present(
     stubInfo(),
     newCtx({
+      testMode: true,
       emit: (name) => {
         if (name === "transaction_abandon") abandonCount++;
       },
@@ -558,12 +557,12 @@ test("test mode purchase with onTestPurchase=declined keeps paywall open", async
 test("test mode purchase with should_dismiss=false stays open after purchase resolves", async () => {
   const purchases: string[] = [];
   const presenter = createBrowserPresenter({
-    testMode: true,
     onTestPurchase: async () => "purchased",
   });
   const presentation = presenter.present(
     stubInfo(),
     newCtx({
+      testMode: true,
       emit: (name, detail) => {
         if (name === "transaction_complete") {
           purchases.push((detail as { product_identifier: string }).product_identifier);

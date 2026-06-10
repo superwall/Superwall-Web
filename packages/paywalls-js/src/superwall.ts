@@ -17,10 +17,12 @@ import {
   type SuperwallDelegate,
 } from "./events.ts";
 import type {
+  CustomPaywallRenderer,
   PaywallPresenter,
   PresentationContext,
   SurveyPresenter,
 } from "./presenter.ts";
+import { createCustomPaywallPresenter } from "./internal/customPaywallPresenter.ts";
 import { presentSurveyIfAvailable } from "./internal/survey.ts";
 import { asReadable, createSignal, type Readable } from "./signal.ts";
 import {
@@ -153,6 +155,16 @@ export interface RegisterPlacementArgs {
    *  Fields are individually optional; unset ones fall back to the
    *  paywall's config. */
   overrides?: PaywallOverrides;
+  /** Full presenter override for this call. Bypasses the default browser
+   *  iframe presenter entirely. Highest precedence. */
+  presenter?: PaywallPresenter;
+  /** Render your own paywall UI instead of the default iframe. The SDK
+   *  still runs the full trigger pipeline + fires identical lifecycle
+   *  events; you supply UI and drive `controller.buy/restore/close`.
+   *  Mirrors Android's `SuperwallCustomPaywall`. Ignored when `presenter`
+   *  is also set. See `@superwall/paywalls-react`'s `SuperwallCustomPaywall`
+   *  for the React wrapper. */
+  paywall?: CustomPaywallRenderer;
 }
 
 export interface PaywallOverrides {
@@ -192,6 +204,13 @@ export interface PurchasesNamespace {
   /** Snapshot of the current customer info signal value. Convenience for
    *  consumers that prefer Promise/method calls over signal subscription. */
   getCustomerInfo(): Promise<CustomerInfo | null>;
+  /** Current Superwall-signed entitlements token (`null` if none yet). Send it
+   *  to your backend and verify with `@superwall/verify`'s `verifyEntitlements`
+   *  for a stateless, offline entitlement check. Refreshed from each
+   *  `/entitlements` read (~hourly to track `exp`). Best-effort: `null` when
+   *  the backend isn't issuing tokens. For reactive reads, see
+   *  `sw.entitlementsToken`. */
+  getEntitlementsToken(): string | null;
   /** Drive a one-shot purchase outside a paywall (e.g. inline upsell button).
    *  Emits the same lifecycle as a presenter-driven purchase
    *  Routes through the active `PurchaseController` (default = automatic
@@ -230,6 +249,11 @@ export interface Superwall {
 
   readonly subscriptionStatus: Readable<SubscriptionStatus>;
   readonly customerInfo: Readable<CustomerInfo | null>;
+  /** Reactive view of the current Superwall-signed entitlements token (`null`
+   *  until one is issued). Forward it to your backend and verify offline with
+   *  `@superwall/verify`. See `purchases.getEntitlementsToken()` for a snapshot
+   *  read. */
+  readonly entitlementsToken: Readable<string | null>;
   readonly latestPaywallInfo: Readable<PaywallInfo | null>;
   readonly isPaywallPresented: Readable<boolean>;
 
@@ -278,8 +302,6 @@ export interface CreateSuperwallOptions {
   options?: PartialSuperwallOptions;
   delegate?: SuperwallDelegate;
   storage?: StorageAdapter;
-  /** Required to call `sw.register`. */
-  presenter?: PaywallPresenter;
   /** Optional renderer for post-paywall surveys. Absent ⇒ the SDK skips
    *  survey presentation (the assignment key is still consumed so the
    *  user isn't pestered with the same survey twice on revisit). The
@@ -588,6 +610,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   >({});
   const subStatusSig = createSignal<SubscriptionStatus>({ status: "UNKNOWN" });
   const customerSig = createSignal<CustomerInfo | null>(null);
+  // Latest Superwall-signed entitlements JWT, refreshed from every
+  // `/entitlements` read (steady-state poll, post-purchase reconcile, restore).
+  // The host forwards it to their backend for offline verification via
+  // `@superwall/verify`. `null` until the first read returns one — best-effort:
+  // the backend omits it when signing is unavailable. We never downgrade a
+  // good token to `null` on a transient refresh failure.
+  const entitlementsTokenSig = createSignal<string | null>(null);
   // Config-derived `productId → entitlementIds` map. Populated on every
   // applyConfig so `entitlements.byProductIds()` can answer pre-purchase.
   const entitlementsByProductIdSig = createSignal<Map<string, string[]>>(
@@ -934,7 +963,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
    *  bounded concurrency to avoid hammering on large catalogs. */
   const warmPaywalls = (config: ConfigServiceImpl) =>
     Effect.gen(function* () {
-      if (!opts.presenter?.preload) return;
+      const presenter = yield* Effect.promise(() => getDefaultPresenter());
+      if (!presenter?.preload) return;
       const cfg = yield* config.current();
       if (!cfg) return;
       const infos = cfg.paywallResponses
@@ -955,7 +985,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       yield* Effect.all(
         infos.map((info) =>
           Effect.tryPromise({
-            try: () => opts.presenter!.preload!(info),
+            try: () => presenter.preload!(info),
             catch: () => undefined,
           }).pipe(Effect.catchAll(() => Effect.void)),
         ),
@@ -1385,7 +1415,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return { type: "skipped", reason };
         }
 
-        if (!opts.presenter) {
+        // Resolve the presenter for THIS call:
+        //   args.presenter (full override) > args.paywall (custom renderer)
+        //   > default browser iframe presenter (lazy-loaded singleton).
+        const presenter = await resolvePresenter(args);
+        if (!presenter) {
           throw new NoPresenterRegisteredError(placement);
         }
         const variantPaywallId = decision.experiment.variant.paywallId;
@@ -1546,6 +1580,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           },
           bootstrap,
           initPayload,
+          testMode: isTestMode(),
         };
 
         // Per-call presentation-style override wins over the paywall config.
@@ -1554,9 +1589,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             args.overrides.presentationStyle;
         }
 
+        // Track the active presenter so sw.dismiss() can force-close it.
+        activePresenter = presenter;
         let result: PaywallResult;
         try {
-          result = await opts.presenter.present(info, ctx);
+          result = await presenter.present(info, ctx);
         } catch (cause) {
           const err =
             cause instanceof Error
@@ -1584,6 +1621,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return { type: "error", error: err };
         } finally {
           currentAbort = null;
+          activePresenter = null;
           pendingCloseReason = null;
         }
 
@@ -1738,6 +1776,98 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   /** AbortController for the in-flight presentation. dismiss() triggers it. */
   let currentAbort: AbortController | null = null;
+  /** Presenter handling the in-flight presentation — so dismiss() can
+   *  force-close whichever presenter (default / custom / override) is up. */
+  let activePresenter: PaywallPresenter | null = null;
+  /** Lazy default browser presenter (singleton). Loaded on first use via
+   *  dynamic import so the headless core never statically pulls in DOM code.
+   *  Null in non-browser environments. */
+  let defaultPresenterPromise: Promise<PaywallPresenter | null> | null = null;
+  const getDefaultPresenter = (): Promise<PaywallPresenter | null> => {
+    if (typeof document === "undefined") return Promise.resolve(null);
+    if (!defaultPresenterPromise) {
+      defaultPresenterPromise = import("./browser/presenter.ts")
+        .then((m) => m.createBrowserPresenter() as PaywallPresenter)
+        .catch((cause: unknown) => {
+          logViaRuntime(
+            "superwallCore",
+            "default browser presenter failed to load",
+            cause,
+          );
+          return null;
+        });
+    }
+    return defaultPresenterPromise;
+  };
+  /** Per-call presenter precedence: explicit override > custom renderer >
+   *  default browser presenter. */
+  const resolvePresenter = (
+    args: RegisterPlacementArgs,
+  ): Promise<PaywallPresenter | null> => {
+    if (args.presenter) return Promise.resolve(args.presenter);
+    if (args.paywall) {
+      return Promise.resolve(
+        createCustomPaywallPresenter(args.paywall, {
+          purchase: (product) => purchases.purchase(product),
+          restore: () => runRestore(),
+        }),
+      );
+    }
+    return getDefaultPresenter();
+  };
+  /** Test mode for presenters: derived from `options.testModeBehavior`.
+   *  "always" ⇒ on; everything else ⇒ off (web has no per-user enablement
+   *  signal today). */
+  const isTestMode = (): boolean =>
+    opts.options?.testModeBehavior === "always";
+  /** Restore through the active PurchaseController + fire restore lifecycle
+   *  events. Returns the outcome so callers (custom paywall controller) can
+   *  branch on it; `purchases.restore()` ignores the return. */
+  const runRestore = async (): Promise<
+    { type: "restored" } | { type: "failed"; error: Error }
+  > => {
+    await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          yield* bus.publish("restore_start", {});
+        }),
+      )
+      .catch(() => {});
+    let result: RestorationResult;
+    try {
+      result = await purchaseController.restorePurchases();
+    } catch (cause) {
+      result = {
+        type: "failed",
+        error: cause instanceof Error ? cause : new Error(String(cause)),
+      };
+    }
+    const now = Date.now();
+    await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          const storage = yield* StorageService;
+          yield* storage.set(
+            asStorageKey(STORAGE_KEYS.lastRestoreAt),
+            String(now),
+          );
+          lastRestoreAtSig.set(now);
+          if (result.type === "restored") {
+            yield* bus.publish("restore_complete", {});
+          } else {
+            yield* bus.publish("restore_fail", { reason: result.error.message });
+          }
+        }),
+      )
+      .catch((cause: unknown) =>
+        logViaRuntime("transactions", "restore() lifecycle effect failed", cause),
+      );
+    return result.type === "restored"
+      ? { type: "restored" }
+      : { type: "failed", error: result.error };
+  };
   /** Reason set by `dismiss(reason)`; read by the register() finally-block
    *  to populate `PaywallInfo.closeReason` + `paywall_close` params. */
   let pendingCloseReason: PaywallCloseReason | null = null;
@@ -1842,6 +1972,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           )
           .catch(() => null);
         if (!res) return null;
+        // Surface the signed token to the host (best-effort). Only set when the
+        // read succeeded — a null `res` above leaves the prior token intact.
+        if (res.entitlementsToken !== undefined) {
+          entitlementsTokenSig.set(res.entitlementsToken);
+        }
         const list = res.customerInfo?.entitlements ?? res.entitlements ?? [];
         return list.map((e) => ({
           id: e.id,
@@ -1908,53 +2043,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   const purchases: PurchasesNamespace = {
     restore: async () => {
-      // Fire lifecycle events + delegate to controller. Controller is
-      // responsible for the actual restore work (web_entitlements fetch
-      // for default; consumer's API for custom).
-      await runtime
-        .runPromise(
-          Effect.gen(function* () {
-            const bus = yield* EventBus;
-            yield* bus.publish("restore_start", {});
-          }),
-        )
-        .catch(() => {});
-      let result: RestorationResult;
-      try {
-        result = await purchaseController.restorePurchases();
-      } catch (cause) {
-        result = {
-          type: "failed",
-          error: cause instanceof Error ? cause : new Error(String(cause)),
-        };
-      }
-      const now = Date.now();
-      await runtime
-        .runPromise(
-          Effect.gen(function* () {
-            const bus = yield* EventBus;
-            const storage = yield* StorageService;
-            yield* storage.set(
-              asStorageKey(STORAGE_KEYS.lastRestoreAt),
-              String(now),
-            );
-            lastRestoreAtSig.set(now);
-            if (result.type === "restored") {
-              yield* bus.publish("restore_complete", {});
-            } else {
-              yield* bus.publish("restore_fail", {
-                reason: result.error.message,
-              });
-            }
-          }),
-        )
-        .catch((cause: unknown) =>
-          logViaRuntime(
-            "transactions",
-            "restore() lifecycle effect failed",
-            cause,
-          ),
-        );
+      await runRestore();
     },
     refreshCustomerInfo: () =>
       Promise.reject(new NotConfiguredError(new Error("purchases not yet wired"))),
@@ -2006,6 +2095,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return [] as Product[];
         }),
     getCustomerInfo: () => Promise.resolve(customerSig.value),
+    getEntitlementsToken: () => entitlementsTokenSig.value,
     purchase: async (product) => {
       // Routes through the active PurchaseController. Default implementation
       // awaits the next stripe_checkout_complete from a presenting paywall.
@@ -2141,6 +2231,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     subscriptionStatus: asReadable(subStatusSig),
     customerInfo: asReadable(customerSig),
+    entitlementsToken: asReadable(entitlementsTokenSig),
     latestPaywallInfo: asReadable(latestPaywallSig),
     isPaywallPresented: asReadable(presentedSig),
 
@@ -2182,6 +2273,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* IdentityService.reset();
           subStatusSig.set({ status: "UNKNOWN" });
           customerSig.set(null);
+          entitlementsTokenSig.set(null);
           entitlementsByProductIdSig.set(new Map());
           // firstSeenAt persists across reset (install-date semantics).
           totalPaywallViewsSig.set(0);
@@ -2217,7 +2309,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       pendingCloseReason = reason;
       currentAbort?.abort();
       try {
-        opts.presenter?.dismiss();
+        activePresenter?.dismiss(reason);
       } catch {}
     },
 
@@ -2240,6 +2332,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     dispose: async () => {
       if (disposed) return;
       disposed = true;
+      try {
+        purchaseController.dispose?.();
+      } catch {}
       _clearDefault(sw);
       await runtime.dispose();
     },

@@ -5,12 +5,15 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import type {
   AllSuperwallEvents,
   CustomerInfo,
+  CustomPaywallController,
+  CustomPaywallState,
   Entitlement,
   IdentityOptions,
   IntegrationAttribute,
   PaywallInfo,
   PaywallResult,
   PaywallSkippedReason,
+  PlacementParams,
   Readable,
   RegisterPlacementArgs,
   RegisterPlacementResult,
@@ -188,6 +191,105 @@ export const usePlacement = (
   );
 
   return { register, state };
+};
+
+// ---------------------------------------------------------------------------
+// useCustomPaywall — render your own paywall UI through register()
+// ---------------------------------------------------------------------------
+
+export interface UseCustomPaywallOptions extends PaywallPresentationHandlerHooks {
+  placement: string;
+  params?: PlacementParams;
+  /** Runs when the user is entitled OR a non-gated paywall is dismissed
+   *  without purchase. Same semantics as `register({ feature })`. */
+  feature?: () => void | Promise<void>;
+}
+
+export interface CustomPaywallMountSnapshot {
+  readonly state: CustomPaywallState;
+  readonly controller: CustomPaywallController;
+}
+
+export interface UseCustomPaywallResult {
+  /** Trigger the placement. Runs the full SDK pipeline (rules / holdout /
+   *  assignment / gating / analytics); if it decides to present, `paywall`
+   *  flips non-null and your UI should render. Resolves with the placement
+   *  outcome. */
+  register: () => Promise<RegisterPlacementResult>;
+  /** Active mount (state snapshot + controller) while presenting, else null.
+   *  Re-renders the calling component whenever the transaction / restoration
+   *  phase changes. */
+  paywall: CustomPaywallMountSnapshot | null;
+}
+
+/**
+ * React primitive for custom (developer-rendered) paywalls — the web analogue
+ * of Android's `SuperwallCustomPaywall`. You own the UI; the SDK runs the
+ * trigger pipeline, resolves products, fires identical lifecycle events, and
+ * hands you a controller. Render `paywall` when it's non-null; drive
+ * `paywall.controller.buy / restore / close` from your buttons.
+ *
+ *   const { register, paywall } = useCustomPaywall({ placement: "home" });
+ *   return (
+ *     <>
+ *       <button onClick={register}>Go Pro</button>
+ *       {paywall && (
+ *         <MyPaywall
+ *           products={paywall.state.products}
+ *           busy={paywall.state.transaction.phase === "purchasing"}
+ *           onBuy={paywall.controller.buy}
+ *           onClose={paywall.controller.close}
+ *         />
+ *       )}
+ *     </>
+ *   );
+ */
+export const useCustomPaywall = (
+  opts: UseCustomPaywallOptions,
+): UseCustomPaywallResult => {
+  const sw = useSuperwall();
+  const [paywall, setPaywall] = useState<CustomPaywallMountSnapshot | null>(null);
+
+  // Latest-opts ref so `register` stays stable but reads fresh callbacks.
+  const optsRef = useRef(opts);
+  optsRef.current = opts;
+
+  const register = useCallback((): Promise<RegisterPlacementResult> => {
+    const o = optsRef.current;
+    return sw.register({
+      placement: o.placement,
+      ...(o.params !== undefined && { params: o.params }),
+      ...(o.feature !== undefined && { feature: o.feature }),
+      handler: {
+        onPresent: (info) => {
+          try { optsRef.current.onPresent?.(info); } catch { /* swallow */ }
+        },
+        onDismiss: (info, result) => {
+          try { optsRef.current.onDismiss?.(info, result); } catch { /* swallow */ }
+        },
+        onError: (error) => {
+          try { optsRef.current.onError?.(error); } catch { /* swallow */ }
+        },
+        onSkip: (reason) => {
+          try { optsRef.current.onSkip?.(reason); } catch { /* swallow */ }
+        },
+      },
+      // The renderer bridges core's reactive state into React state. Core
+      // calls it once on present; we subscribe (fires sync) and mirror each
+      // update into component state. Teardown clears the mount on dismiss.
+      paywall: ({ state, controller }) => {
+        const unsubscribe = state.subscribe((s) => {
+          setPaywall({ state: s, controller });
+        });
+        return () => {
+          unsubscribe();
+          setPaywall(null);
+        };
+      },
+    });
+  }, [sw]);
+
+  return { register, paywall };
 };
 
 // ---------------------------------------------------------------------------

@@ -761,31 +761,18 @@ const make = (apiKey: string) =>
         const cached = yield* storage
           .get(CONFIG_KEY)
           .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
-        if (cached === null) {
-          console.warn("[Superwall][hydrate] cache miss — no superwall.config key");
-          return null;
-        }
+        if (cached === null) return null;
         try {
           const decoded = JSON.parse(cached) as {
             apiKey?: string;
             buildId?: string;
             payload?: JsonValue;
           };
-          if (!decoded.payload) {
-            console.warn(
-              "[Superwall][hydrate] cached entry has no `payload` field",
-              { keys: Object.keys(decoded) },
-            );
-            return null;
-          }
+          if (!decoded.payload) return null;
           // Cache scoped by api key — switching keys (different app /
           // environment) MUST NOT serve the previous app's config.
           // Legacy entries without `apiKey` get evicted on next persist.
           if (decoded.apiKey !== undefined && decoded.apiKey !== apiKey) {
-            console.warn(
-              "[Superwall][hydrate] apiKey mismatch — evicting cache",
-              { cachedApiKey: decoded.apiKey, currentApiKey: apiKey },
-            );
             yield* storage
               .remove(CONFIG_KEY)
               .pipe(Effect.catchAll(() => Effect.void));
@@ -794,8 +781,7 @@ const make = (apiKey: string) =>
           const parsed = parseConfig(decoded.payload);
           yield* update(ConfigUpdates.SetRetrieved(parsed));
           return parsed;
-        } catch (err) {
-          console.warn("[Superwall][hydrate] threw during decode/parse", err);
+        } catch {
           return null;
         }
       }),

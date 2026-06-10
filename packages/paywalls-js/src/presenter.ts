@@ -2,8 +2,14 @@
 // paywall; the default browser presenter renders an iframe overlay, but
 // consumers can supply any implementation.
 
-import type { PaywallInfo, PaywallResult, PlacementParams } from "./types.ts";
+import type {
+  PaywallInfo,
+  PaywallResult,
+  PlacementParams,
+  Product,
+} from "./types.ts";
 import type { SuperwallEventMap } from "./events.ts";
+import type { Readable } from "./signal.ts";
 
 /** Forward an event from inside the presenter into the SDK's event bus. */
 export type SuperwallEventEmit = <K extends keyof SuperwallEventMap>(
@@ -41,7 +47,76 @@ export interface PresentationContext {
    *  base64-encoding and appending. When absent, presenter falls back to
    *  building a minimal shape from `bootstrap` (legacy path / tests). */
   readonly initPayload?: Record<string, unknown>;
+  /** Whether the SDK is in test mode for this presentation (derived from
+   *  `options.testModeBehavior`). The browser presenter uses it to set
+   *  `debug=true` on the iframe URL and to intercept purchase clicks with
+   *  the test-purchase shim instead of real checkout. */
+  readonly testMode?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Custom (developer-rendered) paywall contract
+// ---------------------------------------------------------------------------
+//
+// `register({ paywall })` hands the SDK a renderer instead of using the
+// default iframe presenter. The SDK still runs the full trigger pipeline
+// (rules / holdout / assignment / gating / analytics) and fires identical
+// lifecycle events; the developer only supplies UI + drives a controller.
+// The renderer is environment-agnostic — it receives plain data + callbacks,
+// so it works from vanilla JS, a framework wrapper (see
+// `@superwall/paywalls-react`'s `SuperwallCustomPaywall`), or even a
+// server-side log. Mirrors the Android `SuperwallCustomPaywall` composable.
+
+/** Transaction phase surfaced to a custom paywall renderer. */
+export type CustomPaywallTransactionPhase =
+  | { readonly phase: "idle" }
+  | { readonly phase: "purchasing"; readonly product: Product }
+  | { readonly phase: "failed"; readonly error: Error; readonly product?: Product };
+
+/** Restoration phase surfaced to a custom paywall renderer. */
+export type CustomPaywallRestorationPhase =
+  | { readonly phase: "idle" }
+  | { readonly phase: "restoring" }
+  | { readonly phase: "failed"; readonly error: Error };
+
+/** Reactive state a custom paywall renderer reads. */
+export interface CustomPaywallState {
+  /** Resolved products for this paywall, from config. */
+  readonly products: ReadonlyArray<Product>;
+  readonly transaction: CustomPaywallTransactionPhase;
+  readonly restoration: CustomPaywallRestorationPhase;
+  readonly paywallInfo: PaywallInfo;
+}
+
+/** Imperative handle a custom paywall renderer drives. All three converge on
+ *  the SDK's single guarded dismiss, so lifecycle events fire exactly once. */
+export interface CustomPaywallController {
+  /** Start a purchase with full Superwall attribution. Routes through the
+   *  active `PurchaseController`. On web there is no native billing, so the
+   *  controller must actually initiate checkout (the default iframe flow, or
+   *  a consumer-supplied `PurchaseController`); with the default automatic
+   *  controller and no iframe, `buy` resolves only once a checkout completes
+   *  elsewhere. */
+  buy(product: Product): Promise<void>;
+  /** Start a restore. Routes through the active `PurchaseController`. */
+  restore(): Promise<void>;
+  /** Dismiss the paywall. Resolves the in-flight `register()` with the last
+   *  result, or `declined` if the user never purchased. */
+  close(reason?: string): void;
+}
+
+/** What the SDK hands a custom paywall renderer when it decides to present.
+ *  `state` is a `Readable` so framework wrappers can subscribe + re-render. */
+export interface CustomPaywallMount {
+  readonly state: Readable<CustomPaywallState>;
+  readonly controller: CustomPaywallController;
+}
+
+/** Developer-supplied renderer. Invoked once when the SDK presents; may
+ *  return a teardown callback run on dismiss (unmount DOM / React root). */
+export type CustomPaywallRenderer = (
+  mount: CustomPaywallMount,
+) => void | (() => void);
 
 /** Identity + host context passed via iframe URL params to the paywall SSR
  *  loader. `clientSurface=web-sdk` is the switch the paywall server uses to

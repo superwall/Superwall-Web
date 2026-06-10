@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import {
-  createSuperwall,
+  createSuperwall as _createSuperwall,
   NoPresenterRegisteredError,
   NotConfiguredError,
   type StorageAdapter,
@@ -8,6 +8,27 @@ import {
   type Superwall,
   type SuperwallDelegate,
 } from "./index.ts";
+
+// The public API no longer takes a create-time `presenter` — presenters are
+// resolved per `register()` call (override > custom paywall > default
+// browser). Tests historically injected a fake presenter at construction;
+// this shim preserves that ergonomic by stripping `presenter` and wrapping
+// `register` to inject it, so every `createSuperwall({ presenter })` call
+// site keeps working while exercising the real register-level path.
+const createSuperwall = (
+  options: Parameters<typeof _createSuperwall>[0] & {
+    presenter?: import("./presenter.ts").PaywallPresenter;
+  },
+): Superwall => {
+  const { presenter, ...rest } = options;
+  const sw = _createSuperwall(rest);
+  if (presenter) {
+    const orig = sw.register.bind(sw);
+    (sw as { register: Superwall["register"] }).register = (args) =>
+      orig({ presenter, ...args });
+  }
+  return sw;
+};
 
 const tick = () => new Promise<void>((r) => queueMicrotask(r));
 
@@ -372,6 +393,83 @@ test("setSubscriptionStatus updates subscriptionStatus + entitlements + fires de
 });
 
 // ---------------------------------------------------------------------------
+// entitlements token (for @superwall/verify) surfaced from /entitlements
+// ---------------------------------------------------------------------------
+
+/** Poll a predicate across macrotasks until true or a short timeout — the
+ *  onConfigured `/entitlements` refresh is fire-and-forget, so we can't count
+ *  ticks deterministically. */
+const waitFor = async (pred: () => boolean, timeoutMs = 1000): Promise<void> => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
+    await new Promise<void>((r) => setTimeout(r, 5));
+  }
+};
+
+/** Fetch that serves the entitlements endpoint with a configurable body. */
+const entitlementsFetch = (
+  bodyForEntitlements: () => Record<string, unknown>,
+): typeof fetch =>
+  ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config"))
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    if (url.includes("/api/v1/enrich"))
+      return Promise.resolve(new Response(JSON.stringify({ user: {}, device: {} })));
+    if (url.includes("/entitlements"))
+      return Promise.resolve(
+        new Response(JSON.stringify(bodyForEntitlements())),
+      );
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+test("surfaces entitlementsToken from /entitlements via getter + readable", async () => {
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      entitlements: [{ id: "pro", isActive: true }],
+      entitlementsToken: "tok_abc",
+    })),
+  });
+  await sw.ready;
+
+  await waitFor(() => sw.purchases.getEntitlementsToken() === "tok_abc");
+  expect(sw.entitlementsToken.value).toBe("tok_abc");
+  await sw.dispose();
+});
+
+test("entitlementsToken is null when the backend omits it (best-effort)", async () => {
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      entitlements: [{ id: "pro", isActive: true }],
+    })),
+  });
+  await sw.ready;
+
+  // Let the onConfigured refresh settle; token must stay null, not throw.
+  await waitFor(() => sw.subscriptionStatus.value.status === "ACTIVE");
+  expect(sw.purchases.getEntitlementsToken()).toBeNull();
+  await sw.dispose();
+});
+
+test("reset() clears the entitlements token", async () => {
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      entitlements: [{ id: "pro", isActive: true }],
+      entitlementsToken: "tok_abc",
+    })),
+  });
+  await sw.ready;
+  await waitFor(() => sw.purchases.getEntitlementsToken() === "tok_abc");
+
+  await sw.reset();
+  await tick();
+  expect(sw.purchases.getEntitlementsToken()).toBeNull();
+  expect(sw.entitlementsToken.value).toBeNull();
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
 // events
 // ---------------------------------------------------------------------------
 
@@ -472,14 +570,32 @@ const presenterThatResolves = (
   };
 };
 
-test("register without a presenter returns { type: 'error', error: NoPresenterRegisteredError }", async () => {
-  const sw = makeWithPaywall();
-  await sw.ready;
-  const r = await sw.register({ placement: "checkout" });
-  expect(r.type).toBe("error");
-  if (r.type === "error") {
-    expect(r.error).toBeInstanceOf(NoPresenterRegisteredError);
+test("register with no DOM + no presenter returns NoPresenterRegisteredError", async () => {
+  // With a DOM, no-presenter falls back to the default browser presenter.
+  // Without one (SSR / headless), there's nothing to present → error.
+  const realDoc = (globalThis as { document?: unknown }).document;
+  delete (globalThis as { document?: unknown }).document;
+  try {
+    const sw = makeWithPaywall();
+    await sw.ready;
+    const r = await sw.register({ placement: "checkout" });
+    expect(r.type).toBe("error");
+    if (r.type === "error") {
+      expect(r.error).toBeInstanceOf(NoPresenterRegisteredError);
+    }
+    await sw.dispose();
+  } finally {
+    (globalThis as { document?: unknown }).document = realDoc;
   }
+});
+
+test("register with a per-call presenter override uses it (no create-time presenter)", async () => {
+  const presenter = presenterThatResolves({ type: "purchased", productId: "pro_yearly" });
+  const sw = makeWithPaywall(); // no presenter at construction
+  await sw.ready;
+  const r = await sw.register({ placement: "checkout", presenter });
+  expect(r.type).toBe("presented");
+  expect(presenter.presented.length).toBe(1);
   await sw.dispose();
 });
 
@@ -509,6 +625,73 @@ test("register: ACTIVE subscription → skipped { type: 'userSubscribed' } and r
   expect(skipReason).toEqual({ type: "userSubscribed" });
   expect(featureRan).toBe(true);
   expect(presenter.presented).toHaveLength(0);
+  await sw.dispose();
+});
+
+test("register({ paywall }) renders a custom paywall, fires lifecycle, and controller.buy resolves purchased", async () => {
+  // Custom PurchaseController so controller.buy actually resolves (the
+  // default one would await an iframe checkout that never comes).
+  const customController = {
+    purchase: async () => ({ type: "purchased" as const }),
+    restorePurchases: async () => ({ type: "restored" as const }),
+  };
+  const sw = makeWithPaywall({ purchaseController: customController });
+  await sw.ready;
+
+  const lifecycle: string[] = [];
+  sw.events.addEventListener("paywall_open", () => lifecycle.push("open"));
+  sw.events.addEventListener("paywall_close", () => lifecycle.push("close"));
+
+  let captured: {
+    state: import("./presenter.ts").CustomPaywallState;
+    controller: import("./presenter.ts").CustomPaywallController;
+  } | null = null;
+
+  const r = await sw.register({
+    placement: "checkout",
+    paywall: ({ state, controller }) => {
+      // Mirror the React wrapper: subscribe + drive the controller.
+      const unsub = state.subscribe((s) => {
+        captured = { state: s, controller };
+      });
+      // Buy on next tick.
+      queueMicrotask(() =>
+        controller.buy({ id: "pro_yearly", store: "stripe", entitlements: [] }),
+      );
+      return () => unsub();
+    },
+  });
+
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") {
+    expect(r.result.type).toBe("purchased");
+  }
+  expect(lifecycle).toEqual(["open", "close"]);
+  // Custom renderer saw products from config.
+  expect(captured).not.toBeNull();
+  await sw.dispose();
+});
+
+test("register({ paywall }) controller.close resolves declined + tears down", async () => {
+  const customController = {
+    purchase: async () => ({ type: "purchased" as const }),
+    restorePurchases: async () => ({ type: "restored" as const }),
+  };
+  const sw = makeWithPaywall({ purchaseController: customController });
+  await sw.ready;
+  let teardownCalled = false;
+  const r = await sw.register({
+    placement: "checkout",
+    paywall: ({ controller }) => {
+      queueMicrotask(() => controller.close());
+      return () => {
+        teardownCalled = true;
+      };
+    },
+  });
+  expect(r.type).toBe("presented");
+  if (r.type === "presented") expect(r.result.type).toBe("declined");
+  expect(teardownCalled).toBe(true);
   await sw.dispose();
 });
 

@@ -1,5 +1,5 @@
-import { test, expect, beforeEach } from "bun:test";
-import { act, render, fireEvent } from "@testing-library/react";
+import { test, expect, beforeEach, afterEach } from "bun:test";
+import { act, render, fireEvent, cleanup } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import type {
   PaywallPresenter,
@@ -24,8 +24,57 @@ const flush = async () => {
   await tick();
 };
 
-const noopFetch = (() =>
-  Promise.resolve(new Response("", { status: 204 }))) as unknown as typeof fetch;
+// React 19 + `IS_REACT_ACT_ENVIRONMENT=true` does NOT flush the initial mount
+// synchronously when `render()` is called outside `act()` — the container
+// stays empty until an `act` runs. Wrap the initial render in act so the
+// first commit lands before queries run. (provider.test.tsx already does
+// this inline; this is the shared helper for the hook tests.)
+const renderAct = async <T,>(ui: React.ReactElement): Promise<ReturnType<typeof render>> => {
+  let result!: ReturnType<typeof render>;
+  await act(async () => {
+    result = render(ui);
+    await flush();
+  });
+  return result;
+};
+
+// static_config with `checkout` + `x` placements → `pw_default`, so
+// register() can actually evaluate + present. Other endpoints 204.
+const CONFIG = JSON.stringify({
+  build_id: "test_build",
+  trigger_options: ["checkout", "x"].map((event_name) => ({
+    event_name,
+    rules: [
+      {
+        experiment_id: `exp_${event_name}`,
+        experiment_group_id: "grp",
+        expression_cel: "",
+        variants: [
+          {
+            variant_id: "var_default",
+            variant_type: "TREATMENT",
+            percentage: 100,
+            paywall_identifier: "pw_default",
+          },
+        ],
+      },
+    ],
+  })),
+  paywall_responses: [
+    { identifier: "pw_default", name: "Default", url: "https://paywalls.test/pw_default" },
+  ],
+  products: [],
+  toggles: [],
+  localization: { locales: [{ locale: "en-US" }] },
+});
+
+const noopFetch = ((input: RequestInfo | URL) => {
+  const url = typeof input === "string" ? input : input.toString();
+  if (url.includes("/api/v1/static_config")) {
+    return Promise.resolve(new Response(CONFIG));
+  }
+  return Promise.resolve(new Response("", { status: 204 }));
+}) as unknown as typeof fetch;
 
 const newAdapter = (): StorageAdapter => {
   const m = new Map<string, string>();
@@ -42,6 +91,13 @@ const newAdapter = (): StorageAdapter => {
     },
   };
 };
+
+// Unmount React trees BEFORE disposing the SDK instances they reference —
+// otherwise a leaked tree from a prior test re-renders against a disposed
+// instance and throws (manifesting as an empty container in the next test).
+afterEach(() => {
+  cleanup();
+});
 
 beforeEach(() => {
   _resetProviderRegistry();
@@ -63,7 +119,7 @@ test("useSignal returns the current value and re-renders on change", async () =>
     return <span data-testid="id">{id}</span>;
   };
 
-  const { getByTestId, getByText } = render(
+  const { getByTestId, getByText } = await renderAct(
     <Wrap>
       <Display />
       <ActionButton onClick={(sw) => sw.user.identify("u_42")} label="login" />
@@ -114,7 +170,7 @@ test("useUser exposes id/aliasId/effectiveId/isLoggedIn and updates on identify/
       </div>
     );
   };
-  const { getByTestId, getByText } = render(
+  const { getByTestId, getByText } = await renderAct(
     <Wrap><Display /></Wrap>,
   );
   await act(async () => { await flush(); });
@@ -161,7 +217,7 @@ test("useUser.subscriptionStatus + entitlements update after setSubscriptionStat
       </button>
     );
   };
-  const { getByTestId, getByText } = render(
+  const { getByTestId, getByText } = await renderAct(
     <Wrap><Display /><Trigger /></Wrap>,
   );
   await act(async () => { await flush(); });
@@ -203,13 +259,19 @@ test("usePlacement reflects presented + dismissed state and routes handler callb
     return (
       <div>
         <span data-testid="state">{state.type}</span>
-        <button onClick={() => void register({ placement: "checkout" })}>go</button>
+        <button
+          onClick={() =>
+            void register({ placement: "checkout", presenter: stubPresenter })
+          }
+        >
+          go
+        </button>
       </div>
     );
   };
 
-  const { getByTestId, getByText } = render(
-    <SuperwallProvider apiKey="pk_test_p" fetch={noopFetch} storage={newAdapter()} presenter={stubPresenter}>
+  const { getByTestId, getByText } = await renderAct(
+    <SuperwallProvider apiKey="pk_test_p" fetch={noopFetch} storage={newAdapter()}>
       <Comp />
     </SuperwallProvider>,
   );
@@ -230,8 +292,15 @@ test("usePlacement reflects presented + dismissed state and routes handler callb
   expect(onDismissCount).toBe(1);
 });
 
-test("usePlacement returns { type: 'entitled' } and resets state to idle", async () => {
+test("usePlacement: ACTIVE subscription → register returns skipped(userSubscribed)", async () => {
+  // When the user is already entitled, register() skips the paywall with
+  // PaywallSkippedReason.UserIsSubscribed (not a distinct "entitled" result —
+  // that was an earlier API shape). usePlacement reflects it as state=skipped.
+  let lastType = "";
+  let captured: ReturnType<typeof useSuperwall> | null = null;
   const Comp = () => {
+    const sw = useSuperwall();
+    captured = sw;
     const { register, state } = usePlacement();
     return (
       <div>
@@ -239,7 +308,7 @@ test("usePlacement returns { type: 'entitled' } and resets state to idle", async
         <button
           onClick={async () => {
             const r = await register({ placement: "x" });
-            expect(r.type).toBe("entitled");
+            lastType = r.type;
           }}
         >
           go
@@ -247,22 +316,20 @@ test("usePlacement returns { type: 'entitled' } and resets state to idle", async
       </div>
     );
   };
-  const Setup = () => {
-    const sw = useSuperwall();
-    useEffect(() => {
-      sw.purchases.setSubscriptionStatus({
-        status: "ACTIVE",
-        entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: [] }],
-      });
-    }, [sw]);
-    return null;
-  };
-  const { getByTestId, getByText } = render(
-    <Wrap><Setup /><Comp /></Wrap>,
-  );
+  const { getByTestId, getByText } = await renderAct(<Wrap><Comp /></Wrap>);
   await act(async () => { await flush(); });
+  // Set ACTIVE deterministically (and flush) before registering, so the
+  // userSubscribed skip is in effect by click time.
+  await act(async () => {
+    captured!.purchases.setSubscriptionStatus({
+      status: "ACTIVE",
+      entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: [] }],
+    });
+    await flush();
+  });
   await act(async () => { fireEvent.click(getByText("go")); await flush(); });
-  expect(getByTestId("state").textContent).toBe("idle");
+  expect(lastType).toBe("skipped");
+  expect(getByTestId("state").textContent).toBe("skipped");
 });
 
 // ---------------------------------------------------------------------------
@@ -283,7 +350,7 @@ test("useSuperwallEvent attaches a typed listener and auto-detaches on unmount",
     return show ? <Listener /> : null;
   };
 
-  const { rerender } = render(<Wrap><Conditional /></Wrap>);
+  const { rerender } = await renderAct(<Wrap><Conditional /></Wrap>);
   await act(async () => { await flush(); });
 
   // Lifecycle events fired during configure should appear.
@@ -324,7 +391,7 @@ test("useDelegate installs a delegate for the lifetime of the component", async 
       </button>
     );
   };
-  const { getByText } = render(<Wrap><Comp /></Wrap>);
+  const { getByText } = await renderAct(<Wrap><Comp /></Wrap>);
   await act(async () => { await flush(); });
 
   await act(async () => { fireEvent.click(getByText("toggle")); await flush(); });
@@ -350,7 +417,7 @@ test("useSignal: unstable signal identity per render doesn't trigger infinite re
     const id = useSignal(wrappedSignal);
     return <span data-testid="id">{id}</span>;
   };
-  render(<Wrap><Display /></Wrap>);
+  await renderAct(<Wrap><Display /></Wrap>);
   await act(async () => { await flush(); });
   // A single mount should produce a bounded number of renders. Without the
   // fix, this would balloon. Allow some slack for double-renders in test env.
@@ -389,7 +456,7 @@ test("useDelegate: unmounting one of two stacked hooks leaves the other installe
       </>
     );
   };
-  const { rerender, getByText } = render(
+  const { rerender, getByText } = await renderAct(
     <Wrap><Wrapper showB={true} /></Wrap>,
   );
   await act(async () => { await flush(); });
@@ -404,8 +471,10 @@ test("useDelegate: unmounting one of two stacked hooks leaves the other installe
   // should be unchanged — top stays installed.
   // We can't selectively unmount A or B here; rerender drops B. So if B is
   // the top, after unmount A becomes top; if A is the top, A stays top.
-  rerender(<Wrap><Wrapper showB={false} /></Wrap>);
-  await act(async () => { await flush(); });
+  await act(async () => {
+    rerender(<Wrap><Wrapper showB={false} /></Wrap>);
+    await flush();
+  });
   await act(async () => { fireEvent.click(getByText("toggle")); await flush(); });
   expect(calls).toHaveLength(2);
   // Whichever survives must be A — only A is mounted now.

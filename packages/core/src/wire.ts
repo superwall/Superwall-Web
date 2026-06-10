@@ -8,6 +8,11 @@ export interface WebEntitlementsResponse {
     entitlements?: ReadonlyArray<WireEntitlement>;
   };
   readonly entitlements?: ReadonlyArray<WireEntitlement>;
+  /** Short-lived (≈1h) Superwall-signed JWT asserting the active entitlements,
+   *  for offline server-side verification via `@superwall/verify`. Best-effort:
+   *  the backend omits it when signing is unavailable (e.g. no key configured
+   *  in that environment), so treat its absence gracefully. */
+  readonly entitlementsToken?: string;
 }
 
 export interface WireEntitlement {

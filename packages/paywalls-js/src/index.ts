@@ -32,6 +32,12 @@ export type {
   PaywallPresenter,
   PresentationContext,
   SuperwallEventEmit,
+  CustomPaywallState,
+  CustomPaywallController,
+  CustomPaywallMount,
+  CustomPaywallRenderer,
+  CustomPaywallTransactionPhase,
+  CustomPaywallRestorationPhase,
 } from "./presenter.ts";
 // Tree-shakeable namespace proxies bound to the default (first-created) instance.
 export {

@@ -9,7 +9,35 @@ Two categories:
 
 Each item links the relevant `API.md` section where applicable.
 
-> **Major separate workstream:** `@superwall/server` + hardened security model. The browser SDK's local subscription state is trivially writable from DevTools, so any developer using `register({ feature })` as a real access gate is one console line away from being bypassed. The fix is a server-side SDK that gates routes via Superwall's existing `/entitlements` endpoint, plus a docs reframe making client-side gating cosmetic-only. Full design — threat model, package layout, server SDK API surface, browser SDK changes, backend changes, rollout phases — lives in [`SERVER_SDK.md`](./SERVER_SDK.md). Not tracked in the v0 → v1 lists below because it's a new product surface, not deferred v0 scope.
+---
+
+## 🆕 Embedded Stripe checkout + custom paywalls (this iteration)
+
+The Web SDK now drives the real `{tenant}` paywall + embedded Stripe checkout end-to-end. Landed:
+
+- **register() is the top-level entry** (`sw.register(...)`, named export `register`) — moved off `sw.placements.register`.
+- **No create-time `presenter`.** The default browser iframe presenter is auto-loaded (lazy dynamic import). Override per call via `register({ presenter })` (full `PaywallPresenter`) or `register({ paywall })` (custom renderer). testMode comes from `options.testModeBehavior` → `ctx.testMode`; presentation style from `register({ overrides: { presentationStyle } })`.
+- **Iframe URL** is `paywall_responses[].url` (weighted `url_config.endpoints` pick), NOT derived from `restore_access_url`. Query params (`client_surface=web-sdk`, identity, `host_origin`, `sdk_version`) + a standard-base64 `#init=<…>` hash carrying `placementSessionToken` (raw pk_*), `apiBase`, `collector{url,identity}`, `checkoutContext`, `products`+`resolveVariables:true`, `application`, `backgroundColorHex`. Shape mirrors `apps/subscriptions-api/.../CheckoutContext.ts` + the controller schema.
+- **post_checkout_complete** (flat + v1-envelope shapes accepted) is the terminal success signal: APC flips `subscriptionStatus` ACTIVE optimistically from config entitlements (resolved by **reference_name** via `extractEntitlementsByReferenceName`, then Stripe-id fallback), then reconciles via `/users/{id}/entitlements`. BE emits `transaction_complete` server-side — SDK does NOT re-emit. A persistent APC subscription handles the flip for the `register()` flow (not just `purchases.purchase`).
+- **Custom paywalls** — `register({ paywall })` + React `useCustomPaywall`, parity-checked against Android `superwall-compose/.../presenter/{Types,PaywallSession,SuperwallCustomPaywall}.kt` (state/transaction/restore phases, controller buy/restore/close, once-guarded dismiss, restore-dismisses-regardless-of-entitlements, feature gating via register's `purchased||restored||nonGated`).
+- **dispose() now stops the APC polling interval** (`PurchaseController.dispose?()`) — was a leaked `setInterval`.
+- **config cache scoped by apiKey**; `cache: no-store` + example proxy cache-busting.
+- React test harness fixed: `renderAct` (React 19 initial-mount flush), `afterEach(cleanup)`, config-returning fetch fixture.
+
+**Still open (BE-side, not SDK):**
+- `/api/proxy/events` not deployed on review-lab (collector pinned to prod proxy as workaround).
+- `subscriptions-api/checkout/session` 400 — in-iframe controller ignores `apiBase`, hits prod.
+- `variables.products` array-vs-record contract (`acceptVariables` `.reduce`).
+- Close button not relayed via `window.parent.postMessage` (WebKit-only inner hop).
+- `products_v2[].entitlements` empty in dashboard config (mapping gap).
+- `"store":"PLAY_STORE"` returned for Stripe products — temporary proxy rewrite hack in `example-browser/src/server.ts` (remove when BE fixes).
+
+**Still open (SDK-side, deferred):**
+- `redirect` checkout directive inside iframe — `redirect_required` handler stubbed (`window.open`), message name unconfirmed with BE.
+- Mid-flight identity change while a paywall is open (postMessage an identity update vs rebuild iframe) — not wired.
+- Custom paywall `controller.buy` on web needs a checkout initiator: with the default automatic controller + no iframe it resolves only when checkout completes elsewhere. A standalone "buy without paywall" needs a consumer `PurchaseController` or a BE create-session-by-product endpoint.
+
+> **Server-side gating — SHIPPED.** The browser SDK's local subscription state is trivially writable from DevTools, so client-side `register({ feature })` is cosmetic-only. The fix is built: **`@superwall/server`** (56 tests, 0 fail) gates routes via Superwall's `/entitlements` endpoint with caching + `requires()` guards, and **`@superwall/verify`** (22 tests, 0 fail) does offline JWT verification of the signed `entitlements_token` against bundled/JWKS keys. Design lives in [`SERVER_SDK.md`](./SERVER_SDK.md) and `packages/verify/SPEC.md`.
 
 ---
 
