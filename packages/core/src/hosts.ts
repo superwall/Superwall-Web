@@ -2,7 +2,7 @@ import type { EnvironmentHosts, NetworkEnvironment } from "./types.ts";
 
 const RELEASE_HOSTS: EnvironmentHosts = {
   base: "api.superwall.me",
-  collector: "collector.superwall.me",
+  collector: "collector.superwall.com",
   enrichment: "enrichment-api.superwall.com",
   subscriptions: "subscriptions-api.superwall.com",
 };

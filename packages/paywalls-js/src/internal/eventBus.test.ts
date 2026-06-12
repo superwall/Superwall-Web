@@ -107,7 +107,7 @@ test("publish posts wire-bound events to the collector", async () => {
   );
 
   expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe("https://collector.superwall.me/api/v1/events");
+  expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
   const body = JSON.parse(calls[0]!.body!);
   expect(body.events).toHaveLength(1);
   expect(body.events[0].event_name).toBe("paywall_close");

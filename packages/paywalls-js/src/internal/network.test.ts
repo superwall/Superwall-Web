@@ -59,7 +59,7 @@ const buildStack = (fetchImpl: typeof fetch, configOverride: Partial<NetworkConf
 
 test("resolveHosts returns the right base/collector/enrichment per env", () => {
   expect(resolveHosts("release").base).toBe("api.superwall.me");
-  expect(resolveHosts("release").collector).toBe("collector.superwall.me");
+  expect(resolveHosts("release").collector).toBe("collector.superwall.com");
   expect(resolveHosts("releaseCandidate").base).toBe("api.superwallcanary.com");
   expect(resolveHosts("developer").base).toBe("api.superwall.dev");
   expect(
@@ -304,7 +304,7 @@ test("postEvents POSTs the §11.4 envelope to the collector host", async () => {
   );
 
   expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe("https://collector.superwall.me/api/v1/events");
+  expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
   expect(calls[0]!.init?.method).toBe("POST");
   expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({ events });
 });

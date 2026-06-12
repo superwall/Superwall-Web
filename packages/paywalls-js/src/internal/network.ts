@@ -435,11 +435,13 @@ export interface EnrichmentResponse {
   readonly device: Record<string, JsonValue | null>;
 }
 
-/** Body of `POST /api/v1/confirm_assignments`. */
+/** Body of `POST /api/v1/confirm_assignments`. Flat snake_case; `experiment_id`
+ *  / `variant_id` are digit-strings (the BE schema is `z.string().regex(/^\d+$/)`
+ *  — a numeric value fails validation). Max 100 entries per call. Idempotent. */
 export interface ConfirmAssignmentsRequest {
   readonly assignments: ReadonlyArray<{
-    readonly experimentId: string;
-    readonly variant: { readonly id: string; readonly type: string };
+    readonly experiment_id: string;
+    readonly variant_id: string;
   }>;
 }
 

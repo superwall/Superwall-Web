@@ -948,11 +948,12 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const all = yield* assignments.getAll();
       if (all.length === 0) return;
       const network = yield* NetworkService;
+      // Flat snake_case, digit-string ids, max 100 per call (BE contract).
       yield* network
         .postConfirmAssignments({
-          assignments: all.map((a) => ({
-            experimentId: a.experimentId,
-            variant: { id: a.variant.id, type: a.variant.type },
+          assignments: all.slice(0, 100).map((a) => ({
+            experiment_id: a.experimentId,
+            variant_id: a.variant.id,
           })),
         })
         .pipe(Effect.catchAll(() => Effect.void));

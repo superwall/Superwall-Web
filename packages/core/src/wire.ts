@@ -16,14 +16,16 @@ export interface WebEntitlementsResponse {
 }
 
 export interface WireEntitlement {
-  id: string;
+  /** BE wire shape uses `identifier`; older/other shapes use `id`. */
+  identifier?: string;
+  id?: string;
   isActive?: boolean;
   productIds?: string[];
   type?: string;
 }
 
 const toDomain = (e: WireEntitlement): Entitlement => ({
-  id: e.id,
+  id: e.identifier ?? e.id ?? "",
   type: "SERVICE_LEVEL",
   isActive: e.isActive ?? false,
   productIds: e.productIds ?? [],
@@ -37,7 +39,16 @@ const toDomain = (e: WireEntitlement): Entitlement => ({
 export const parseEntitlements = (
   res: WebEntitlementsResponse,
 ): Entitlements => {
-  const wire = res.entitlements ?? res.customerInfo?.entitlements ?? [];
+  // The BE sends `entitlements: []` (empty) at the top level and the real
+  // ones under `customerInfo.entitlements`. A plain `??` would pick the
+  // empty top-level array (it isn't nullish) and drop the real ones — so
+  // only fall back to the top level when customerInfo has nothing.
+  const wire =
+    res.customerInfo?.entitlements && res.customerInfo.entitlements.length > 0
+      ? res.customerInfo.entitlements
+      : res.entitlements && res.entitlements.length > 0
+        ? res.entitlements
+        : (res.customerInfo?.entitlements ?? res.entitlements ?? []);
   const all = wire.map(toDomain);
   return {
     active: all.filter((e) => e.isActive),

@@ -30,7 +30,7 @@ The Web SDK now drives the real `{tenant}` paywall + embedded Stripe checkout en
 - `variables.products` array-vs-record contract (`acceptVariables` `.reduce`).
 - Close button not relayed via `window.parent.postMessage` (WebKit-only inner hop).
 - `products_v2[].entitlements` empty in dashboard config (mapping gap).
-- `"store":"PLAY_STORE"` returned for Stripe products — temporary proxy rewrite hack in `example-browser/src/server.ts` (remove when BE fixes).
+- `"store":"PLAY_STORE"` returned for Stripe products (config mis-flags store). The example's temporary proxy rewrite that papered over this is gone (proxy removed — BE now serves CORS); if it resurfaces it's a pure BE fix.
 
 **Still open (SDK-side, deferred):**
 - `redirect` checkout directive inside iframe — `redirect_required` handler stubbed (`window.open`), message name unconfirmed with BE.

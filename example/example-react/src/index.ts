@@ -29,13 +29,13 @@ const SUPERWALL_API_KEY = process.env.SUPERWALL_API_KEY ?? "pk_ZNLGF8AlO2V50YDvC
 const PROXY_HOSTS: Record<string, string> = REVIEW_LAB
   ? {
       api: `https://${REVIEW_LAB}`,
-      collector: "https://collector.superwall.me",
+      collector: "https://collector.superwall.com",
       enrichment: `https://${REVIEW_LAB}`,
       subscriptions: `https://${REVIEW_LAB}`,
     }
   : {
       api: "https://api.superwall.me",
-      collector: "https://collector.superwall.me",
+      collector: "https://collector.superwall.com",
       enrichment: "https://enrichment-api.superwall.com",
       subscriptions: "https://subscriptions-api.superwall.com",
     };
@@ -120,7 +120,7 @@ const sw = Superwall<Request>({
           base: REVIEW_LAB,
           enrichment: REVIEW_LAB,
           subscriptions: REVIEW_LAB,
-          collector: "collector.superwall.me",
+          collector: "collector.superwall.com",
         },
       }
     : "release",

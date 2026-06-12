@@ -81,7 +81,7 @@ test("buildInitPayload includes all controller-required slices + resolveVariable
     bootstrap: {
       apiKey: "pk_test",
       sdkVersion: "1.0.0",
-      collector: "https://collector.superwall.me",
+      collector: "https://collector.superwall.com",
       apiBase: "https://api.superwall.me",
       clientSurface: "web-sdk",
       hostOrigin: "https://merchant.test",
@@ -2113,15 +2113,13 @@ test("configure: POSTs confirm_assignments after eager assignment", async () => 
   );
   expect(confirmCall).toBeDefined();
   const body = JSON.parse(confirmCall!.body!) as {
-    assignments: Array<{
-      experimentId: string;
-      variant: { id: string; type: string };
-    }>;
+    assignments: Array<{ experiment_id: string; variant_id: string }>;
   };
   expect(body.assignments).toHaveLength(1);
+  // Flat snake_case, variant.id flattened, type dropped (BE contract).
   expect(body.assignments[0]).toEqual({
-    experimentId: "exp_checkout_0",
-    variant: { id: "v_a", type: "treatment" },
+    experiment_id: "exp_checkout_0",
+    variant_id: "v_a",
   });
   await sw.dispose();
 });

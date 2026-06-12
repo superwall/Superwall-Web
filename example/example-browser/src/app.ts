@@ -16,67 +16,29 @@ import { createBrowserStorage } from "@superwall/paywalls-js/browser";
 
 const apiKey = "pk_ZNLGF8AlO2V50YDvC1y0c";
 
-// Review-lab override: when this host is set, the SDK builds URLs against
-// it (via `networkEnvironment.custom`) AND the local proxy forwards there
-// (server.ts reads SW_REVIEW_LAB_HOST). Keep both in sync — same string
-// here as in the env var.
+// Review-lab host. The SDK builds URLs against it via `networkEnvironment.custom`
+// and fetches it directly — the BE now returns CORS headers for browser
+// origins, so no local proxy is needed.
 const REVIEW_LAB =
   "ir-feat-web-sdk-support.prd.us-east-1.review-lab.superwall-services.com";
 
-// Superwall BE doesn't return CORS headers for browser origins, so route
-// every API call through the local Bun proxy (see server.ts). The proxy
-// rewrites prod hosts AND review-lab → /proxy/* so flipping REVIEW_LAB
-// requires no per-host wiring.
-const PROXY_BASE = location.origin;
-const PROXY_REWRITES: Array<[RegExp, string]> = [
-  [/^https:\/\/subscriptions-api\.superwall\.dev/, `${PROXY_BASE}/proxy/subscriptions`],
-  [new RegExp(`^https://${REVIEW_LAB}`), `${PROXY_BASE}/proxy/api`],
-  [/^https:\/\/api\.superwall\.me/, `${PROXY_BASE}/proxy/api`],
-  [/^https:\/\/collector\.superwall\.me/, `${PROXY_BASE}/proxy/collector`],
-  [/^https:\/\/enrichment-api\.superwall\.com/, `${PROXY_BASE}/proxy/enrichment`],
-  [/^https:\/\/subscriptions-api\.superwall\.com/, `${PROXY_BASE}/proxy/subscriptions`],
-];
-
-const proxiedFetch: typeof fetch = (input, init) => {
-  const original =
-    typeof input === "string"
-      ? input
-      : input instanceof URL
-        ? input.toString()
-        : input.url;
-  let rewritten = original;
-  for (const [pattern, replacement] of PROXY_REWRITES) {
-    if (pattern.test(rewritten)) {
-      rewritten = rewritten.replace(pattern, replacement);
-      break;
-    }
-  }
-  if (rewritten === original) {
-    return globalThis.fetch(input, init);
-  }
-  // Re-issue with the rewritten URL but preserve the request init.
-  return globalThis.fetch(rewritten, init);
-};
-
 const sw = createSuperwall({
   apiKey,
-  fetch: proxiedFetch,
   storage: createBrowserStorage(),
   // No `presenter` — the SDK uses the default browser iframe presenter
   // automatically. Pass a custom one (or a `paywall` render callback) per
   // `register()` call when you need to override.
   options: {
     testModeBehavior: "always",
-    // Point all four upstreams at the review-lab. The SDK's own fetches
-    // are rewritten through the local proxy by `proxiedFetch` above; the
-    // value here also drives `apiBase` / `collector` in the iframe's
-    // `#init=` hash so the in-iframe controller's fetches land on the
-    // same backend (those go direct, no proxy possible cross-origin).
+    // Point the upstreams at the review-lab; the SDK fetches them directly
+    // (CORS-enabled). These values also drive `apiBase` / `collector` in
+    // the iframe's `#init=` hash so the in-iframe controller hits the same
+    // backend.
     networkEnvironment: {
       custom: {
         base: REVIEW_LAB,
         // Collector stays on prod — review-lab doesn't ingest events.
-        collector: "collector.superwall.me",
+        collector: "collector.superwall.com",
         enrichment: REVIEW_LAB,
         // Review-lab branch doesn't mount /subscriptions-api/*. Point at the
         // dev subscriptions host instead.

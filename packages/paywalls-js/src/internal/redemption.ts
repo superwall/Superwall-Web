@@ -63,12 +63,21 @@ const entitlementsFromResponse = (
     (res as RedeemResponse).customerInfo?.entitlements ??
     (res as WebEntitlementsResponse).entitlements ??
     [];
-  return list.map((e) => ({
-    id: e.id,
-    type: "SERVICE_LEVEL" as const,
-    isActive: e.isActive ?? true,
-    productIds: e.productIds ?? [],
-  }));
+  return list.map((e) => {
+    const ent = e as {
+      id?: string;
+      identifier?: string;
+      isActive?: boolean;
+      productIds?: string[];
+    };
+    return {
+      // BE wire uses `identifier`; tolerate `id` too.
+      id: ent.identifier ?? ent.id ?? "",
+      type: "SERVICE_LEVEL" as const,
+      isActive: ent.isActive ?? true,
+      productIds: ent.productIds ?? [],
+    };
+  });
 };
 
 /** Project a SubscriptionStatus from an entitlement set. */
@@ -155,11 +164,20 @@ const make = Effect.gen(function* () {
           Effect.catchAll(() => Effect.succeed(null)),
         );
         if (!snap) return null;
+        // The `/users/{id}/entitlements` path id MUST match the identity the
+        // checkout was attributed to (the iframe `#init=` collector.identity
+        // userId), or the BE returns the entitlement as inactive. That userId
+        // is `appUserId` when logged in, else the `aliasId` — NOT the
+        // deviceId. (Anonymous purchases are keyed to the alias.)
+        const queryUserId =
+          snap.appUserId !== ""
+            ? (snap.appUserId as string)
+            : (snap.aliasId as string);
         const result = yield* network
           .getWebEntitlements({
             // Vendor UUID under `deviceId` per Android wire shape.
             deviceId: snap.vendorId as string,
-            ...(snap.appUserId !== "" && { userId: snap.appUserId as string }),
+            ...(queryUserId && { userId: queryUserId }),
           })
           .pipe(
             Effect.tapError((err) =>
