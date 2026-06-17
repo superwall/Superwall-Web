@@ -2355,8 +2355,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           );
           const computed = yield* ComputedProperties;
           yield* computed.reset();
-          const config = yield* ConfigService;
-          yield* config.reset();
           const bus = yield* EventBus;
           yield* bus.publish("reset", {});
           yield* IdentityService.endPending(IdentityPending.Reset);
