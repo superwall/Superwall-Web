@@ -769,6 +769,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     }
 
     yield* hydrateCounters();
+    yield* hydrateSubscriptionStatus();
 
     // Auto-context for every wire-emitted event. Merged under caller params
     // so explicit keys always win. `$presentation_id` is empty between
@@ -914,6 +915,44 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         if (!Number.isNaN(ms)) lastPaywallViewAtSig.set(ms);
       }
     });
+
+  /** Replay the last cached `SubscriptionStatus` so a page reopen shows it
+   *  immediately instead of UNKNOWN. The `/entitlements` refresh (APC
+   *  onConfigured) reconciles it shortly after. Only ACTIVE/INACTIVE are
+   *  cached — UNKNOWN is the un-set placeholder, never persisted. */
+  const hydrateSubscriptionStatus = () =>
+    Effect.gen(function* () {
+      const storage = yield* StorageService;
+      const raw = yield* storage
+        .get(asStorageKey(STORAGE_KEYS.subscriptionStatus))
+        .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
+      if (raw === null) return;
+      try {
+        const parsed = JSON.parse(raw) as SubscriptionStatus;
+        if (parsed.status === "ACTIVE" || parsed.status === "INACTIVE") {
+          subStatusSig.set(parsed);
+        }
+      } catch {
+        /* corrupt cache → ignore, stay UNKNOWN */
+      }
+    });
+
+  /** Persist the resolved subscription status so it survives reloads. Called
+   *  from the single setter path. Skips UNKNOWN (the placeholder). */
+  const persistSubscriptionStatus = (s: SubscriptionStatus): void => {
+    if (s.status === "UNKNOWN") return;
+    runFireAndForget(
+      "transactions",
+      "persist subscriptionStatus failed",
+      Effect.gen(function* () {
+        const storage = yield* StorageService;
+        yield* storage.set(
+          asStorageKey(STORAGE_KEYS.subscriptionStatus),
+          JSON.stringify(s),
+        );
+      }),
+    );
+  };
 
   /** Increment paywall-view counters and persist. Called after every
    *  successful `paywall_open`. */
@@ -1575,6 +1614,12 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           user: attrsSig.value as Record<string, unknown>,
           device: snapshotDeviceAttributes(),
           onPurchaseEvent: (ev) => {
+            // Capture the signed entitlements JWT from the terminal success
+            // message so `sw.entitlementsToken` is populated for the web-sdk
+            // checkout flow (the `/entitlements` read is best-effort about it).
+            if (ev.type === "postCheckout" && ev.entitlementsToken) {
+              entitlementsTokenSig.set(ev.entitlementsToken);
+            }
             paywallPurchaseEventHandlers.forEach((h) => {
               try { h(ev); } catch {}
             });
@@ -1978,19 +2023,27 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         if (res.entitlementsToken !== undefined) {
           entitlementsTokenSig.set(res.entitlementsToken);
         }
-        const list = res.customerInfo?.entitlements ?? res.entitlements ?? [];
-        return list.map((e) => ({
-          id: e.id,
-          type: "SERVICE_LEVEL" as const,
-          isActive: e.isActive ?? true,
-          productIds: e.productIds ?? [],
-        }));
+        // Prefer customerInfo.entitlements; the top-level array is often an
+        // empty `[]` (not nullish) so `??` alone would pick it and drop the
+        // real ones. BE wire uses `identifier`, tolerate `id`.
+        const ci = res.customerInfo?.entitlements;
+        const list = ci && ci.length > 0 ? ci : (res.entitlements ?? ci ?? []);
+        return list.map((e) => {
+          const ent = e as { id?: string; identifier?: string; isActive?: boolean; productIds?: string[] };
+          return {
+            id: ent.identifier ?? ent.id ?? "",
+            type: "SERVICE_LEVEL" as const,
+            isActive: ent.isActive ?? true,
+            productIds: ent.productIds ?? [],
+          };
+        });
       },
       setSubscriptionStatus: (s) => {
         // Reuse the public-facing setter so delegate / event chain fires.
         const prev = subStatusSig.value;
         if (subscriptionStatusEqual(prev, s)) return;
         subStatusSig.set(s);
+        persistSubscriptionStatus(s);
         runFireAndForget(
           "transactions",
           "controller.setSubscriptionStatus delegate/publish failed",
@@ -2052,6 +2105,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const prev = subStatusSig.value;
       if (subscriptionStatusEqual(prev, s)) return;
       subStatusSig.set(s);
+      persistSubscriptionStatus(s);
       runFireAndForget(
         "superwallCore",
         "setSubscriptionStatus(): delegate/publish failed",
@@ -2267,8 +2321,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       );
     },
 
-    reset: () =>
-      runPublic(
+    reset: async () => {
+      await runPublic(
         Effect.gen(function* () {
           yield* IdentityService.beginPending(IdentityPending.Reset);
           yield* IdentityService.reset();
@@ -2294,6 +2348,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* storage.remove(
             asStorageKey(STORAGE_KEYS.lastPaywallViewAt),
           );
+          // Clear cached sub status so a stale ACTIVE doesn't re-hydrate on
+          // the next configure() (reset just flipped it to UNKNOWN).
+          yield* storage.remove(
+            asStorageKey(STORAGE_KEYS.subscriptionStatus),
+          );
           const computed = yield* ComputedProperties;
           yield* computed.reset();
           const config = yield* ConfigService;
@@ -2302,7 +2361,23 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* bus.publish("reset", {});
           yield* IdentityService.endPending(IdentityPending.Reset);
         }) as Effect.Effect<void, unknown, never>,
-      ),
+      );
+      // Identity changed → re-run the post-configure entitlements check for
+      // the new (anonymous) identity. Reset left status at UNKNOWN; this
+      // resolves it to INACTIVE (no entitlements) or ACTIVE (device-scoped
+      // ones) instead of waiting for the next poll. Best-effort.
+      if (purchaseController.onConfigured) {
+        await purchaseController
+          .onConfigured()
+          .catch((cause: unknown) =>
+            logViaRuntime(
+              "transactions",
+              "purchaseController.onConfigured (post-reset) failed",
+              cause,
+            ),
+          );
+      }
+    },
 
     dismiss: (reason: PaywallCloseReason = "systemLogic") => {
       // Stash the reason so the register() finally-block can read it and

@@ -175,6 +175,9 @@ export type PaywallPurchaseEvent =
         value?: number;
       };
       redirectUrl?: string;
+      /** Signed entitlements JWT for offline server-side verification
+       *  (`@superwall/verify`). Best-effort — absent when the BE didn't sign. */
+      entitlementsToken?: string;
     };
 
 export interface PaywallPresenter {

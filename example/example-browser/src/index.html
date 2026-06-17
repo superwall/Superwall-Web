@@ -189,6 +189,7 @@
           <div class="row"><span class="k">user.effectiveId</span><span class="v" id="s-user-effective">—</span></div>
           <div class="row"><span class="k">subscriptionStatus</span><span class="v" id="s-sub">—</span></div>
           <div class="row"><span class="k">isPaywallPresented</span><span class="v" id="s-presented">—</span></div>
+          <div class="row"><span class="k">entitlementsToken</span><span class="v" id="s-token" style="word-break: break-all; font-family: monospace; font-size: 11px;">—</span></div>
         </div>
       </section>
 
@@ -202,9 +203,17 @@
           <button data-act="register" class="primary">Register home placement</button>
           <button data-act="dismiss">Dismiss</button>
           <button data-act="reset">Reset</button>
+          <button data-act="verifyToken">Verify entitlements token (server)</button>
         </div>
         <h2 style="margin-top: 16px;">Last register() result</h2>
         <div id="last-result">—</div>
+        <h2 style="margin-top: 16px;">Offline token verification</h2>
+        <p style="margin: 0 0 8px; color: var(--muted); font-size: 12px;">
+          POSTs <code>sw.entitlementsToken</code> to <code>/api/verify-token</code>,
+          which checks the ES256 signature offline via <code>@superwall/verify</code>
+          (no <code>/entitlements</code> round-trip).
+        </p>
+        <pre id="verify-output">—</pre>
       </section>
 
       <section class="panel" id="entitled-panel" hidden>

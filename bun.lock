@@ -16,6 +16,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@superwall/paywalls-js": "workspace:*",
+        "@superwall/verify": "workspace:*",
       },
     },
     "example/example-react": {
@@ -28,6 +29,7 @@
         "@superwall/paywalls-js": "workspace:*",
         "@superwall/paywalls-react": "workspace:*",
         "@superwall/server": "workspace:*",
+        "@superwall/verify": "workspace:*",
         "bun-plugin-tailwind": "^0.1.2",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",

@@ -776,10 +776,12 @@ const handleInbound = (
           readTransactionField(evt, "productIdentifier") ??
           "";
         const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
+        const entitlementsToken = readString(evt, "entitlements_token");
         ctx.onPurchaseEvent?.({
           type: "postCheckout",
           productId,
           checkoutContextId,
+          ...(entitlementsToken !== null && { entitlementsToken }),
         });
         cleanup();
         resolve({ type: "purchased", productId });

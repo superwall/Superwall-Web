@@ -527,6 +527,10 @@ export const STORAGE_KEYS = {
   /** Latest redemption response (JSON-encoded). Replayed on configure so
    *  the entitlements granted via web checkout survive page reloads. */
   latestRedemption: "superwall.latestRedemption",
+  /** Last known `SubscriptionStatus` (JSON-encoded ACTIVE/INACTIVE only).
+   *  Replayed on configure so reopening the page shows the cached status
+   *  immediately instead of UNKNOWN until the `/entitlements` refresh lands. */
+  subscriptionStatus: "superwall.subscriptionStatus",
   /** Last shown survey's `assignmentKey`. Dedupes survey presentation —
    *  the SDK never re-shows for the same key once it's persisted. */
   surveyAssignmentKey: "superwall.surveyAssignmentKey",

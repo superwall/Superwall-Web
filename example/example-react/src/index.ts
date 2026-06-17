@@ -1,5 +1,6 @@
 import { serve } from "bun";
 import { Superwall } from "@superwall/server";
+import { verifyEntitlements } from "@superwall/verify";
 import index from "./index.html";
 
 type Rarity = "Common" | "Rare" | "Epic" | "Legendary";
@@ -190,6 +191,40 @@ const server = serve({
   routes: {
     "/": index,
     "/api/horses": () => json({ horses }),
+    // Offline-verify path: the client sends the signed `entitlements_token`
+    // (sw.entitlementsToken); the server verifies the ES256 signature locally
+    // via @superwall/verify — no /entitlements round-trip. Contrast with
+    // `requireSubscription` below, which gates via the server SDK's network
+    // `/entitlements` read.
+    "/api/verify-token": {
+      async POST(req) {
+        const body = (await req.json().catch(() => null)) as
+          | { token?: string }
+          | null;
+        if (!body?.token) {
+          return json({ error: "token_required" }, { status: 400 });
+        }
+        try {
+          const result = await verifyEntitlements(body.token, {
+            publicApiKey: SUPERWALL_API_KEY,
+          });
+          return json({
+            verified: true,
+            entitlements: result.entitlements,
+            hasPro: result.entitlements.some((e) => e.identifier === "pro"),
+          });
+        } catch (error) {
+          return json(
+            {
+              verified: false,
+              error: error instanceof Error ? error.name : "verify_failed",
+              message: error instanceof Error ? error.message : String(error),
+            },
+            { status: 401 },
+          );
+        }
+      },
+    },
     "/api/collection": {
       GET(req) {
         const userId = req.headers.get("x-demo-user") ?? "guest";

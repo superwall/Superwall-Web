@@ -272,6 +272,79 @@ test("sw.ready resolves once identity hydrates and lifecycle events fire", async
   await sw.dispose();
 });
 
+test("subscriptionStatus is persisted and replayed on reopen (shared storage)", async () => {
+  const adapter = newAdapter();
+  // First session: go ACTIVE, then dispose (simulates closing the tab).
+  const sw1 = make({ storage: adapter });
+  await sw1.ready;
+  sw1.purchases.setSubscriptionStatus({
+    status: "ACTIVE",
+    entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: ["p"] }],
+  });
+  await tick();
+  expect(await adapter.get("superwall.subscriptionStatus")).toContain("ACTIVE");
+  await sw1.dispose();
+
+  // Second session with the SAME storage: status replays from cache
+  // immediately on ready (not UNKNOWN).
+  const sw2 = make({ storage: adapter });
+  await sw2.ready;
+  expect(sw2.subscriptionStatus.value.status).toBe("ACTIVE");
+  await sw2.dispose();
+});
+
+test("reset() clears the cached subscriptionStatus so it doesn't replay", async () => {
+  const adapter = newAdapter();
+  const sw1 = make({ storage: adapter });
+  await sw1.ready;
+  sw1.purchases.setSubscriptionStatus({
+    status: "ACTIVE",
+    entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: ["p"] }],
+  });
+  await tick();
+  await sw1.reset();
+  await tick();
+  expect(await adapter.get("superwall.subscriptionStatus")).toBeNull();
+  await sw1.dispose();
+
+  const sw2 = make({ storage: adapter });
+  await sw2.ready;
+  expect(sw2.subscriptionStatus.value.status).toBe("UNKNOWN");
+  await sw2.dispose();
+});
+
+test("reset() re-checks entitlements for the new identity → UNKNOWN resolves to INACTIVE", async () => {
+  // Entitlements endpoint returns a valid empty set → the post-reset
+  // re-check should flip UNKNOWN → INACTIVE (not leave it UNKNOWN).
+  const entFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    }
+    if (url.includes("/entitlements")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ entitlements: [], customerInfo: { entitlements: [] } })),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+  const sw = make({ fetch: entFetch });
+  await sw.ready;
+  // Seed an ACTIVE status, then reset.
+  sw.purchases.setSubscriptionStatus({
+    status: "ACTIVE",
+    entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: ["p"] }],
+  });
+  await tick();
+  await sw.reset();
+  // reset awaits onConfigured → immediate /entitlements refresh → INACTIVE.
+  await tick();
+  await new Promise<void>((r) => setTimeout(r, 10));
+  expect(sw.subscriptionStatus.value.status).toBe("INACTIVE");
+  await sw.dispose();
+});
+
 test("identity hydration writes alias + vendor + device into the storage adapter", async () => {
   const adapter = newAdapter();
   const sw = make({ storage: adapter });

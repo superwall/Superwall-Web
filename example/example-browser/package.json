@@ -8,6 +8,7 @@
     "start": "bun src/server.ts"
   },
   "dependencies": {
-    "@superwall/paywalls-js": "workspace:*"
+    "@superwall/paywalls-js": "workspace:*",
+    "@superwall/verify": "workspace:*"
   }
 }

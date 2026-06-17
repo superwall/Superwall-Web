@@ -176,6 +176,12 @@ const cleanupProGate = sw.subscriptionStatus.subscribe((status) => {
 });
 ac.signal.addEventListener("abort", cleanupProGate, { once: true });
 bind(sw.isPaywallPresented, $("#s-presented"), String);
+// Signed entitlements JWT (for offline server-side verification via
+// @superwall/verify). Show a truncated preview; null until a redeem /
+// entitlements read returns one.
+bind(sw.entitlementsToken, $("#s-token"), (t) =>
+  t ? `${t.slice(0, 24)}…${t.slice(-12)} (${t.length} chars)` : "(none)",
+);
 
 const configBadge = $<HTMLDivElement>("#config-badge");
 const cleanupConfig = sw.configurationStatus.subscribe((status) => {
@@ -340,6 +346,29 @@ const handlers: Record<string, () => Promise<void> | void> = {
   reset: async () => {
     await sw.reset();
     setLastResult("—");
+  },
+
+  // Send the signed entitlements JWT to the server for offline verification.
+  verifyToken: async () => {
+    const out = $<HTMLPreElement>("#verify-output");
+    const token = sw.entitlementsToken.value;
+    if (!token) {
+      out.textContent =
+        "No entitlements token yet — purchase or refresh entitlements first.";
+      return;
+    }
+    out.textContent = "Verifying…";
+    try {
+      const res = await fetch("/api/verify-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      out.textContent = fmtPretty(data);
+    } catch (err) {
+      out.textContent = `Request failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
   },
 };
 
