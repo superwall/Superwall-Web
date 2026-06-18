@@ -294,23 +294,6 @@ const handlers: Record<string, () => Promise<void> | void> = {
     );
   },
 
-  // Direct purchase outside a paywall presentation. With the default
-  // automaticPurchaseController, this awaits a `post_checkout_complete`
-  // event for the given product id — so it only resolves if a paywall
-  // is open in parallel and the user completes Stripe checkout. To use
-  // this standalone, supply a custom PurchaseController that initiates
-  // Stripe checkout directly.
-  purchase: async () => {
-    log("calling sw.purchases.purchase(pro_yearly)…");
-    const result = await sw.purchases.purchase({
-      id: "pro_yearly",
-      store: "stripe",
-      entitlements: [],
-    });
-    setLastResult(result);
-    log("purchase resolved:", result);
-  },
-
   // "Pro feature" demo handlers — wired only after the user is entitled.
   genReport: () => {
     const out = document.getElementById("pro-output");

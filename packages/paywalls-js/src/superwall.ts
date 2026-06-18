@@ -211,15 +211,12 @@ export interface PurchasesNamespace {
    *  the backend isn't issuing tokens. For reactive reads, see
    *  `sw.entitlementsToken`. */
   getEntitlementsToken(): string | null;
-  /** Drive a one-shot purchase outside a paywall (e.g. inline upsell button).
-   *  Emits the same lifecycle as a presenter-driven purchase
-   *  Routes through the active `PurchaseController` (default = automatic
-   *  Stripe + redemption flow). `transaction_start` fires before the
-   *  controller call; `transaction_complete` + `subscription_start` on
-   *  success, `transaction_abandon` on cancel, `transaction_fail` on error. */
-  purchase(
-    product: Product,
-  ): Promise<{ type: "purchased" } | { type: "declined" } | { type: "error"; error: Error }>;
+  // NOTE: `purchase(product)` is intentionally hidden for now. With the default
+  // automaticPurchaseController it only resolves while a paywall is presenting
+  // and the user completes Stripe checkout in parallel — standalone it does
+  // nothing useful, so it's not part of the public surface yet. The
+  // implementation lives on internally as `directPurchase` (the custom-paywall
+  // render path needs it); re-expose here once it can initiate checkout itself.
 }
 
 export interface EntitlementsNamespace {
@@ -1861,7 +1858,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     if (args.paywall) {
       return Promise.resolve(
         createCustomPaywallPresenter(args.paywall, {
-          purchase: (product) => purchases.purchase(product),
+          purchase: (product) => directPurchase(product),
           restore: () => runRestore(),
         }),
       );
@@ -2102,6 +2099,64 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       },
     });
 
+  /** One-shot purchase through the active `PurchaseController`. Internal for
+   *  now (see the note on `PurchasesNamespace`): the default controller only
+   *  resolves this while a paywall is presenting, so it isn't exposed publicly.
+   *  Kept alive because the custom-paywall render path (`args.paywall`) wires
+   *  its purchase button through here. */
+  const directPurchase = async (
+    product: Product,
+  ): Promise<
+    { type: "purchased" } | { type: "declined" } | { type: "error"; error: Error }
+  > => {
+    const emit = (
+      name: "transaction_start" | "transaction_complete" | "transaction_abandon" | "transaction_fail" | "subscription_start",
+      detail: Record<string, unknown>,
+    ) =>
+      runtime
+        .runPromise(
+          Effect.gen(function* () {
+            const bus = yield* EventBus;
+            yield* bus.publish(name as never, detail as never);
+          }),
+        )
+        .catch((cause: unknown) =>
+          logViaRuntime("transactions", `bus.publish(${name}) failed`, cause),
+        );
+
+    emit("transaction_start", { product });
+    let result: PurchaseResult;
+    try {
+      result = await purchaseController.purchase(product);
+    } catch (cause) {
+      const err = cause instanceof Error ? cause : new Error(String(cause));
+      logViaRuntime("transactions", "controller.purchase threw", err);
+      emit("transaction_fail", { product, reason: err.message });
+      return { type: "error", error: err };
+    }
+
+    if (result.type === "purchased") {
+      emit("transaction_complete", {
+        product,
+        product_identifier: product.id,
+      });
+      emit("subscription_start", { product });
+      return { type: "purchased" };
+    }
+    if (result.type === "cancelled") {
+      emit("transaction_abandon", { product });
+      return { type: "declined" };
+    }
+    if (result.type === "pending") {
+      // Caller can listen for transaction_complete on the bus to know
+      // when the controller eventually resolves the pending purchase.
+      return { type: "declined" }; // public API doesn't have a "pending" today
+    }
+    // failed
+    emit("transaction_fail", { product, reason: result.error.message });
+    return { type: "error", error: result.error };
+  };
+
   const purchases: PurchasesNamespace = {
     restore: async () => {
       await runRestore();
@@ -2158,57 +2213,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }),
     getCustomerInfo: () => Promise.resolve(customerSig.value),
     getEntitlementsToken: () => entitlementsTokenSig.value,
-    purchase: async (product) => {
-      // Routes through the active PurchaseController. Default implementation
-      // awaits the next stripe_checkout_complete from a presenting paywall.
-      // Custom controllers do their own thing.
-      const emit = (
-        name: "transaction_start" | "transaction_complete" | "transaction_abandon" | "transaction_fail" | "subscription_start",
-        detail: Record<string, unknown>,
-      ) =>
-        runtime
-          .runPromise(
-            Effect.gen(function* () {
-              const bus = yield* EventBus;
-              yield* bus.publish(name as never, detail as never);
-            }),
-          )
-          .catch((cause: unknown) =>
-            logViaRuntime("transactions", `bus.publish(${name}) failed`, cause),
-          );
-
-      emit("transaction_start", { product });
-      let result: PurchaseResult;
-      try {
-        result = await purchaseController.purchase(product);
-      } catch (cause) {
-        const err = cause instanceof Error ? cause : new Error(String(cause));
-        logViaRuntime("transactions", "controller.purchase threw", err);
-        emit("transaction_fail", { product, reason: err.message });
-        return { type: "error", error: err };
-      }
-
-      if (result.type === "purchased") {
-        emit("transaction_complete", {
-          product,
-          product_identifier: product.id,
-        });
-        emit("subscription_start", { product });
-        return { type: "purchased" };
-      }
-      if (result.type === "cancelled") {
-        emit("transaction_abandon", { product });
-        return { type: "declined" };
-      }
-      if (result.type === "pending") {
-        // Caller can listen for transaction_complete on the bus to know
-        // when the controller eventually resolves the pending purchase.
-        return { type: "declined" }; // public API doesn't have a "pending" today
-      }
-      // failed
-      emit("transaction_fail", { product, reason: result.error.message });
-      return { type: "error", error: result.error };
-    },
   };
 
   const entitlements: EntitlementsNamespace = (() => {

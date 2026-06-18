@@ -16,7 +16,12 @@ import type { PaywallPurchaseEvent } from "../presenter.ts";
 
 const REDEMPTION_PARAM = "code";
 const REDEMPTION_PREFIX = "redemption_";
-const POLL_INTERVAL_MS = 60_000;
+// Background entitlements poll cadence. Loose (10 min) because checkout +
+// restore + reset already refresh eagerly; this just catches out-of-band
+// changes (cancellation, cross-device). The interval is paused while the tab
+// is hidden and a fresh read fires on re-focus (see onConfigured), so the
+// effective rate is "every 10 min of foreground time + once on each refocus".
+const POLL_INTERVAL_MS = 10 * 60_000;
 
 export interface AutomaticPurchaseControllerDeps {
   /** Subscribe to in-flight paywall purchase events. Returns unsubscribe. */
@@ -50,6 +55,7 @@ export const createAutomaticPurchaseController = (
   deps: AutomaticPurchaseControllerDeps,
 ): PurchaseController => {
   let stopPolling: (() => void) | null = null;
+  let stopVisibility: (() => void) | null = null;
   /** Apply a refreshed entitlement set verbatim. Both `post_checkout_complete`
    *  and the periodic /entitlements poll are authoritative; they agree by
    *  contract (the BE has committed before either signal fires), so we
@@ -200,35 +206,58 @@ export const createAutomaticPurchaseController = (
       }
     }
 
+    // One refresh + interval (re)start. Best-effort; failures swallowed.
+    const refreshNow = () => {
+      void deps
+        .refreshEntitlements()
+        .then((ents) => {
+          if (ents !== null) applyRefresh(ents);
+        })
+        .catch(() => {});
+    };
+    const startPolling = () => {
+      if (typeof setInterval === "undefined") return;
+      stopPolling?.();
+      const handle = setInterval(refreshNow, POLL_INTERVAL_MS);
+      stopPolling = () => clearInterval(handle);
+    };
+
     // Immediate one-shot fetch so subscriptionStatus flips off UNKNOWN as
     // soon as configure() settles — don't wait the full poll interval.
-    void deps
-      .refreshEntitlements()
-      .then((ents) => {
-        if (ents !== null) applyRefresh(ents);
-      })
-      .catch(() => {});
+    refreshNow();
+    startPolling();
 
-    // Periodic web_entitlements poll. Best-effort; failures swallowed.
-    if (typeof setInterval !== "undefined") {
-      stopPolling?.();
-      const handle = setInterval(() => {
-        void deps
-          .refreshEntitlements()
-          .then((ents) => {
-            if (ents !== null) applyRefresh(ents);
-          })
-          .catch(() => {});
-      }, POLL_INTERVAL_MS);
-      stopPolling = () => clearInterval(handle);
+    // Pause the poll while the tab is hidden (no point hammering /entitlements
+    // in the background — and browsers throttle background timers anyway).
+    // On re-focus, refresh once immediately + restart the interval so the
+    // user always sees fresh state when they come back.
+    if (
+      typeof document !== "undefined" &&
+      typeof document.addEventListener === "function"
+    ) {
+      stopVisibility?.();
+      const onVisibility = () => {
+        if (document.visibilityState === "hidden") {
+          stopPolling?.();
+          stopPolling = null;
+        } else {
+          refreshNow();
+          startPolling();
+        }
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      stopVisibility = () =>
+        document.removeEventListener("visibilitychange", onVisibility);
     }
   };
 
   const dispose = (): void => {
-    // Stop the entitlements-polling interval so the timer (and its fetch
-    // loop) doesn't outlive the SDK instance.
+    // Stop the entitlements-polling interval + visibility listener so neither
+    // the timer (and its fetch loop) nor the listener outlives the instance.
     stopPolling?.();
     stopPolling = null;
+    stopVisibility?.();
+    stopVisibility = null;
   };
 
   return { purchase, restorePurchases, onConfigured, dispose };
