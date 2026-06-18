@@ -279,6 +279,76 @@ test("getStaticConfig surfaces invalid JSON as NetworkDecodingError", async () =
 });
 
 // ---------------------------------------------------------------------------
+// postEnrichment
+// ---------------------------------------------------------------------------
+
+test("postEnrichment POSTs { user, device } to the enrichment host and merges the response", async () => {
+  const { fetch, calls } = mockFetch(
+    () =>
+      new Response(JSON.stringify({ user: { plan: "pro" }, device: {} }), {
+        status: 200,
+      }),
+  );
+  const stack = buildStack(fetch);
+
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const net = yield* NetworkService;
+      return yield* net.postEnrichment({
+        user: { country: "US" },
+        device: { vendorId: "v1" },
+      });
+    }).pipe(Effect.provide(stack)) as Effect.Effect<
+      { user: Record<string, unknown>; device: Record<string, unknown> },
+      never,
+      never
+    >,
+  );
+
+  expect(result.user.plan).toBe("pro");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.url).toBe(
+    "https://enrichment-api.superwall.com/api/v1/enrich",
+  );
+  expect(calls[0]!.init?.method).toBe("POST");
+  expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({
+    user: { country: "US" },
+    device: { vendorId: "v1" },
+  });
+});
+
+test("postEnrichment enforces a hard 1s timeout (NetworkRequestError, no hang)", async () => {
+  // A fetch that never resolves — only the 1s hard ceiling can end the call.
+  const { fetch } = mockFetch(() => new Promise<Response>(() => {}));
+  const stack = buildStack(fetch);
+
+  const start = Date.now();
+  const exit = await Effect.runPromiseExit(
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const net = yield* NetworkService;
+      return yield* net.postEnrichment({ user: {}, device: {} });
+    }).pipe(Effect.provide(stack)) as Effect.Effect<
+      unknown,
+      NetworkRequestError,
+      never
+    >,
+  );
+  const elapsed = Date.now() - start;
+
+  expect(exit._tag).toBe("Failure");
+  if (exit._tag === "Failure") {
+    const err = exit.cause._tag === "Fail" ? exit.cause.error : null;
+    expect(err).toBeInstanceOf(NetworkRequestError);
+    expect((err as NetworkRequestError).message).toContain("timed out");
+  }
+  // Bounded near the 1s budget — proves the call gave up rather than hung.
+  expect(elapsed).toBeGreaterThanOrEqual(900);
+  expect(elapsed).toBeLessThan(2500);
+});
+
+// ---------------------------------------------------------------------------
 // postEvents
 // ---------------------------------------------------------------------------
 

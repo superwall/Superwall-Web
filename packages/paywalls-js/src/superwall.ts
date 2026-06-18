@@ -1043,7 +1043,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       customer?.entitlements
         ?.filter((e) => e.isActive)
         .map((e) => ({ id: e.id, type: "SERVICE_LEVEL" })) ?? [];
-    const activeProducts = customer?.activeSubscriptions ?? [];
+    // Product ids of the customer's active subscriptions. `CustomerInfo` has
+    // no `activeSubscriptions` field — derive from `subscriptions` filtered by
+    // `isActive` (the prior `customer?.activeSubscriptions` always read
+    // `undefined`, so `activeProducts` was always empty in enrichment).
+    const activeProducts =
+      customer?.subscriptions
+        ?.filter((s) => s.isActive)
+        .map((s) => s.productId) ?? [];
     const env = (opts.options?.networkEnvironment ?? "release") as
       | "release"
       | "developer";

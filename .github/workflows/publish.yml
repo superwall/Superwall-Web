@@ -1,0 +1,76 @@
+name: Publish
+
+# Publishes the @superwall/* packages to npm. Runs automatically on merge to
+# main and can be triggered manually (with an optional dry run).
+#
+# Idempotent: a package is only published when its package.json version isn't
+# already on npm — so merges that don't bump a version are no-ops. Bump the
+# version in a package's package.json to release it.
+#
+# Requires the `NPM_TOKEN` repo secret (npm automation token with publish
+# rights to the @superwall scope).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack + resolve but do NOT publish"
+        type: boolean
+        default: false
+
+# Never run two publishes at once.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.1.0"
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun run test
+
+      - name: Configure npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish changed packages
+        run: |
+          set -euo pipefail
+          # Dependency order: dependees before dependents.
+          PACKAGES="core paywalls-js verify server paywalls-react"
+          published=0
+          for pkg in $PACKAGES; do
+            dir="packages/$pkg"
+            name=$(jq -r .name "$dir/package.json")
+            version=$(jq -r .version "$dir/package.json")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "✓ $name@$version already on npm — skipping"
+              continue
+            fi
+            if [ "$DRY_RUN" = "1" ]; then
+              echo "→ [dry run] would publish $name@$version"
+              (cd "$dir" && bun publish --access public --dry-run)
+            else
+              echo "→ publishing $name@$version"
+              (cd "$dir" && bun publish --access public)
+              published=$((published + 1))
+            fi
+          done
+          echo "Published $published package(s)."

@@ -59,7 +59,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@superwall/core": "workspace:*",
-        "@superwall/superscript": "^0.2.5",
+        "@superwall/superscript": "^1.0.2",
         "effect": "^3.18.0",
       },
       "devDependencies": {
@@ -233,7 +233,7 @@
 
     "@superwall/server": ["@superwall/server@workspace:packages/server"],
 
-    "@superwall/superscript": ["@superwall/superscript@0.2.5", "", {}, "sha512-gGU5Qhq7ftUXjyW00a4bO9nd4lpikP/Ec8x6ZcyY6LHxfIjqiMvSdXQS+N4zyr7FnIjIDJt46480T8Wn2xZPNw=="],
+    "@superwall/superscript": ["@superwall/superscript@1.0.2", "", {}, "sha512-6T/UOc1VeV1I2sR6b7Fm5H5RcrEvU4DdUaNjuogbUMo2PkPpBEK2UKtynqYXQQJu5pkZD57B2u8IVdH7YV17uw=="],
 
     "@superwall/verify": ["@superwall/verify@workspace:packages/verify"],
 

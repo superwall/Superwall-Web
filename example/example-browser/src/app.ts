@@ -39,7 +39,9 @@ const sw = createSuperwall({
         base: REVIEW_LAB,
         // Collector stays on prod — review-lab doesn't ingest events.
         collector: "collector.superwall.com",
-        enrichment: REVIEW_LAB,
+        // Enrichment stays on prod — the review-lab branch doesn't mount
+        // /api/v1/enrich (it 404s there). The prod host is CORS-enabled.
+        enrichment: "enrichment-api.superwall.com",
         // Review-lab branch doesn't mount /subscriptions-api/*. Point at the
         // dev subscriptions host instead.
         subscriptions: "subscriptions-api.superwall.dev",

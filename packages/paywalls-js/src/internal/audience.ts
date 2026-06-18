@@ -1,6 +1,8 @@
 // AudienceEvaluator — evaluates `RawAudienceRule.expression` against the
 // user/device/computed-property context via the Superscript CEL/WASM
-// runtime. Empty expression matches all; evaluation errors fail closed.
+// runtime. Empty expression matches all; evaluator errors fail OPEN (treated
+// as a match) so a runtime hiccup presents the paywall rather than silently
+// dropping the placement. An `Err` envelope from a valid eval returns "error".
 
 import { Context, Effect, Layer } from "effect";
 // Lazy + environment-conditional Superscript import: the `/node` entry uses
@@ -14,10 +16,11 @@ import type {
 } from "@superwall/superscript/node";
 
 let evaluatorPromise: Promise<{
+  // Superscript ≥1.0 returns `Promise<string>` (a JSON `{Ok|Err}` envelope).
   evaluateWithContext: (
     input: ExecutionContext,
     host: SuperscriptHostContext,
-  ) => string | boolean;
+  ) => Promise<string> | string | boolean;
 }> | null = null;
 
 const loadEvaluator = () => {
@@ -70,8 +73,9 @@ export interface AudienceContext {
 export type AudienceEvalResult = "match" | "no-match" | "error";
 
 export interface AudienceEvaluatorImpl {
-  /** Evaluate a CEL/Superscript expression. Empty ⇒ "match"; errors log
-   *  and return "error" for fail-closed semantics. */
+  /** Evaluate a CEL/Superscript expression. Empty ⇒ "match"; a runtime
+   *  evaluator failure logs and falls back to "match" (fail-open); a valid
+   *  eval returning an `Err` envelope ⇒ "error". */
   readonly evaluate: (
     expression: string,
     context: AudienceContext,
@@ -229,7 +233,9 @@ const make = Effect.gen(function* () {
       const result = yield* Effect.tryPromise({
         try: async () => {
           const mod = await loadEvaluator();
-          return mod.evaluateWithContext(input, host) as unknown as
+          // ≥1.0 is async (Promise<string>); ≤0.2 was sync. `await` handles
+          // both — a non-promise passes through unchanged.
+          return (await mod.evaluateWithContext(input, host)) as
             | string
             | boolean;
         },

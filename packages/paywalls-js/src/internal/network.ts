@@ -1,7 +1,7 @@
 // NetworkService — wraps `fetch` for the four Superwall HTTP endpoints
 // (config, collector, enrichment, confirm_assignments). Per API.md §11.
 
-import { Context, Effect, Layer } from "effect";
+import { Context, Duration, Effect, Layer } from "effect";
 import {
   resolveHosts,
   isSandbox,
@@ -101,6 +101,12 @@ const resolveInterfaceStyle = (
   } catch {}
   return "light";
 };
+
+// Enrichment is fire-and-forget with a hard 1s budget and no retries (matches
+// the native SDKs). It must never hold up `configure()`/`register()` readiness:
+// on a cold load the enrichment effect is awaited alongside the config fetch,
+// so an unbounded wait here would stall the whole SDK behind a slow server.
+const ENRICHMENT_TIMEOUT = Duration.seconds(1);
 
 const make = (config: NetworkConfig) =>
   Effect.gen(function* () {
@@ -241,12 +247,19 @@ const make = (config: NetworkConfig) =>
       }
     });
 
-    /** POST /api/v1/enrich on the enrichment host. */
+    /** POST /api/v1/enrich on the enrichment host. Hard 1s timeout, no retries
+     *  — see {@link ENRICHMENT_TIMEOUT}. A timeout surfaces as a
+     *  `NetworkRequestError` so the caller's `enrichment_fail` path fires. */
     const postEnrichment = Effect.fn("NetworkService.postEnrichment")(
       function* (payload: EnrichmentRequest) {
         const hosts = resolveHosts(config.environment);
         const url = `https://${hosts.enrichment}/api/v1/enrich`;
         const headers = yield* buildHeaders();
+        // AbortController gives the timeout teeth: when the Effect is
+        // interrupted at 1s we also abort the in-flight request instead of
+        // leaking a socket that resolves into a discarded result.
+        const controller =
+          typeof AbortController !== "undefined" ? new AbortController() : null;
 
         const response = yield* Effect.tryPromise({
           try: async () =>
@@ -254,6 +267,7 @@ const make = (config: NetworkConfig) =>
               method: "POST",
               headers,
               body: JSON.stringify(payload),
+              ...(controller ? { signal: controller.signal } : {}),
             }),
           catch: (cause) =>
             new NetworkRequestError({
@@ -262,7 +276,15 @@ const make = (config: NetworkConfig) =>
               message: `enrichment network error: ${describe(cause)}`,
               cause,
             }),
-        });
+        }).pipe(
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              try {
+                controller?.abort();
+              } catch {}
+            }),
+          ),
+        );
 
         if (!response.ok) {
           return yield* Effect.fail(
@@ -285,6 +307,23 @@ const make = (config: NetworkConfig) =>
             }),
         });
       },
+      // Hard 1s ceiling on the whole call. `timeoutFail` converts the timeout
+      // into the same error channel as a network failure (not a defect), so
+      // the enrichment flow degrades gracefully and stays fire-and-forget.
+      (effect) =>
+        effect.pipe(
+          Effect.timeoutFail({
+            duration: ENRICHMENT_TIMEOUT,
+            onTimeout: () => {
+              const hosts = resolveHosts(config.environment);
+              return new NetworkRequestError({
+                method: "POST",
+                url: `https://${hosts.enrichment}/api/v1/enrich`,
+                message: "enrichment timed out (1s hard limit)",
+              });
+            },
+          }),
+        ),
     );
 
     /** POST /api/v1/confirm_assignments on the base host. Best-effort —
