@@ -175,6 +175,13 @@ const decodeOne = <A, I>(
 const recordsOf = (value: unknown): ReadonlyArray<Record<string, JsonValue>> =>
   (decodeOne(Records, value) ?? []) as ReadonlyArray<Record<string, JsonValue>>;
 
+// Optional scalar fields. The wire sends `null` for absent optionals (e.g.
+// `dark_background_color_hex: null`), so `nullable: true` treats both `null`
+// and missing as absent — a present `null` must NOT fail the whole decode.
+const optStr = Schema.optionalWith(Schema.String, { nullable: true });
+const optNum = Schema.optionalWith(Schema.Number, { nullable: true });
+const optBool = Schema.optionalWith(Schema.Boolean, { nullable: true });
+
 // test_mode_user_ids: [{ type, value }]
 const TestModeUserIdSchema: Schema.Schema<TestModeUserId> = Schema.Struct({
   type: Schema.String,
@@ -184,9 +191,9 @@ const TestModeUserIdSchema: Schema.Schema<TestModeUserId> = Schema.Struct({
 // Variants ───────────────────────────────────────────────────────────────────
 const VariantWire = Schema.Struct({
   variant_id: Schema.String,
-  variant_type: Schema.optional(Schema.String),
-  paywall_identifier: Schema.optional(Schema.String),
-  percentage: Schema.optional(Schema.Number),
+  variant_type: optStr,
+  paywall_identifier: optStr,
+  percentage: optNum,
 });
 const toVariant = (
   w: Schema.Schema.Type<typeof VariantWire>,
@@ -200,9 +207,9 @@ const toVariant = (
 // Rules ────────────────────────────────────────────────────────────────────
 const RuleWire = Schema.Struct({
   experiment_id: Schema.String,
-  experiment_group_id: Schema.optional(Schema.String),
+  experiment_group_id: optStr,
   // CEL audience filter. `null`/absent ⇒ match-all (audience eval treats "").
-  expression_cel: Schema.optional(Schema.NullOr(Schema.String)),
+  expression_cel: optStr,
   variants: Schema.optional(Schema.Unknown),
 });
 const toRule = (
@@ -231,8 +238,8 @@ const toTrigger = (
 // Weighted paywall endpoints (`url_config.endpoints`) ─────────────────────────
 const EndpointWire = Schema.Struct({
   url: Schema.String,
-  percentage: Schema.optional(Schema.Number),
-  timeout_ms: Schema.optional(Schema.Number),
+  percentage: optNum,
+  timeout_ms: optNum,
 });
 const toEndpoint = (w: Schema.Schema.Type<typeof EndpointWire>) => ({
   url: w.url,
@@ -252,8 +259,8 @@ const SurveyOptionWire = Schema.Struct({
 const SurveyWire = Schema.Struct({
   id: Schema.String,
   assignment_key: Schema.String,
-  title: Schema.optional(Schema.String),
-  message: Schema.optional(Schema.String),
+  title: optStr,
+  message: optStr,
   // A survey with no recognized show-condition is invalid → dropped.
   presentation_condition: Schema.String.pipe(
     Schema.filter((s): s is SurveyShowCondition =>
@@ -261,9 +268,9 @@ const SurveyWire = Schema.Struct({
     ),
   ),
   options: Schema.optional(Schema.Unknown),
-  presentation_probability: Schema.optional(Schema.Number),
-  include_other_option: Schema.optional(Schema.Boolean),
-  include_close_option: Schema.optional(Schema.Boolean),
+  presentation_probability: optNum,
+  include_other_option: optBool,
+  include_close_option: optBool,
 });
 const toSurvey = (w: Schema.Schema.Type<typeof SurveyWire>): Survey => ({
   id: w.id,
@@ -283,9 +290,9 @@ const toSurvey = (w: Schema.Schema.Type<typeof SurveyWire>): Survey => ({
 // Presentation style ─────────────────────────────────────────────────────────
 const PresentationStyleV3Wire = Schema.Struct({
   type: Schema.String,
-  height: Schema.optional(Schema.Number),
-  width: Schema.optional(Schema.Number),
-  corner_radius: Schema.optional(Schema.Number),
+  height: optNum,
+  width: optNum,
+  corner_radius: optNum,
 });
 const styleFromString = (
   s: string | undefined,
@@ -309,14 +316,14 @@ const styleFromString = (
 // Products (top-level catalog) ───────────────────────────────────────────────
 const ProductEntitlementWire = Schema.Struct({ identifier: Schema.String });
 const StoreProductWire = Schema.Struct({
-  store: Schema.optional(Schema.String),
-  product_identifier: Schema.optional(Schema.String),
+  store: optStr,
+  product_identifier: optStr,
 });
 const ProductWire = Schema.Struct({
-  sw_composite_product_id: Schema.optional(Schema.String),
-  store_product: Schema.optional(StoreProductWire),
+  sw_composite_product_id: optStr,
+  store_product: Schema.optionalWith(StoreProductWire, { nullable: true }),
   entitlements: Schema.optional(Schema.Unknown),
-  name: Schema.optional(Schema.String),
+  name: optStr,
 });
 const STORE_BY_WIRE: Readonly<Record<string, string>> = {
   APP_STORE: "appStore",
@@ -350,21 +357,21 @@ const ProductSlotWire = Schema.Struct({ product_id: Schema.String });
 const UrlConfigWire = Schema.Struct({ endpoints: Schema.optional(Schema.Unknown) });
 const PaywallWire = Schema.Struct({
   identifier: Schema.String,
-  name: Schema.optional(Schema.String),
-  url: Schema.optional(Schema.String),
-  product_ids: Schema.optional(Schema.Array(Schema.String)),
+  name: optStr,
+  url: optStr,
+  product_ids: Schema.optionalWith(Schema.Array(Schema.String), { nullable: true }),
   products: Schema.optional(Schema.Unknown),
   products_v2: Schema.optional(Schema.Unknown),
-  url_config: Schema.optional(UrlConfigWire),
+  url_config: Schema.optionalWith(UrlConfigWire, { nullable: true }),
   presentation_style_v3: Schema.optional(Schema.Unknown),
-  presentation_style_v2: Schema.optional(Schema.String),
-  presentation_style: Schema.optional(Schema.String),
-  feature_gating: Schema.optional(Schema.String),
-  background_color_hex: Schema.optional(Schema.String),
-  dark_background_color_hex: Schema.optional(Schema.String),
+  presentation_style_v2: optStr,
+  presentation_style: optStr,
+  feature_gating: optStr,
+  background_color_hex: optStr,
+  dark_background_color_hex: optStr,
   surveys: Schema.optional(Schema.Unknown),
-  paywalljs_event: Schema.optional(Schema.String),
-  web_checkout_destination: Schema.optional(Schema.String),
+  paywalljs_event: optStr,
+  web_checkout_destination: optStr,
 });
 const toPaywall = (
   w: Schema.Schema.Type<typeof PaywallWire>,
@@ -445,16 +452,16 @@ const presentationStyleFromV3 = (
 const LocaleWire = Schema.Struct({ locale: Schema.String });
 const ToggleWire = Schema.Struct({
   key: Schema.String,
-  enabled: Schema.optional(Schema.Boolean),
+  enabled: optBool,
 });
 const ApplicationWire = Schema.Struct({
-  name: Schema.optional(Schema.String),
-  icon_url: Schema.optional(Schema.String),
+  name: optStr,
+  icon_url: optStr,
 });
 const Web2AppWire = Schema.Struct({
-  url_schema: Schema.optional(Schema.String),
-  restore_access_url: Schema.optional(Schema.String),
-  entitlements_max_age_ms: Schema.optional(Schema.Number),
+  url_schema: optStr,
+  restore_access_url: optStr,
+  entitlements_max_age_ms: optNum,
 });
 
 const toApplication = (
