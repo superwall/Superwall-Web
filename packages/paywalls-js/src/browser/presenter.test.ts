@@ -420,6 +420,59 @@ test("close message resolves the presentation as declined", async () => {
   await expect(result).resolves.toEqual({ type: "declined" });
 });
 
+test("stripe_checkout_start/abandon/fail surface public transaction_* events", async () => {
+  const emitted: Array<[string, Record<string, unknown>]> = [];
+  const purchaseEvents: unknown[] = [];
+  const presenter = createBrowserPresenter();
+  const result = presenter.present(
+    stubInfo(),
+    newCtx({
+      emit: (name, detail) => emitted.push([name, detail as Record<string, unknown>]),
+      onPurchaseEvent: (ev) => purchaseEvents.push(ev),
+    }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+
+  dispatchFromPaywall(iframe, [
+    { event_name: "stripe_checkout_start", product_identifier: "pro_yearly" },
+    { event_name: "stripe_checkout_abandon", product_identifier: "pro_yearly" },
+  ]);
+  await flushMessages();
+
+  const start = emitted.find(([n]) => n === "transaction_start");
+  const abandon = emitted.find(([n]) => n === "transaction_abandon");
+  expect(start).toBeDefined();
+  expect((start![1].product as { id: string }).id).toBe("pro_yearly");
+  expect(abandon).toBeDefined();
+  expect((abandon![1].product as { id: string }).id).toBe("pro_yearly");
+  // Internal channel still routed (controller needs it).
+  expect(purchaseEvents.some((e) => (e as { type: string }).type === "abandon")).toBe(true);
+  // Paywall stays open on abandon — not resolved.
+  presenter.dismiss();
+  await result;
+});
+
+test("stripe_checkout_fail surfaces transaction_fail with the error message", async () => {
+  const emitted: Array<[string, Record<string, unknown>]> = [];
+  const presenter = createBrowserPresenter();
+  const result = presenter.present(
+    stubInfo(),
+    newCtx({ emit: (name, detail) => emitted.push([name, detail as Record<string, unknown>]) }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  dispatchFromPaywall(iframe, [
+    { event_name: "stripe_checkout_fail", product_identifier: "pro", error: "card_declined" },
+  ]);
+  await flushMessages();
+  const fail = emitted.find(([n]) => n === "transaction_fail");
+  expect(fail).toBeDefined();
+  expect(fail![1].error).toBe("card_declined");
+  presenter.dismiss();
+  await result;
+});
+
 test("restore message fires lifecycle events and resolves restored", async () => {
   const emitted: Array<[string, unknown]> = [];
   const presenter = createBrowserPresenter();

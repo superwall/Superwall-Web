@@ -2,13 +2,12 @@
 // caches by buildId in storage for revalidation. Only fields actually
 // consumed are modeled; the rest is preserved on `.raw`.
 
-import { Context, Effect, Layer, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Option, Schema, SubscriptionRef } from "effect";
 import {
   STORAGE_KEYS,
   type JsonValue,
   type PaywallPresentationStyle,
   type Survey,
-  type SurveyOption,
   type SurveyShowCondition,
 } from "../types.ts";
 import { makeActor } from "./actor.ts";
@@ -18,6 +17,13 @@ import { NetworkService } from "./network.ts";
 import { StorageService } from "./storage.ts";
 
 const CONFIG_KEY = asStorageKey(STORAGE_KEYS.config);
+
+/** An entry of `test_mode_user_ids`: which identity field to match, and the
+ *  value to match it against (e.g. `{ type: "aliasId", value: "$Superwall…" }`). */
+export interface TestModeUserId {
+  readonly type: "aliasId" | "appUserId" | "deviceId" | (string & {});
+  readonly value: string;
+}
 
 /** Top-level parsed config. Wire shape from `/api/v1/static_config`. */
 export interface RawConfig {
@@ -29,6 +35,11 @@ export interface RawConfig {
   readonly products: ReadonlyArray<RawProductItem>;
   readonly toggles: ReadonlyArray<{ key: string; enabled: boolean }>;
   readonly locales: ReadonlyArray<string>;
+  /** Identities flagged as test users in the dashboard (`test_mode_user_ids`).
+   *  When `testModeBehavior` is `automatic`/`whenEnabledForUser`, the SDK runs
+   *  in test mode (simulated purchases) only when the current user matches one
+   *  of these. */
+  readonly testModeUserIds: ReadonlyArray<TestModeUserId>;
   /** Web-to-app routing config — present when this app has a Superwall
    *  Web Project. Lets the SDK route `register()` to a hosted paywall URL
    *  (e.g. `https://{tenant}.superwall.app/{placement}`) instead of
@@ -83,10 +94,10 @@ export interface RawPaywallResponse {
   readonly productIds: ReadonlyArray<string>;
   readonly featureGatingBehavior?: "gated" | "nonGated";
   /** Per-paywall product slot mapping. Wire shape from the paywall config:
-   *  `[{product: "primary", productId, product_id, product_id_android}, …]`.
-   *  Forwarded verbatim to the paywall iframe's `template_variables.products`
-   *  + `products` event, since the iframe's checkout-click handler keys off
-   *  the `product` (slot name) field. */
+   *  `[{product: "primary", product_id, product_id_android}, …]`. Forwarded
+   *  verbatim to the paywall iframe's `template_variables.products` + `products`
+   *  event, since the iframe's checkout-click handler keys off the `product`
+   *  (slot name) field. */
   readonly products?: ReadonlyArray<Record<string, JsonValue>>;
   /** Pre-encoded base64 array of `[{event_name:"template_substitutions",…},
    *  {event_name:"page_styles",…}]`. The paywall expects this as a separate
@@ -129,179 +140,157 @@ export interface RawProductItem {
   readonly store?: string;
 }
 
-// Lenient parser — unknown fields preserved on `.raw`, missing fields fall
-// back to empty arrays / strings.
+// ── Wire decoding ──────────────────────────────────────────────────────────
+// `/api/v1/static_config` has ONE snake_case shape. We validate each piece with
+// Effect Schema and map it to the domain `Raw*` types. Collections are decoded
+// per-item so a single malformed entry is dropped rather than failing the whole
+// config (the SDK degrades gracefully on partial data). Unknown fields are
+// ignored by `Schema.Struct` and preserved wholesale on `RawConfig.raw`.
 
-const isObject = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
+const Records = Schema.Array(
+  Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+);
 
-/** Read the first non-null/string value from a list of candidate keys.
- *  Wire is snake_case; the camelCase fallbacks accommodate test fixtures
- *  authored before the wire shape was nailed down. */
-const pickString = (
-  raw: Record<string, unknown>,
-  keys: readonly string[],
-  fallback = "",
-): string => {
-  for (const k of keys) {
-    const v = raw[k];
-    if (typeof v === "string") return v;
+/** Decode each element of an unknown array, dropping the ones that don't match. */
+const decodeItems = <A, I>(
+  schema: Schema.Schema<A, I>,
+  value: unknown,
+): A[] => {
+  if (!Array.isArray(value)) return [];
+  const decode = Schema.decodeUnknownOption(schema);
+  const out: A[] = [];
+  for (const item of value) {
+    const decoded = decode(item);
+    if (Option.isSome(decoded)) out.push(decoded.value);
   }
-  return fallback;
+  return out;
 };
 
-const pickArray = (
-  raw: Record<string, unknown>,
-  keys: readonly string[],
-): unknown[] => {
-  for (const k of keys) {
-    const v = raw[k];
-    if (Array.isArray(v)) return v;
-  }
-  return [];
-};
+/** Decode a single value, or `undefined` on mismatch. */
+const decodeOne = <A, I>(
+  schema: Schema.Schema<A, I>,
+  value: unknown,
+): A | undefined => Option.getOrUndefined(Schema.decodeUnknownOption(schema)(value));
 
-const variantTypeFromWire = (
-  v: unknown,
-): "treatment" | "holdout" => {
-  // Wire ships uppercase ("TREATMENT" / "HOLDOUT"); legacy fixtures use lowercase.
-  const s = typeof v === "string" ? v.toLowerCase() : "";
-  return s === "holdout" ? "holdout" : "treatment";
-};
+const recordsOf = (value: unknown): ReadonlyArray<Record<string, JsonValue>> =>
+  (decodeOne(Records, value) ?? []) as ReadonlyArray<Record<string, JsonValue>>;
 
-const featureGatingFromWire = (
-  v: unknown,
-): "gated" | "nonGated" | undefined => {
-  // Wire: "GATED" / "NON_GATED" (Android `FeatureGatingBehavior`). Legacy
-  // tests pass camelCase ("gated" / "nonGated") directly.
-  if (v === "GATED" || v === "gated") return "gated";
-  if (v === "NON_GATED" || v === "nonGated") return "nonGated";
-  return undefined;
-};
+// test_mode_user_ids: [{ type, value }]
+const TestModeUserIdSchema: Schema.Schema<TestModeUserId> = Schema.Struct({
+  type: Schema.String,
+  value: Schema.String,
+});
 
-const parseExperimentRefFromRule = (
-  raw: Record<string, unknown>,
-): RawExperimentRef | null => {
-  // Wire shape: trigger rule has experiment_id + experiment_group_id +
-  // variants[] inline (no nested `experiment` object). Legacy fixtures
-  // wrap in `experiment: {id, groupId, variants}` — handle both.
-  const nested = raw["experiment"];
-  if (isObject(nested)) {
-    const id = pickString(nested, ["id", "experiment_id"]);
-    if (!id) return null;
-    return {
-      id,
-      groupId: pickString(nested, ["groupId", "group_id", "experiment_group_id"]),
-      variants: parseVariants(nested),
-    };
-  }
-  const id = pickString(raw, ["experiment_id", "experimentId", "id"]);
-  if (!id) return null;
-  return {
-    id,
-    groupId: pickString(raw, [
-      "experiment_group_id",
-      "experimentGroupId",
-      "groupId",
-    ]),
-    variants: parseVariants(raw),
-  };
-};
+// Variants ───────────────────────────────────────────────────────────────────
+const VariantWire = Schema.Struct({
+  variant_id: Schema.String,
+  variant_type: Schema.optional(Schema.String),
+  paywall_identifier: Schema.optional(Schema.String),
+  percentage: Schema.optional(Schema.Number),
+});
+const toVariant = (
+  w: Schema.Schema.Type<typeof VariantWire>,
+): RawExperimentRef["variants"][number] => ({
+  id: w.variant_id,
+  type: w.variant_type === "HOLDOUT" ? "holdout" : "treatment",
+  ...(w.paywall_identifier !== undefined && { paywallId: w.paywall_identifier }),
+  ...(w.percentage !== undefined && { percentage: w.percentage }),
+});
 
-const parseVariants = (
-  raw: Record<string, unknown>,
-): RawExperimentRef["variants"] => {
-  const list = pickArray(raw, ["variants"]);
-  return list
-    .map((v): RawExperimentRef["variants"][number] | null => {
-      if (!isObject(v)) return null;
-      const variantId = pickString(v, ["variant_id", "id"]);
-      if (!variantId) return null;
-      const out: { id: string; type: "treatment" | "holdout"; paywallId?: string; percentage?: number } = {
-        id: variantId,
-        type: variantTypeFromWire(v["variant_type"] ?? v["type"]),
-      };
-      const paywallId = v["paywall_identifier"] ?? v["paywallId"];
-      if (typeof paywallId === "string") out.paywallId = paywallId;
-      const percentage = v["percentage"];
-      if (typeof percentage === "number") out.percentage = percentage;
-      return out;
-    })
-    .filter((x): x is RawExperimentRef["variants"][number] => x !== null);
-};
+// Rules ────────────────────────────────────────────────────────────────────
+const RuleWire = Schema.Struct({
+  experiment_id: Schema.String,
+  experiment_group_id: Schema.optional(Schema.String),
+  // CEL audience filter. `null`/absent ⇒ match-all (audience eval treats "").
+  expression_cel: Schema.optional(Schema.NullOr(Schema.String)),
+  variants: Schema.optional(Schema.Unknown),
+});
+const toRule = (
+  w: Schema.Schema.Type<typeof RuleWire>,
+): RawAudienceRule => ({
+  expression: w.expression_cel ?? "",
+  experiment: {
+    id: w.experiment_id,
+    groupId: w.experiment_group_id ?? "",
+    variants: decodeItems(VariantWire, w.variants).map(toVariant),
+  },
+});
 
-const parseRule = (raw: unknown): RawAudienceRule | null => {
-  if (!isObject(raw)) return null;
-  const exp = parseExperimentRefFromRule(raw);
-  if (!exp) return null;
-  // Wire CEL lives in `expression_cel` (V2). `expression` is the legacy
-  // pre-CEL audience filter format; `expression_js` is the JS variant.
-  // Empty/null all → match-all (audience eval treats "" as match).
-  const expr =
-    pickString(raw, ["expression_cel", "expression", "expression_js"]);
-  return { expression: expr, experiment: exp };
-};
+// Triggers ───────────────────────────────────────────────────────────────────
+const TriggerWire = Schema.Struct({
+  event_name: Schema.String,
+  rules: Schema.optional(Schema.Unknown),
+});
+const toTrigger = (
+  w: Schema.Schema.Type<typeof TriggerWire>,
+): RawTrigger => ({
+  placementName: w.event_name,
+  rules: decodeItems(RuleWire, w.rules).map(toRule),
+});
 
-const parseTrigger = (raw: unknown): RawTrigger | null => {
-  if (!isObject(raw)) return null;
-  const placementName = pickString(raw, [
-    "event_name",
-    "eventName",
-    "placementName",
-  ]);
-  if (!placementName) return null;
-  const rulesRaw = pickArray(raw, ["rules", "audiences"]);
-  return {
-    placementName,
-    rules: rulesRaw
-      .map(parseRule)
-      .filter((r): r is RawAudienceRule => r !== null),
-  };
-};
+// Weighted paywall endpoints (`url_config.endpoints`) ─────────────────────────
+const EndpointWire = Schema.Struct({
+  url: Schema.String,
+  percentage: Schema.optional(Schema.Number),
+  timeout_ms: Schema.optional(Schema.Number),
+});
+const toEndpoint = (w: Schema.Schema.Type<typeof EndpointWire>) => ({
+  url: w.url,
+  percentage: w.percentage ?? 100,
+  ...(w.timeout_ms !== undefined && { timeoutMs: w.timeout_ms }),
+});
 
-const parsePresentationStyle = (
-  raw: Record<string, unknown>,
+// Surveys ────────────────────────────────────────────────────────────────────
+const SURVEY_CONDITIONS: readonly SurveyShowCondition[] = [
+  "ON_MANUAL_CLOSE",
+  "ON_PURCHASE",
+];
+const SurveyOptionWire = Schema.Struct({
+  id: Schema.String,
+  title: Schema.String,
+});
+const SurveyWire = Schema.Struct({
+  id: Schema.String,
+  assignment_key: Schema.String,
+  title: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.String),
+  // A survey with no recognized show-condition is invalid → dropped.
+  presentation_condition: Schema.String.pipe(
+    Schema.filter((s): s is SurveyShowCondition =>
+      (SURVEY_CONDITIONS as readonly string[]).includes(s.toUpperCase()),
+    ),
+  ),
+  options: Schema.optional(Schema.Unknown),
+  presentation_probability: Schema.optional(Schema.Number),
+  include_other_option: Schema.optional(Schema.Boolean),
+  include_close_option: Schema.optional(Schema.Boolean),
+});
+const toSurvey = (w: Schema.Schema.Type<typeof SurveyWire>): Survey => ({
+  id: w.id,
+  assignmentKey: w.assignment_key,
+  title: w.title ?? "",
+  message: w.message ?? "",
+  options: decodeItems(SurveyOptionWire, w.options),
+  presentationCondition: w.presentation_condition.toUpperCase() as SurveyShowCondition,
+  presentationProbability:
+    w.presentation_probability !== undefined
+      ? Math.max(0, Math.min(1, w.presentation_probability))
+      : 0,
+  includeOtherOption: w.include_other_option === true,
+  includeCloseOption: w.include_close_option === true,
+});
+
+// Presentation style ─────────────────────────────────────────────────────────
+const PresentationStyleV3Wire = Schema.Struct({
+  type: Schema.String,
+  height: Schema.optional(Schema.Number),
+  width: Schema.optional(Schema.Number),
+  corner_radius: Schema.optional(Schema.Number),
+});
+const styleFromString = (
+  s: string | undefined,
 ): PaywallPresentationStyle | undefined => {
-  const v3 = raw["presentation_style_v3"] ?? raw["presentationStyleV3"];
-  if (isObject(v3)) {
-    const type = pickString(v3, ["type"]).toUpperCase();
-    const num = (k: string, fallback: number): number => {
-      const v = v3[k];
-      return typeof v === "number" && Number.isFinite(v) ? v : fallback;
-    };
-    switch (type) {
-      case "MODAL":
-        return { type: "MODAL" };
-      case "FULLSCREEN":
-        return { type: "FULLSCREEN" };
-      case "NO_ANIMATION":
-        return { type: "NO_ANIMATION" };
-      case "PUSH":
-        return { type: "PUSH" };
-      case "NONE":
-        return { type: "NONE" };
-      case "DRAWER":
-        return {
-          type: "DRAWER",
-          height: num("height", 0),
-          cornerRadius: num("corner_radius", 0),
-        };
-      case "POPUP":
-        return {
-          type: "POPUP",
-          height: num("height", 0),
-          width: num("width", 0),
-          cornerRadius: num("corner_radius", 0),
-        };
-    }
-  }
-  const v2 = pickString(raw, [
-    "presentation_style_v2",
-    "presentationStyleV2",
-    "presentation_style",
-    "presentationStyle",
-  ]).toUpperCase();
-  switch (v2) {
+  switch (s?.toUpperCase()) {
     case "MODAL":
       return { type: "MODAL" };
     case "FULLSCREEN":
@@ -317,302 +306,236 @@ const parsePresentationStyle = (
   }
 };
 
-const parseSurveyOption = (raw: unknown): SurveyOption | null => {
-  if (!isObject(raw)) return null;
-  const id = pickString(raw, ["id"]);
-  const title = pickString(raw, ["title"]);
-  if (!id || !title) return null;
-  return { id, title };
+// Products (top-level catalog) ───────────────────────────────────────────────
+const ProductEntitlementWire = Schema.Struct({ identifier: Schema.String });
+const StoreProductWire = Schema.Struct({
+  store: Schema.optional(Schema.String),
+  product_identifier: Schema.optional(Schema.String),
+});
+const ProductWire = Schema.Struct({
+  sw_composite_product_id: Schema.optional(Schema.String),
+  store_product: Schema.optional(StoreProductWire),
+  entitlements: Schema.optional(Schema.Unknown),
+  name: Schema.optional(Schema.String),
+});
+const STORE_BY_WIRE: Readonly<Record<string, string>> = {
+  APP_STORE: "appStore",
+  PLAY_STORE: "playStore",
+  STRIPE: "stripe",
+  PADDLE: "paddle",
+  SUPERWALL: "superwall",
+  OTHER: "other",
 };
-
-const parseSurveyCondition = (
-  raw: unknown,
-): SurveyShowCondition | null => {
-  if (typeof raw !== "string") return null;
-  const v = raw.toUpperCase();
-  return v === "ON_MANUAL_CLOSE" || v === "ON_PURCHASE" ? v : null;
-};
-
-const parseSurvey = (raw: unknown): Survey | null => {
-  if (!isObject(raw)) return null;
-  const id = pickString(raw, ["id"]);
-  const assignmentKey = pickString(raw, [
-    "assignment_key",
-    "assignmentKey",
-  ]);
-  const title = pickString(raw, ["title"]);
-  const message = pickString(raw, ["message"]);
-  const condition = parseSurveyCondition(
-    raw["presentation_condition"] ?? raw["presentationCondition"],
+const toProduct = (
+  w: Schema.Schema.Type<typeof ProductWire>,
+): RawProductItem | null => {
+  const id = w.sw_composite_product_id ?? w.store_product?.product_identifier ?? "";
+  if (!id) return null;
+  const entitlements = decodeItems(ProductEntitlementWire, w.entitlements).map(
+    (e) => ({ id: e.identifier }),
   );
-  if (!id || !assignmentKey || !condition) return null;
-  const optionsRaw = pickArray(raw, ["options"]);
-  const options = optionsRaw
-    .map(parseSurveyOption)
-    .filter((o): o is SurveyOption => o !== null);
-  const probabilityRaw =
-    raw["presentation_probability"] ?? raw["presentationProbability"];
-  const presentationProbability =
-    typeof probabilityRaw === "number" && Number.isFinite(probabilityRaw)
-      ? Math.max(0, Math.min(1, probabilityRaw))
-      : 0;
-  const includeOtherOption =
-    (raw["include_other_option"] ?? raw["includeOtherOption"]) === true;
-  const includeCloseOption =
-    (raw["include_close_option"] ?? raw["includeCloseOption"]) === true;
+  const store = w.store_product?.store
+    ? STORE_BY_WIRE[w.store_product.store]
+    : undefined;
   return {
     id,
-    assignmentKey,
-    title,
-    message,
-    options,
-    presentationCondition: condition,
-    presentationProbability,
-    includeOtherOption,
-    includeCloseOption,
+    ...(w.name !== undefined && { name: w.name }),
+    ...(entitlements.length > 0 && { entitlements }),
+    ...(store !== undefined && { store }),
   };
 };
 
-const parsePaywallResponse = (raw: unknown): RawPaywallResponse | null => {
-  if (!isObject(raw)) return null;
-  const identifier = pickString(raw, ["identifier"]);
-  if (!identifier) return null;
-  // Some paywalls expose product IDs only via the per-paywall `products`
-  // array (with `product_id` per slot); `product_ids` may be empty.
-  const productsRaw = pickArray(raw, ["products"]);
-  const productIdsRaw = pickArray(raw, ["product_ids", "productIds"]);
-  const productIdsFromIds = productIdsRaw.filter(
-    (p): p is string => typeof p === "string",
-  );
-  const productIdsFromProducts = productsRaw
-    .map((p) =>
-      isObject(p) ? pickString(p, ["product_id", "productId"]) : "",
-    )
-    .filter((s): s is string => s !== "");
+// Paywall responses ──────────────────────────────────────────────────────────
+const ProductSlotWire = Schema.Struct({ product_id: Schema.String });
+const UrlConfigWire = Schema.Struct({ endpoints: Schema.optional(Schema.Unknown) });
+const PaywallWire = Schema.Struct({
+  identifier: Schema.String,
+  name: Schema.optional(Schema.String),
+  url: Schema.optional(Schema.String),
+  product_ids: Schema.optional(Schema.Array(Schema.String)),
+  products: Schema.optional(Schema.Unknown),
+  products_v2: Schema.optional(Schema.Unknown),
+  url_config: Schema.optional(UrlConfigWire),
+  presentation_style_v3: Schema.optional(Schema.Unknown),
+  presentation_style_v2: Schema.optional(Schema.String),
+  presentation_style: Schema.optional(Schema.String),
+  feature_gating: Schema.optional(Schema.String),
+  background_color_hex: Schema.optional(Schema.String),
+  dark_background_color_hex: Schema.optional(Schema.String),
+  surveys: Schema.optional(Schema.Unknown),
+  paywalljs_event: Schema.optional(Schema.String),
+  web_checkout_destination: Schema.optional(Schema.String),
+});
+const toPaywall = (
+  w: Schema.Schema.Type<typeof PaywallWire>,
+): RawPaywallResponse => {
+  const products = recordsOf(w.products);
+  // `product_ids` is authoritative when present; otherwise fall back to the
+  // per-slot `products[].product_id`.
   const productIds =
-    productIdsFromIds.length > 0 ? productIdsFromIds : productIdsFromProducts;
-
-  const products = productsRaw.filter(isObject) as ReadonlyArray<
-    Record<string, JsonValue>
-  >;
-  const paywalljsEvent = pickString(raw, [
-    "paywalljs_event",
-    "paywalljsEvent",
-  ]);
-
-  const webCheckoutDestination = pickString(raw, [
-    "web_checkout_destination",
-    "webCheckoutDestination",
-  ]);
-  // Weighted load-balanced endpoints (`url_config.endpoints`).
-  const urlConfigRaw = (raw as { url_config?: unknown; urlConfig?: unknown })[
-    "url_config"
-  ] ?? (raw as { urlConfig?: unknown })["urlConfig"];
-  const endpointsRaw = isObject(urlConfigRaw)
-    ? pickArray(urlConfigRaw, ["endpoints"])
-    : [];
-  const urlEndpoints = endpointsRaw
-    .map((e) => {
-      if (!isObject(e)) return null;
-      const url = pickString(e, ["url"]);
-      if (!url) return null;
-      const pct = e["percentage"];
-      const percentage = typeof pct === "number" ? pct : 100;
-      const t = e["timeout_ms"] ?? e["timeoutMs"];
-      const out: { url: string; percentage: number; timeoutMs?: number } = {
-        url,
-        percentage,
-      };
-      if (typeof t === "number") out.timeoutMs = t;
-      return out;
-    })
-    .filter(
-      (e): e is { url: string; percentage: number; timeoutMs?: number } =>
-        e !== null,
-    );
-  const backgroundColorHex = pickString(raw, [
-    "background_color_hex",
-    "backgroundColorHex",
-  ]);
-  const darkBackgroundColorHex = pickString(raw, [
-    "dark_background_color_hex",
-    "darkBackgroundColorHex",
-  ]);
-  const productsV2Raw = pickArray(raw, ["products_v2", "productsV2"]);
-  const productsV2 = productsV2Raw.filter(isObject) as ReadonlyArray<
-    Record<string, JsonValue>
-  >;
-  const presentationStyle = parsePresentationStyle(raw);
-  const surveys = pickArray(raw, ["surveys"])
-    .map(parseSurvey)
-    .filter((s): s is Survey => s !== null);
-  const out: RawPaywallResponse = {
-    identifier,
-    name: pickString(raw, ["name"], identifier),
-    url: pickString(raw, ["url"]),
+    w.product_ids && w.product_ids.length > 0
+      ? [...w.product_ids]
+      : decodeItems(ProductSlotWire, w.products).map((p) => p.product_id);
+  const urlEndpoints = decodeItems(EndpointWire, w.url_config?.endpoints).map(
+    toEndpoint,
+  );
+  const productsV2 = recordsOf(w.products_v2);
+  const surveys = decodeItems(SurveyWire, w.surveys).map(toSurvey);
+  const v3 = decodeOne(PresentationStyleV3Wire, w.presentation_style_v3);
+  const presentationStyle =
+    (v3 && presentationStyleFromV3(v3)) ??
+    styleFromString(w.presentation_style_v2 ?? w.presentation_style);
+  const featureGatingBehavior =
+    w.feature_gating === "GATED"
+      ? ("gated" as const)
+      : w.feature_gating === "NON_GATED"
+        ? ("nonGated" as const)
+        : undefined;
+  return {
+    identifier: w.identifier,
+    name: w.name ?? w.identifier,
+    url: w.url ?? "",
     productIds,
     ...(products.length > 0 && { products }),
-    ...(paywalljsEvent && { paywalljsEvent }),
-    ...(webCheckoutDestination && { webCheckoutDestination }),
+    ...(w.paywalljs_event !== undefined && { paywalljsEvent: w.paywalljs_event }),
+    ...(w.web_checkout_destination !== undefined && {
+      webCheckoutDestination: w.web_checkout_destination,
+    }),
     ...(urlEndpoints.length > 0 && { urlEndpoints }),
-    ...(backgroundColorHex && { backgroundColorHex }),
-    ...(darkBackgroundColorHex && { darkBackgroundColorHex }),
+    ...(w.background_color_hex !== undefined && {
+      backgroundColorHex: w.background_color_hex,
+    }),
+    ...(w.dark_background_color_hex !== undefined && {
+      darkBackgroundColorHex: w.dark_background_color_hex,
+    }),
     ...(productsV2.length > 0 && { productsV2 }),
     ...(presentationStyle && { presentationStyle }),
     ...(surveys.length > 0 && { surveys }),
-    ...((): { featureGatingBehavior?: "gated" | "nonGated" } => {
-      const fg = featureGatingFromWire(
-        raw["feature_gating"] ?? raw["featureGatingBehavior"],
-      );
-      return fg !== undefined ? { featureGatingBehavior: fg } : {};
-    })(),
+    ...(featureGatingBehavior !== undefined && { featureGatingBehavior }),
   };
-  return out;
 };
 
-const parseProduct = (raw: unknown): RawProductItem | null => {
-  if (!isObject(raw)) return null;
-  // Wire shape: top-level has `sw_composite_product_id` + `store_product`
-  // (with `product_identifier` + `store`) + `entitlements`. Legacy/test
-  // fixtures put `id` + `store` + `name` flat at the top level.
-  const storeProduct = isObject(raw["store_product"])
-    ? (raw["store_product"] as Record<string, unknown>)
-    : null;
-  const id =
-    pickString(raw, ["sw_composite_product_id", "id", "productIdentifier"]) ||
-    (storeProduct ? pickString(storeProduct, ["product_identifier", "id"]) : "");
-  if (!id) return null;
-  const out: RawProductItem = { id };
-  const name = pickString(raw, ["name"]);
-  if (name) (out as { name?: string }).name = name;
-  const ents = raw["entitlements"];
-  if (Array.isArray(ents)) {
-    (out as { entitlements?: ReadonlyArray<{ id: string }> }).entitlements =
-      ents
-        .map((e): { id: string } | null => {
-          if (!isObject(e)) return null;
-          const entId = pickString(e, ["identifier", "id"]);
-          return entId ? { id: entId } : null;
-        })
-        .filter((x): x is { id: string } => x !== null);
-  }
-  // Wire: `store_product.store` is uppercase ("APP_STORE", "STRIPE", "PLAY_STORE").
-  // Map to our public ProductStore values; unrecognised falls through to "stripe".
-  const wireStore =
-    (storeProduct && pickString(storeProduct, ["store"])) ||
-    pickString(raw, ["store"]);
-  if (wireStore) {
-    const normalized = normaliseStore(wireStore);
-    if (normalized) (out as { store?: string }).store = normalized;
-  }
-  return out;
-};
-
-const normaliseStore = (s: string): string | null => {
-  switch (s) {
-    case "APP_STORE":
-    case "appStore":
-      return "appStore";
-    case "PLAY_STORE":
-    case "playStore":
-      return "playStore";
-    case "STRIPE":
-    case "stripe":
-      return "stripe";
-    case "PADDLE":
-    case "paddle":
-      return "paddle";
-    case "SUPERWALL":
-    case "superwall":
-      return "superwall";
-    case "OTHER":
-    case "other":
-      return "other";
+const presentationStyleFromV3 = (
+  v3: Schema.Schema.Type<typeof PresentationStyleV3Wire>,
+): PaywallPresentationStyle | undefined => {
+  const h = v3.height ?? 0;
+  const w = v3.width ?? 0;
+  const r = v3.corner_radius ?? 0;
+  switch (v3.type.toUpperCase()) {
+    case "MODAL":
+      return { type: "MODAL" };
+    case "FULLSCREEN":
+      return { type: "FULLSCREEN" };
+    case "NO_ANIMATION":
+      return { type: "NO_ANIMATION" };
+    case "PUSH":
+      return { type: "PUSH" };
+    case "NONE":
+      return { type: "NONE" };
+    case "DRAWER":
+      return { type: "DRAWER", height: h, cornerRadius: r };
+    case "POPUP":
+      return { type: "POPUP", height: h, width: w, cornerRadius: r };
     default:
-      return null;
+      return undefined;
   }
 };
 
-/** Parse the raw `static_config` JSON into a typed `RawConfig`. Throws
- *  `ConfigParseError` only when the shape isn't an object or `buildId` is
- *  absent. */
+// Top-level config ───────────────────────────────────────────────────────────
+const LocaleWire = Schema.Struct({ locale: Schema.String });
+const ToggleWire = Schema.Struct({
+  key: Schema.String,
+  enabled: Schema.optional(Schema.Boolean),
+});
+const ApplicationWire = Schema.Struct({
+  name: Schema.optional(Schema.String),
+  icon_url: Schema.optional(Schema.String),
+});
+const Web2AppWire = Schema.Struct({
+  url_schema: Schema.optional(Schema.String),
+  restore_access_url: Schema.optional(Schema.String),
+  entitlements_max_age_ms: Schema.optional(Schema.Number),
+});
+
+const toApplication = (
+  value: unknown,
+): Pick<RawConfig, "application"> => {
+  const a = decodeOne(ApplicationWire, value);
+  if (!a) return {};
+  const out: { name?: string; iconUrl?: string } = {};
+  if (a.name !== undefined) out.name = a.name;
+  if (a.icon_url !== undefined) out.iconUrl = a.icon_url;
+  return Object.keys(out).length > 0 ? { application: out } : {};
+};
+
+const toWeb2App = (
+  value: unknown,
+): Pick<RawConfig, "web2appConfig"> => {
+  const w = decodeOne(Web2AppWire, value);
+  if (!w) return {};
+  const cfg: RawWeb2AppConfig = {
+    ...(w.url_schema !== undefined && { urlSchema: w.url_schema }),
+    ...(w.restore_access_url !== undefined && {
+      restoreAccessUrl: w.restore_access_url,
+    }),
+    ...(w.entitlements_max_age_ms !== undefined && {
+      entitlementsMaxAgeMs: w.entitlements_max_age_ms,
+    }),
+  };
+  return { web2appConfig: cfg };
+};
+
+/**
+ * Decode a `/api/v1/static_config` payload into `RawConfig`. Throws
+ * `ConfigParseError` only when the shape isn't an object or `build_id` is
+ * missing — everything else degrades to empty/default rather than throwing,
+ * and the original payload is preserved on `.raw`.
+ */
 export const parseConfig = (input: JsonValue): RawConfig => {
-  if (!isObject(input)) {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new ConfigParseError({
       message: `static_config response is not an object (got ${typeof input})`,
     });
   }
-  const buildId = pickString(input, ["build_id", "buildId"]);
+  const root = input as Record<string, JsonValue>;
+  const buildId = typeof root["build_id"] === "string" ? root["build_id"] : "";
   if (!buildId) {
     throw new ConfigParseError({
-      message: "static_config response is missing `buildId`",
+      message: "static_config response is missing `build_id`",
     });
   }
-  // Wire is snake_case; legacy test fixtures use camelCase. Read both.
-  const triggersRaw = pickArray(input, ["trigger_options", "triggerOptions"]);
-  const paywallsRaw = pickArray(input, [
-    "paywall_responses",
-    "paywallResponses",
-  ]);
+
+  const localization = root["localization"];
+  const locales =
+    typeof localization === "object" &&
+    localization !== null &&
+    !Array.isArray(localization)
+      ? decodeItems(
+          LocaleWire,
+          (localization as Record<string, JsonValue>)["locales"],
+        ).map((l) => l.locale)
+      : [];
+
   return {
     buildId,
-    triggerOptions: triggersRaw
-      .map(parseTrigger)
-      .filter((t): t is RawTrigger => t !== null),
-    paywallResponses: paywallsRaw
-      .map(parsePaywallResponse)
-      .filter((p): p is RawPaywallResponse => p !== null),
-    products: pickArray(input, ["products"])
-      .map(parseProduct)
+    triggerOptions: decodeItems(TriggerWire, root["trigger_options"]).map(
+      toTrigger,
+    ),
+    paywallResponses: decodeItems(PaywallWire, root["paywall_responses"]).map(
+      toPaywall,
+    ),
+    products: decodeItems(ProductWire, root["products"])
+      .map(toProduct)
       .filter((p): p is RawProductItem => p !== null),
-    toggles: pickArray(input, ["toggles"])
-      .map((t): { key: string; enabled: boolean } | null => {
-        if (!isObject(t)) return null;
-        const key = pickString(t, ["key"]);
-        if (!key) return null;
-        return { key, enabled: t["enabled"] === true };
-      })
-      .filter((x): x is { key: string; enabled: boolean } => x !== null),
-    locales: (() => {
-      const loc = input["localization"];
-      if (!isObject(loc)) return [];
-      const list = pickArray(loc, ["locales"]);
-      return list
-        .map((l) =>
-          isObject(l) && typeof l["locale"] === "string"
-            ? (l["locale"] as string)
-            : null,
-        )
-        .filter((x): x is string => x !== null);
-    })(),
-    ...((): { application?: { name?: string; iconUrl?: string } } => {
-      const app = input["application"];
-      if (!isObject(app)) return {};
-      const out: { name?: string; iconUrl?: string } = {};
-      const name = pickString(app, ["name"]);
-      if (name) out.name = name;
-      const iconUrl = pickString(app, ["icon_url", "iconUrl"]);
-      if (iconUrl) out.iconUrl = iconUrl;
-      return Object.keys(out).length > 0 ? { application: out } : {};
-    })(),
-    ...((): { web2appConfig?: RawWeb2AppConfig } => {
-      const w2a = input["web2app_config"] ?? input["web2appConfig"];
-      if (!isObject(w2a)) return {};
-      const cfg: RawWeb2AppConfig = {};
-      const urlSchema = pickString(w2a, ["url_schema", "urlSchema"]);
-      if (urlSchema) (cfg as { urlSchema?: string }).urlSchema = urlSchema;
-      const restoreUrl = pickString(w2a, [
-        "restore_access_url",
-        "restoreAccessUrl",
-      ]);
-      if (restoreUrl)
-        (cfg as { restoreAccessUrl?: string }).restoreAccessUrl = restoreUrl;
-      const maxAge = w2a["entitlements_max_age_ms"] ?? w2a["entitlementsMaxAgeMs"];
-      if (typeof maxAge === "number")
-        (cfg as { entitlementsMaxAgeMs?: number }).entitlementsMaxAgeMs = maxAge;
-      return { web2appConfig: cfg };
-    })(),
-    raw: input as Record<string, JsonValue>,
+    toggles: decodeItems(ToggleWire, root["toggles"]).map((t) => ({
+      key: t.key,
+      enabled: t.enabled === true,
+    })),
+    locales,
+    testModeUserIds: decodeItems(TestModeUserIdSchema, root["test_mode_user_ids"]),
+    ...toApplication(root["application"]),
+    ...toWeb2App(root["web2app_config"]),
+    raw: root,
   };
 };
 
@@ -690,19 +613,17 @@ export const extractEntitlementsByReferenceName = (
   for (const pw of paywallResponses) {
     for (const p of pw.productsV2 ?? []) {
       const referenceName =
-        typeof p["reference_name"] === "string"
-          ? p["reference_name"]
-          : typeof p["referenceName"] === "string"
-            ? (p["referenceName"] as string)
-            : null;
+        typeof p["reference_name"] === "string" ? p["reference_name"] : null;
       if (!referenceName) continue;
       const ents = Array.isArray(p["entitlements"])
         ? (p["entitlements"] as ReadonlyArray<unknown>)
         : [];
       const ids = ents
         .map((e) =>
-          e && typeof e === "object" && typeof (e as { id?: unknown }).id === "string"
-            ? (e as { id: string }).id
+          e &&
+          typeof e === "object" &&
+          typeof (e as { identifier?: unknown }).identifier === "string"
+            ? (e as { identifier: string }).identifier
             : null,
         )
         .filter((s): s is string => s !== null);

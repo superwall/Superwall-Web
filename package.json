@@ -2,12 +2,22 @@
   "name": "superwall-web",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*", "example/*"],
+  "//version": "Single source of truth for all publishable @superwall/* packages. Bump with `bun run version:set <semver>`, which stamps it into every package before publish. `workspace:*` deps resolve to this version at publish time.",
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "example/*"
+  ],
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "clean": "turbo run clean && rm -rf node_modules",
+    "version:sync": "bun run scripts/version.ts",
+    "version:set": "bun run scripts/version.ts",
+    "publish:all:first": "bun run build && bun run scripts/publish.ts --access public",
+    "publish:all": "bun run build && bun run scripts/publish.ts",
+    "publish:all:dry": "bun run build && bun run scripts/publish.ts --access public --dry-run",
     "example": "bun --filter @superwall/example-browser dev",
     "example:start": "bun --filter @superwall/example-browser start"
   },

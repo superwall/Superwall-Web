@@ -52,6 +52,7 @@ import {
   type Product,
   type StorageAdapter,
   type SubscriptionStatus,
+  type TriggerResult,
   type UserAttributes,
   type CustomerInfo,
 } from "./types.ts";
@@ -101,6 +102,8 @@ import {
   type DeviceAttributesInput,
 } from "./internal/deviceAttributes.ts";
 import { createMemoryStorage, StorageService } from "./internal/storage.ts";
+// Safe to import statically — DOM access is `typeof`-guarded, no top-level use.
+import { createBrowserStorage } from "./browser/storage.ts";
 import { translateInternalError } from "./internal/translate.ts";
 import {
   RedemptionService,
@@ -529,13 +532,25 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
 // Factory
 // ---------------------------------------------------------------------------
 
+/** Browser → localStorage (persists across reloads); elsewhere → in-memory. */
+const createDefaultStorage = (): StorageAdapter => {
+  if (typeof localStorage !== "undefined") {
+    try {
+      return createBrowserStorage();
+    } catch {
+      // localStorage present but unusable (e.g. Safari private mode).
+    }
+  }
+  return createMemoryStorage();
+};
+
 export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const target = new SuperwallEventTarget();
 
   // Layer composition: storage → identity → network → eventBus
   // Capture the raw adapter too — the survey path bypasses Effect since
   // it's invoked from an async handler, not an Effect.gen scope.
-  const rawStorageAdapter = opts.storage ?? createMemoryStorage();
+  const rawStorageAdapter = opts.storage ?? createDefaultStorage();
   const storageLayer = StorageService.fromAdapter(rawStorageAdapter);
   const identityLayer = identityWithStorage(storageLayer);
   // Mutable interface-style override. Closure-read per request by the
@@ -1441,6 +1456,27 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         const decision = await runtime.runPromise(
           evaluatePlacement(placement, (params ?? {}) as PlacementParams),
         );
+
+        if (decision.kind !== "placementNotFound") {
+          const triggerResult: TriggerResult =
+            decision.kind === "paywall"
+              ? { type: "paywall", experiment: decision.experiment }
+              : decision.kind === "holdout"
+                ? { type: "holdout", experiment: decision.experiment }
+                : { type: "noAudienceMatch" };
+          runFireAndForget(
+            "placements",
+            "trigger_fire publish failed",
+            Effect.gen(function* () {
+              const bus = yield* EventBus;
+              yield* bus.publish("trigger_fire", {
+                placementName: placement,
+                result: triggerResult,
+              });
+            }),
+          );
+        }
+
         if (
           decision.kind === "placementNotFound" ||
           decision.kind === "noAudienceMatch" ||
@@ -1865,9 +1901,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     }
     return getDefaultPresenter();
   };
-  /** Test mode for presenters: derived from `options.testModeBehavior`.
-   *  "always" ⇒ on; everything else ⇒ off (web has no per-user enablement
-   *  signal today). */
+  /** `testModeBehavior` defaults to `"automatic"`. Simulated (test-mode)
+   *  purchases are strictly opt-in: only `"always"` turns them on. `automatic`
+   *  never simulates — real checkout runs, including in production. */
   const isTestMode = (): boolean =>
     opts.options?.testModeBehavior === "always";
   /** Restore through the active PurchaseController + fire restore lifecycle

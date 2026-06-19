@@ -703,11 +703,18 @@ const handleInbound = (
         return;
       }
       // Stripe checkout lifecycle from the paywall iframe's WebCheckoutController.
-      // Routed internally via ctx.onPurchaseEvent → SDK PurchaseController.
-      // Not surfaced as public events.
+      // Routed internally via ctx.onPurchaseEvent → SDK PurchaseController, AND
+      // surfaced as public transaction_* lifecycle events so consumers see
+      // start / abandon / fail even in the iframe-driven register() flow.
+      // (`complete` is in-flight only; the terminal success event is emitted
+      // from post_checkout_complete.)
       case "stripe_checkout_start": {
         const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
         ctx.onPurchaseEvent?.({ type: "start", productId });
+        ctx.emit("transaction_start", {
+          product: { id: productId, store: "stripe", entitlements: [] },
+          paywall_info: info,
+        });
         break;
       }
       case "stripe_checkout_submit": {
@@ -735,11 +742,19 @@ const handleInbound = (
           productId,
           ...(error !== null && { error }),
         });
+        ctx.emit("transaction_fail", {
+          error: error ?? "stripe checkout failed",
+          paywall_info: info,
+        });
         break;
       }
       case "stripe_checkout_abandon": {
         const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
         ctx.onPurchaseEvent?.({ type: "abandon", productId });
+        ctx.emit("transaction_abandon", {
+          product: { id: productId, store: "stripe", entitlements: [] },
+          paywall_info: info,
+        });
         break;
       }
       // Terminal success signal from the paywall's WebPaywallController on

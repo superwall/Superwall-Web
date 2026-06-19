@@ -239,10 +239,12 @@ const makeWithPaywall = (
             ],
             products: [
               {
-                id: "pro_yearly",
-                product_identifier: "pro_yearly",
-                store: "stripe",
-                entitlements: [{ id: "pro" }],
+                sw_composite_product_id: "pro_yearly",
+                store_product: {
+                  store: "STRIPE",
+                  product_identifier: "pro_yearly",
+                },
+                entitlements: [{ identifier: "pro", type: "SERVICE_LEVEL" }],
               },
             ],
             toggles: [],
@@ -824,6 +826,34 @@ test("register presents, awaits result, fires lifecycle events + handler callbac
   await sw.dispose();
 });
 
+test("register fires trigger_fire with the placement + paywall result", async () => {
+  const presenter = presenterThatResolves({ type: "declined" });
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  const fires: Array<{ placementName: string; result: { type: string } }> = [];
+  sw.events.addEventListener("trigger_fire", (ev) => {
+    fires.push((ev as CustomEvent).detail);
+  });
+  await sw.register({ placement: "checkout" });
+  expect(fires).toHaveLength(1);
+  expect(fires[0]!.placementName).toBe("checkout");
+  expect(fires[0]!.result.type).toBe("paywall");
+  await sw.dispose();
+});
+
+test("register does NOT fire trigger_fire for an unknown placement", async () => {
+  const presenter = presenterThatResolves({ type: "declined" });
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  let fired = false;
+  sw.events.addEventListener("trigger_fire", () => {
+    fired = true;
+  });
+  await sw.register({ placement: "does_not_exist" });
+  expect(fired).toBe(false);
+  await sw.dispose();
+});
+
 test("register: declined result on a config-driven nonGated paywall RUNS the feature", async () => {
   // Config carries `featureGatingBehavior: "nonGated"` on the paywall —
   // even when the user dismisses, the consumer's feature callback fires.
@@ -833,29 +863,31 @@ test("register: declined result on a config-driven nonGated paywall RUNS the fea
     if (url.includes("/api/v1/static_config")) {
       return new Response(
         JSON.stringify({
-          buildId: "b1",
-          triggerOptions: [
+          build_id: "b1",
+          trigger_options: [
             {
-              placementName: "checkout",
+              event_name: "checkout",
               rules: [
                 {
-                  expression: "",
-                  experiment: {
-                    id: "exp_x",
-                    groupId: "grp",
-                    variants: [
-                      { id: "v_a", type: "treatment", paywallId: "pw_x" },
-                    ],
-                  },
+                  experiment_id: "exp_x",
+                  experiment_group_id: "grp",
+                  expression_cel: "",
+                  variants: [
+                    {
+                      variant_id: "v_a",
+                      variant_type: "TREATMENT",
+                      paywall_identifier: "pw_x",
+                    },
+                  ],
                 },
               ],
             },
           ],
-          paywallResponses: [
+          paywall_responses: [
             {
               identifier: "pw_x",
               url: "https://paywalls.superwall.test/pw_x",
-              featureGatingBehavior: "nonGated",
+              feature_gating: "NON_GATED",
             },
           ],
           products: [],
@@ -903,29 +935,31 @@ test("register: declined result on a config-driven gated paywall does NOT run fe
     if (url.includes("/api/v1/static_config")) {
       return new Response(
         JSON.stringify({
-          buildId: "b1",
-          triggerOptions: [
+          build_id: "b1",
+          trigger_options: [
             {
-              placementName: "checkout",
+              event_name: "checkout",
               rules: [
                 {
-                  expression: "",
-                  experiment: {
-                    id: "exp_x",
-                    groupId: "grp",
-                    variants: [
-                      { id: "v_a", type: "treatment", paywallId: "pw_x" },
-                    ],
-                  },
+                  experiment_id: "exp_x",
+                  experiment_group_id: "grp",
+                  expression_cel: "",
+                  variants: [
+                    {
+                      variant_id: "v_a",
+                      variant_type: "TREATMENT",
+                      paywall_identifier: "pw_x",
+                    },
+                  ],
                 },
               ],
             },
           ],
-          paywallResponses: [
+          paywall_responses: [
             {
               identifier: "pw_x",
               url: "https://paywalls.superwall.test/pw_x",
-              featureGatingBehavior: "gated",
+              feature_gating: "GATED",
             },
           ],
           products: [],
@@ -1517,29 +1551,32 @@ const configResponse = (overrides: Partial<{
   }>;
   paywalls: Array<{ identifier: string; name?: string; url?: string; productIds?: string[] }>;
 }> = {}) => ({
-  buildId: "test_build",
-  triggerOptions: (overrides.triggers ?? []).map((t) => ({
-    placementName: t.placementName,
+  build_id: "test_build",
+  trigger_options: (overrides.triggers ?? []).map((t) => ({
+    event_name: t.placementName,
     rules: t.rules.map((r, i) => ({
-      expression: r.expression,
-      experiment: {
-        // Each rule needs its own experiment id — backend guarantees this.
-        // The helper used to share `exp_<placement>` across rules; that
-        // collided once eager assignment landed (one experimentId can only
-        // resolve to one variant), so different rules masked each other.
-        id: `exp_${t.placementName}_${i}`,
-        groupId: "grp_test",
-        variants: [
-          {
-            id: `var_${t.placementName}_${i}`,
-            type: r.variantType ?? "treatment",
-            paywallId: r.paywallId,
-          },
-        ],
-      },
+      // Each rule needs its own experiment id — backend guarantees this.
+      // The helper used to share `exp_<placement>` across rules; that
+      // collided once eager assignment landed (one experimentId can only
+      // resolve to one variant), so different rules masked each other.
+      experiment_id: `exp_${t.placementName}_${i}`,
+      experiment_group_id: "grp_test",
+      expression_cel: r.expression,
+      variants: [
+        {
+          variant_id: `var_${t.placementName}_${i}`,
+          variant_type: (r.variantType ?? "treatment").toUpperCase(),
+          ...(r.paywallId !== undefined && { paywall_identifier: r.paywallId }),
+        },
+      ],
     })),
   })),
-  paywallResponses: overrides.paywalls ?? [],
+  paywall_responses: (overrides.paywalls ?? []).map((p) => ({
+    identifier: p.identifier,
+    ...(p.name !== undefined && { name: p.name }),
+    ...(p.url !== undefined && { url: p.url }),
+    ...(p.productIds !== undefined && { product_ids: p.productIds }),
+  })),
   products: [],
   toggles: [],
   localization: { locales: [{ locale: "en-US" }] },
@@ -1693,26 +1730,24 @@ test("register: variant pick is sticky — same alias re-evaluates → same payw
   // bucket determines which one fires. Either way, BOTH register calls
   // should land on the same one.
   const { fetch } = configFetchRecorder({
-    buildId: "test_build",
-    triggerOptions: [
+    build_id: "test_build",
+    trigger_options: [
       {
-        placementName: "checkout",
+        event_name: "checkout",
         rules: [
           {
-            expression: "",
-            experiment: {
-              id: "exp_split",
-              groupId: "grp",
-              variants: [
-                { id: "v_a", type: "treatment", paywallId: "pw_a", percentage: 50 },
-                { id: "v_b", type: "treatment", paywallId: "pw_b", percentage: 50 },
-              ],
-            },
+            experiment_id: "exp_split",
+            experiment_group_id: "grp",
+            expression_cel: "",
+            variants: [
+              { variant_id: "v_a", variant_type: "TREATMENT", paywall_identifier: "pw_a", percentage: 50 },
+              { variant_id: "v_b", variant_type: "TREATMENT", paywall_identifier: "pw_b", percentage: 50 },
+            ],
           },
         ],
       },
     ],
-    paywallResponses: [
+    paywall_responses: [
       { identifier: "pw_a", url: "https://paywalls.superwall.test/pw_a" },
       { identifier: "pw_b", url: "https://paywalls.superwall.test/pw_b" },
     ],
@@ -1966,17 +2001,20 @@ test("purchases.getProducts: returns config-derived products as Product[]", asyn
     if (url.includes("/api/v1/static_config")) {
       return new Response(
         JSON.stringify({
-          buildId: "b1",
-          triggerOptions: [],
-          paywallResponses: [],
+          build_id: "b1",
+          trigger_options: [],
+          paywall_responses: [],
           products: [
             {
-              id: "pro_yearly",
+              sw_composite_product_id: "pro_yearly",
               name: "Pro Yearly",
-              store: "stripe",
-              entitlements: [{ id: "pro" }],
+              store_product: {
+                store: "STRIPE",
+                product_identifier: "pro_yearly",
+              },
+              entitlements: [{ identifier: "pro", type: "SERVICE_LEVEL" }],
             },
-            { id: "no_entitlements" },
+            { sw_composite_product_id: "no_entitlements" },
           ],
           toggles: [],
           localization: { locales: [{ locale: "en-US" }] },
@@ -2072,9 +2110,9 @@ test("counters: firstSeenAt bootstrapped on first run + totalPaywallViews increm
     if (url.includes("/api/v1/static_config")) {
       return new Response(
         JSON.stringify({
-          buildId: "b1",
-          triggerOptions: [],
-          paywallResponses: [],
+          build_id: "b1",
+          trigger_options: [],
+          paywall_responses: [],
           products: [],
           toggles: [],
           localization: { locales: [{ locale: "en-US" }] },
@@ -2119,12 +2157,18 @@ test("entitlements.byProductIds: returns config-derived entitlements before any 
     if (url.includes("/api/v1/static_config")) {
       return new Response(
         JSON.stringify({
-          buildId: "b1",
-          triggerOptions: [],
-          paywallResponses: [],
+          build_id: "b1",
+          trigger_options: [],
+          paywall_responses: [],
           products: [
-            { id: "pro_yearly", entitlements: [{ id: "pro" }] },
-            { id: "vip", entitlements: [{ id: "pro" }, { id: "vip_only" }] },
+            {
+              sw_composite_product_id: "pro_yearly",
+              entitlements: [{ identifier: "pro" }],
+            },
+            {
+              sw_composite_product_id: "vip",
+              entitlements: [{ identifier: "pro" }, { identifier: "vip_only" }],
+            },
           ],
           toggles: [],
           localization: { locales: [{ locale: "en-US" }] },
@@ -2163,25 +2207,27 @@ test("configure: POSTs confirm_assignments after eager assignment", async () => 
     if (url.includes("/api/v1/static_config")) {
       return new Response(
         JSON.stringify({
-          buildId: "b1",
-          triggerOptions: [
+          build_id: "b1",
+          trigger_options: [
             {
-              placementName: "checkout",
+              event_name: "checkout",
               rules: [
                 {
-                  expression: "",
-                  experiment: {
-                    id: "exp_checkout_0",
-                    groupId: "grp",
-                    variants: [
-                      { id: "v_a", type: "treatment", paywallId: "pw_a" },
-                    ],
-                  },
+                  experiment_id: "exp_checkout_0",
+                  experiment_group_id: "grp",
+                  expression_cel: "",
+                  variants: [
+                    {
+                      variant_id: "v_a",
+                      variant_type: "TREATMENT",
+                      paywall_identifier: "pw_a",
+                    },
+                  ],
                 },
               ],
             },
           ],
-          paywallResponses: [],
+          paywall_responses: [],
           products: [],
           toggles: [],
           localization: { locales: [{ locale: "en-US" }] },
@@ -2220,29 +2266,27 @@ test("refreshConfiguration: re-fetches static_config and re-runs eager assignmen
   let configCalls = 0;
   const buildConfig = (buildId: string) =>
     JSON.stringify({
-      buildId,
-      triggerOptions: [
+      build_id: buildId,
+      trigger_options: [
         {
-          placementName: "checkout",
+          event_name: "checkout",
           rules: [
             {
-              expression: "",
-              experiment: {
-                id: "exp_checkout_0",
-                groupId: "grp_test",
-                variants: [
-                  {
-                    id: `var_${buildId}`,
-                    type: "treatment",
-                    paywallId: `pw_${buildId}`,
-                  },
-                ],
-              },
+              experiment_id: "exp_checkout_0",
+              experiment_group_id: "grp_test",
+              expression_cel: "",
+              variants: [
+                {
+                  variant_id: `var_${buildId}`,
+                  variant_type: "TREATMENT",
+                  paywall_identifier: `pw_${buildId}`,
+                },
+              ],
             },
           ],
         },
       ],
-      paywallResponses: [
+      paywall_responses: [
         {
           identifier: `pw_${buildId}`,
           url: `https://paywalls.superwall.test/pw_${buildId}`,
@@ -2295,25 +2339,27 @@ test("configure: cached config makes sw.ready resolve before a hanging fetch —
   // cached config stays in place — `register()` must resolve to the
   // cached paywall, not paywallNotAvailable.
   const cachedPayload = {
-    buildId: "cached_build",
-    triggerOptions: [
+    build_id: "cached_build",
+    trigger_options: [
       {
-        placementName: "checkout",
+        event_name: "checkout",
         rules: [
           {
-            expression: "",
-            experiment: {
-              id: "exp_cached",
-              groupId: "grp_cached",
-              variants: [
-                { id: "var_cached", type: "treatment", paywallId: "pw_cached" },
-              ],
-            },
+            experiment_id: "exp_cached",
+            experiment_group_id: "grp_cached",
+            expression_cel: "",
+            variants: [
+              {
+                variant_id: "var_cached",
+                variant_type: "TREATMENT",
+                paywall_identifier: "pw_cached",
+              },
+            ],
           },
         ],
       },
     ],
-    paywallResponses: [
+    paywall_responses: [
       { identifier: "pw_cached", url: "https://paywalls.superwall.test/pw_cached" },
     ],
     products: [],

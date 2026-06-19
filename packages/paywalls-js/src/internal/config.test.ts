@@ -29,36 +29,43 @@ import { createMemoryStorage, StorageService } from "./storage.ts";
 
 test("parseConfig lifts top-level fields", () => {
   const cfg = parseConfig({
-    buildId: "abc123",
-    triggerOptions: [
+    build_id: "abc123",
+    trigger_options: [
       {
-        placementName: "checkout",
+        event_name: "checkout",
         rules: [
           {
-            expression: "user.plan == 'free'",
-            experiment: {
-              id: "exp_1",
-              groupId: "grp_1",
-              variants: [
-                { id: "v_a", type: "treatment", paywallId: "pw_1" },
-                { id: "v_b", type: "holdout" },
-              ],
-            },
+            experiment_id: "exp_1",
+            experiment_group_id: "grp_1",
+            expression_cel: "user.plan == 'free'",
+            variants: [
+              {
+                variant_id: "v_a",
+                variant_type: "TREATMENT",
+                paywall_identifier: "pw_1",
+              },
+              { variant_id: "v_b", variant_type: "HOLDOUT" },
+            ],
           },
         ],
       },
     ],
-    paywallResponses: [
+    paywall_responses: [
       {
         identifier: "pw_1",
         name: "Pro Pricing",
         url: "https://paywalls.superwall.test/pw_1",
-        productIds: ["pro_yearly"],
-        featureGatingBehavior: "gated",
+        products: [{ product: "primary", product_id: "pro_yearly" }],
+        feature_gating: "GATED",
       },
     ],
     products: [
-      { id: "pro_yearly", name: "Pro Yearly", store: "stripe", entitlements: [{ id: "pro" }] },
+      {
+        sw_composite_product_id: "pro_yearly",
+        name: "Pro Yearly",
+        store_product: { store: "STRIPE", product_identifier: "pro_yearly" },
+        entitlements: [{ identifier: "pro", type: "SERVICE_LEVEL" }],
+      },
     ],
     toggles: [{ key: "experimentalCheckout", enabled: true }],
     localization: { locales: [{ locale: "en-US" }, { locale: "fr-FR" }] },
@@ -70,16 +77,13 @@ test("parseConfig lifts top-level fields", () => {
   expect(cfg.triggerOptions[0]!.rules[0]!.experiment.id).toBe("exp_1");
   expect(cfg.triggerOptions[0]!.rules[0]!.experiment.variants).toHaveLength(2);
   expect(cfg.paywallResponses[0]!.identifier).toBe("pw_1");
+  expect(cfg.paywallResponses[0]!.productIds).toEqual(["pro_yearly"]);
   expect(cfg.paywallResponses[0]!.featureGatingBehavior).toBe("gated");
   expect(cfg.products[0]!.id).toBe("pro_yearly");
+  expect(cfg.products[0]!.store).toBe("stripe");
   expect(cfg.products[0]!.entitlements).toEqual([{ id: "pro" }]);
   expect(cfg.toggles).toEqual([{ key: "experimentalCheckout", enabled: true }]);
   expect(cfg.locales).toEqual(["en-US", "fr-FR"]);
-});
-
-test("parseConfig accepts the legacy `build_id` snake_case key", () => {
-  const cfg = parseConfig({ build_id: "snake" });
-  expect(cfg.buildId).toBe("snake");
 });
 
 test("parseConfig reads the real snake_case wire shape (trigger_options, paywall_responses, store_product, etc.)", () => {
@@ -156,7 +160,7 @@ test("parseConfig reads the real snake_case wire shape (trigger_options, paywall
 });
 
 test("parseConfig is lenient — missing arrays default to []", () => {
-  const cfg = parseConfig({ buildId: "x" });
+  const cfg = parseConfig({ build_id: "x" });
   expect(cfg.triggerOptions).toEqual([]);
   expect(cfg.paywallResponses).toEqual([]);
   expect(cfg.products).toEqual([]);
@@ -166,14 +170,14 @@ test("parseConfig is lenient — missing arrays default to []", () => {
 
 test("parseConfig drops malformed entries silently", () => {
   const cfg = parseConfig({
-    buildId: "x",
-    triggerOptions: [
+    build_id: "x",
+    trigger_options: [
       "string-not-object",
-      { placementName: "valid", rules: [] },
-      { /* missing placementName */ rules: [] },
-      { placementName: "rule-with-bad-experiment", rules: [{ expression: "" }] },
+      { event_name: "valid", rules: [] },
+      { /* missing event_name */ rules: [] },
+      { event_name: "rule-with-bad-experiment", rules: [{ expression_cel: "" }] },
     ],
-    paywallResponses: [
+    paywall_responses: [
       { identifier: "kept", url: "https://x" },
       { /* missing identifier */ url: "https://y" },
     ],
@@ -201,7 +205,7 @@ test("parseConfig throws ConfigParseError when buildId is missing", () => {
 
 test("parseConfig preserves unknown top-level fields on .raw", () => {
   const cfg = parseConfig({
-    buildId: "x",
+    build_id: "x",
     web2app_config: { someField: 1 },
     prioritized_campaign_id: "campaign_42",
   });
@@ -237,19 +241,21 @@ const buildStack = (fetchImpl: typeof fetch) => {
 };
 
 const sampleConfig = JSON.stringify({
-  buildId: "build_1",
-  triggerOptions: [
+  build_id: "build_1",
+  trigger_options: [
     {
-      placementName: "checkout",
+      event_name: "checkout",
       rules: [
         {
-          expression: "user.plan == 'free'",
-          experiment: { id: "exp_1", groupId: "grp_1", variants: [] },
+          experiment_id: "exp_1",
+          experiment_group_id: "grp_1",
+          expression_cel: "user.plan == 'free'",
+          variants: [],
         },
       ],
     },
   ],
-  paywallResponses: [
+  paywall_responses: [
     { identifier: "pw_1", url: "https://paywalls.superwall.test/pw_1" },
   ],
   products: [],
@@ -394,11 +400,11 @@ test("extractEntitlementsByReferenceName: builds reference_name → entitlementI
       productsV2: [
         {
           reference_name: "primary",
-          entitlements: [{ id: "pro" }, { id: "premium" }],
+          entitlements: [{ identifier: "pro" }, { identifier: "premium" }],
         },
-        { reference_name: "secondary", entitlements: [{ id: "basic" }] },
-        // camelCase variant + no entitlements skipped.
-        { referenceName: "tertiary", entitlements: [] },
+        { reference_name: "secondary", entitlements: [{ identifier: "basic" }] },
+        // No entitlements → skipped.
+        { reference_name: "tertiary", entitlements: [] },
       ],
     },
     {
@@ -407,7 +413,7 @@ test("extractEntitlementsByReferenceName: builds reference_name → entitlementI
       url: "https://y",
       productIds: [],
       productsV2: [
-        { reference_name: "primary", entitlements: [{ id: "pro" }] },
+        { reference_name: "primary", entitlements: [{ identifier: "pro" }] },
       ],
     },
   ]);

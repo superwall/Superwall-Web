@@ -8,7 +8,6 @@ import {
   type PaywallPresentationStyle,
   type Readable,
 } from "@superwall/paywalls-js";
-import { createBrowserStorage } from "@superwall/paywalls-js/browser";
 
 // ---------------------------------------------------------------------------
 // SDK setup
@@ -24,11 +23,8 @@ const REVIEW_LAB =
 
 const sw = createSuperwall({
   apiKey,
-  storage: createBrowserStorage(),
-  // No `presenter` — the SDK uses the default browser iframe presenter
-  // automatically. Pass a custom one (or a `paywall` render callback) per
-  // `register()` call when you need to override.
   options: {
+    // Demo only: simulate purchases instead of charging a real card.
     testModeBehavior: "always",
     // Point the upstreams at the review-lab; the SDK fetches them directly
     // (CORS-enabled). These values also drive `apiBase` / `collector` in

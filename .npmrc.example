@@ -1,0 +1,13 @@
+# Template for the local .npmrc used to publish the @superwall/* packages.
+# Copy to `.npmrc` (gitignored) — or rely on this in CI — and provide NPM_TOKEN
+# via the environment. `${NPM_TOKEN}` is expanded at publish time, so no secret
+# is ever written to disk here.
+#
+#   cp .npmrc.example .npmrc
+#   export NPM_TOKEN=npm_xxxxxxxxxxxxxxxxxxxx
+#   bun run publish:all:first   # then `bun run publish:all` for later releases
+#
+# Scoped packages publish as `--access public` via the publish scripts; add
+# `access=public` below if you'd rather make that the default and drop the flag.
+@superwall:registry=https://registry.npmjs.org/
+//registry.npmjs.org/:_authToken=${NPM_TOKEN}
