@@ -4,7 +4,7 @@
 // Module augmentation is exercised via a separate fixture file
 // (./types.augmentation.test.ts) so this file stays type-only.
 
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import type {
   ConfigurationStatus,
   Entitlement,
@@ -20,7 +20,7 @@ import type {
   TriggerResult,
 } from "./types.ts";
 
-test("discriminated unions narrow on `type` (compile-time)", () => {
+it("discriminated unions narrow on `type` (compile-time)", () => {
   const result: PaywallResult = { type: "purchased", productId: "pro_yearly" };
   if (result.type === "purchased") {
     expect(result.productId).toBe("pro_yearly");
@@ -45,14 +45,14 @@ test("discriminated unions narrow on `type` (compile-time)", () => {
   expect(restore.type).toBe("viaRestore");
 });
 
-test("SubscriptionStatus narrows on `status`", () => {
+it("SubscriptionStatus narrows on `status`", () => {
   const s: SubscriptionStatus = { status: "ACTIVE", entitlements: [] };
   if (s.status === "ACTIVE") {
     expect(Array.isArray(s.entitlements)).toBe(true);
   }
 });
 
-test("Entitlement.type is the closed literal SERVICE_LEVEL", () => {
+it("Entitlement.type is the closed literal SERVICE_LEVEL", () => {
   const e: Entitlement = {
     id: "pro",
     type: "SERVICE_LEVEL",
@@ -62,7 +62,7 @@ test("Entitlement.type is the closed literal SERVICE_LEVEL", () => {
   expect(e.type).toBe("SERVICE_LEVEL");
 });
 
-test("PartialSuperwallOptions accepts deeply partial input", () => {
+it("PartialSuperwallOptions accepts deeply partial input", () => {
   const opts: PartialSuperwallOptions = {
     paywalls: { closeOnBackdrop: false },
     logging: { level: "debug" },
@@ -70,7 +70,7 @@ test("PartialSuperwallOptions accepts deeply partial input", () => {
   expect(opts.paywalls?.closeOnBackdrop).toBe(false);
 });
 
-test("SuperwallOptions networkEnvironment accepts custom hosts", () => {
+it("SuperwallOptions networkEnvironment accepts custom hosts", () => {
   const opts: SuperwallOptions = {
     networkEnvironment: {
       custom: {
@@ -86,12 +86,12 @@ test("SuperwallOptions networkEnvironment accepts custom hosts", () => {
   }
 });
 
-test("ConfigurationStatus is the closed three-state union", () => {
+it("ConfigurationStatus is the closed three-state union", () => {
   const states: ConfigurationStatus[] = ["pending", "configured", "failed"];
   expect(states).toEqual(["pending", "configured", "failed"]);
 });
 
-test("IntegrationAttribute is a closed union (compile-time)", () => {
+it("IntegrationAttribute is a closed union (compile-time)", () => {
   const attr: IntegrationAttribute = "mixpanelDistinctId";
   expect(attr).toBe("mixpanelDistinctId");
   // @ts-expect-error — "twitterId" is not in the closed set
@@ -101,7 +101,7 @@ test("IntegrationAttribute is a closed union (compile-time)", () => {
   expect(bad as string).toBe("twitterId");
 });
 
-test("JsonValue accepts nested values (compile-time)", () => {
+it("JsonValue accepts nested values (compile-time)", () => {
   const v: JsonValue = { a: 1, b: [true, null, { c: "d" }] };
   expect(v).toBeTruthy();
 });

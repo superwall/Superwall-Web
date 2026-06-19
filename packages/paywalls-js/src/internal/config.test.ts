@@ -1,5 +1,5 @@
-import { test, expect } from "bun:test";
-import { Effect, Layer } from "effect";
+import { it, test, expect } from "@effect/vitest";
+import { Effect, Either, Layer } from "effect";
 import { STORAGE_KEYS } from "../types.ts";
 import {
   ConfigService,
@@ -237,7 +237,7 @@ const buildStack = (fetchImpl: typeof fetch) => {
   };
   const network = networkServiceLayer(networkConfig, identity);
   const upstream = Layer.merge(network, storage);
-  return { adapter, layer: configServiceLayer("pk_test", upstream) };
+  return { adapter, layer: Layer.merge(configServiceLayer("pk_test", upstream), identity) };
 };
 
 const sampleConfig = JSON.stringify({
@@ -263,110 +263,158 @@ const sampleConfig = JSON.stringify({
   localization: { locales: [{ locale: "en-US" }] },
 });
 
-test("ConfigService.fetch hits the network, parses, and caches to storage", async () => {
+it.effect("ConfigService.fetch hits the network, parses, and caches to storage", () => {
   const { adapter, layer } = buildStack(
     mockFetch(() => new Response(sampleConfig, { status: 200 })),
   );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const cfg = yield* c.fetch();
 
-  const cfg = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      return yield* c.fetch();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<RawConfig, never, never>,
-  );
+    expect(cfg.buildId).toBe("build_1");
+    expect(cfg.triggerOptions[0]!.placementName).toBe("checkout");
 
-  expect(cfg.buildId).toBe("build_1");
-  expect(cfg.triggerOptions[0]!.placementName).toBe("checkout");
-
-  // Persisted to storage for offline replay.
-  const cached = await adapter.get(STORAGE_KEYS.config);
-  expect(cached).not.toBeNull();
-  const decoded = JSON.parse(cached!) as { buildId: string };
-  expect(decoded.buildId).toBe("build_1");
+    // Persisted to storage for offline replay.
+    const cached = yield* Effect.promise(() => Promise.resolve(adapter.get(STORAGE_KEYS.config)));
+    expect(cached).not.toBeNull();
+    const decoded = JSON.parse(cached!) as { buildId: string };
+    expect(decoded.buildId).toBe("build_1");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.hydrateFromStorage replays a cached config without a network call", async () => {
+it.effect("ConfigService.hydrateFromStorage replays a cached config without a network call", () => {
   const { adapter, layer } = buildStack(
     mockFetch(() => Promise.reject(new Error("offline"))),
   );
-  // Pre-seed the cache as if a previous session wrote it.
-  await adapter.set(
-    STORAGE_KEYS.config,
-    JSON.stringify({
-      buildId: "cached_build",
-      payload: JSON.parse(sampleConfig),
-    }),
-  );
+  return Effect.gen(function* () {
+    // Pre-seed the cache as if a previous session wrote it.
+    yield* Effect.promise(() =>
+      Promise.resolve(adapter.set(
+        STORAGE_KEYS.config,
+        JSON.stringify({
+          buildId: "cached_build",
+          payload: JSON.parse(sampleConfig),
+        }),
+      )),
+    );
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const result = yield* c.hydrateFromStorage();
 
-  const result = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      return yield* c.hydrateFromStorage();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<RawConfig | null, never, never>,
-  );
-
-  expect(result).not.toBeNull();
-  expect(result!.buildId).toBe("build_1"); // from the inner payload
-  expect(result!.triggerOptions[0]!.placementName).toBe("checkout");
+    expect(result).not.toBeNull();
+    expect(result!.buildId).toBe("build_1"); // from the inner payload
+    expect(result!.triggerOptions[0]!.placementName).toBe("checkout");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.hydrateFromStorage returns null when no cache exists", async () => {
+it.effect("ConfigService.hydrateFromStorage returns null when no cache exists", () => {
   const { layer } = buildStack(mockFetch(() => new Response("", { status: 204 })));
-  const result = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      return yield* c.hydrateFromStorage();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<RawConfig | null, never, never>,
-  );
-  expect(result).toBeNull();
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const result = yield* c.hydrateFromStorage();
+    expect(result).toBeNull();
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.getPlacement returns the parsed trigger when found", async () => {
+it.effect("ConfigService.getPlacement returns the parsed trigger when found", () => {
   const { layer } = buildStack(
     mockFetch(() => new Response(sampleConfig, { status: 200 })),
   );
-  const trigger = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      yield* c.fetch();
-      return yield* c.getPlacement("checkout");
-    }).pipe(Effect.provide(layer)) as Effect.Effect<unknown, never, never>,
-  );
-  expect(trigger).not.toBeNull();
-  expect((trigger as { placementName: string }).placementName).toBe("checkout");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.fetch();
+    const trigger = yield* c.getPlacement("checkout");
+    expect(trigger).not.toBeNull();
+    expect((trigger as { placementName: string }).placementName).toBe("checkout");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.getPlacement returns null for unknown placement", async () => {
+it.effect("ConfigService.getPlacement returns null for unknown placement", () => {
   const { layer } = buildStack(
     mockFetch(() => new Response(sampleConfig, { status: 200 })),
   );
-  const trigger = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      yield* c.fetch();
-      return yield* c.getPlacement("nonexistent");
-    }).pipe(Effect.provide(layer)) as Effect.Effect<unknown, never, never>,
-  );
-  expect(trigger).toBeNull();
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.fetch();
+    const trigger = yield* c.getPlacement("nonexistent");
+    expect(trigger).toBeNull();
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.fetch failure on a malformed payload surfaces ConfigParseError", async () => {
+it.effect("ConfigService.getPaywall returns the paywall for a known identifier", () => {
+  const { layer } = buildStack(
+    mockFetch(() => new Response(sampleConfig, { status: 200 })),
+  );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.fetch();
+    const paywall = yield* c.getPaywall("pw_1");
+    expect(paywall).not.toBeNull();
+    expect((paywall as { identifier: string }).identifier).toBe("pw_1");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("ConfigService.getPaywall returns null for unknown identifier", () => {
+  const { layer } = buildStack(
+    mockFetch(() => new Response(sampleConfig, { status: 200 })),
+  );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.fetch();
+    const paywall = yield* c.getPaywall("pw_unknown");
+    expect(paywall).toBeNull();
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("ConfigService.hydrateFromStorage evicts cache when apiKey does not match", () => {
+  const { adapter, layer } = buildStack(
+    mockFetch(() => Promise.reject(new Error("offline"))),
+  );
+  return Effect.gen(function* () {
+    // Seed cache with a DIFFERENT apiKey than the layer's "pk_test"
+    yield* Effect.promise(() =>
+      Promise.resolve(
+        adapter.set(
+          STORAGE_KEYS.config,
+          JSON.stringify({
+            apiKey: "pk_other",
+            buildId: "cached_build",
+            payload: JSON.parse(sampleConfig),
+          }),
+        ),
+      ),
+    );
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const result = yield* c.hydrateFromStorage();
+    // Cache evicted — wrong apiKey
+    expect(result).toBeNull();
+    const cached = yield* Effect.promise(() =>
+      Promise.resolve(adapter.get(STORAGE_KEYS.config)),
+    );
+    expect(cached).toBeNull();
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("ConfigService.fetch failure on a malformed payload surfaces ConfigParseError", () => {
   const { layer } = buildStack(
     mockFetch(() => new Response("[]", { status: 200 })), // array, not object
   );
-  const exit = await Effect.runPromiseExit(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      return yield* c.fetch();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<unknown, ConfigParseError, never>,
-  );
-  expect(exit._tag).toBe("Failure");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const result = yield* c.fetch().pipe(Effect.either);
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(ConfigParseError);
+    }
+  }).pipe(Effect.provide(layer));
 });
 
 // ---------------------------------------------------------------------------
@@ -457,43 +505,36 @@ test("getConfig: only Retrieved yields the underlying config", () => {
   expect(getConfig(ConfigState.Failed(new Error("x")))).toBeNull();
 });
 
-test("ConfigService.fetch transitions None → Retrieved on success", async () => {
+it.effect("ConfigService.fetch transitions None → Retrieved on success", () => {
   const { layer } = buildStack(
     mockFetch(() => new Response(sampleConfig, { status: 200 })),
   );
-  const final = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      const before = yield* c.state();
-      expect(before._tag).toBe("None");
-      yield* c.fetch();
-      return yield* c.state();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
-  );
-  expect(final._tag).toBe("Retrieved");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const before = yield* c.state();
+    expect(before._tag).toBe("None");
+    yield* c.fetch();
+    const final = yield* c.state();
+    expect(final._tag).toBe("Retrieved");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.fetch surfaces Retrying between attempts (fail → retry → succeed)", async () => {
-  // Capture the state tag observed at the *first* failed attempt — by then
-  // the fetch is mid-flight and the second attempt hasn't started yet.
+// Uses real clock (Effect.sleep + setTimeout mix needs real time — it.effect uses frozen TestClock)
+it("ConfigService.fetch surfaces Retrying between attempts (fail → retry → succeed)", async () => {
   let calls = 0;
   let stateAtSecondAttempt: ConfigState | null = null;
   const responder = async () => {
     calls++;
     if (calls === 1) return new Response("nope", { status: 500 });
-    // Slow second attempt so the poller can observe Retrying.
     await new Promise<void>((r) => setTimeout(r, 30));
     return new Response(sampleConfig, { status: 200 });
   };
   const { layer } = buildStack(mockFetch(responder));
-  const final = await Effect.runPromise(
+  await Effect.runPromise(
     Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const c = yield* ConfigService;
-      // Snapshot state from inside fetch's lifetime — fork a poller that
-      // captures whatever tag is set at the moment the second network call
-      // fires. We poll because we don't own the network mock's await point.
       const poll: Effect.Effect<void> = Effect.gen(function* () {
         while (true) {
           if (calls >= 2 && stateAtSecondAttempt === null) {
@@ -506,31 +547,28 @@ test("ConfigService.fetch surfaces Retrying between attempts (fail → retry →
       const fiber = yield* Effect.fork(poll);
       yield* c.fetch();
       yield* fiber;
-      return yield* c.state();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
+      const final = yield* c.state();
+      expect(final._tag).toBe("Retrieved");
+      expect(calls).toBe(2);
+      expect(stateAtSecondAttempt?._tag).toBe("Retrying");
+    }).pipe(Effect.provide(layer)),
   );
-  expect(final._tag).toBe("Retrieved");
-  expect(calls).toBe(2);
-  // Between attempts the actor is in Retrying.
-  expect(stateAtSecondAttempt?._tag).toBe("Retrying");
-});
+}, 10_000);
 
-test("ConfigService.fetch transitions to Failed on fetch error", async () => {
+it.effect("ConfigService.fetch transitions to Failed on fetch error", () => {
   const { layer } = buildStack(
     mockFetch(() => new Response("nope", { status: 500 })),
   );
-  const final = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      yield* c.fetch().pipe(Effect.either);
-      return yield* c.state();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
-  );
-  expect(final._tag).toBe("Failed");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.fetch().pipe(Effect.either);
+    const final = yield* c.state();
+    expect(final._tag).toBe("Failed");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService: reset queued behind a slow fetch lands strictly after it", async () => {
+it.effect("ConfigService: reset queued behind a slow fetch lands strictly after it", () => {
   // Slow fetch (resolves after 50ms) + immediate reset(). The serializer
   // must run reset *after* fetch finishes; otherwise reset would clobber
   // the about-to-be-set Retrieved state and we'd be stuck somewhere weird.
@@ -539,24 +577,22 @@ test("ConfigService: reset queued behind a slow fetch lands strictly after it", 
     return new Response(sampleConfig, { status: 200 });
   });
   const { layer } = buildStack(fetchImpl);
-  const finalState = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      // Fire fetch + reset concurrently. Both go through the same
-      // serializer; reset queues behind fetch.
-      yield* Effect.all([c.fetch().pipe(Effect.either), c.reset()], {
-        concurrency: "unbounded",
-      });
-      return yield* c.state();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
-  );
-  // After the fetch+reset sequence, state must end up at None (reset wins
-  // because it ran second per arrival order).
-  expect(finalState._tag).toBe("None");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    // Fire fetch + reset concurrently. Both go through the same
+    // serializer; reset queues behind fetch.
+    yield* Effect.all([c.fetch().pipe(Effect.either), c.reset()], {
+      concurrency: "unbounded",
+    });
+    const finalState = yield* c.state();
+    // After the fetch+reset sequence, state must end up at None (reset wins
+    // because it ran second per arrival order).
+    expect(finalState._tag).toBe("None");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.fetch concurrent calls serialize through the actor", async () => {
+it.effect("ConfigService.fetch concurrent calls serialize through the actor", () => {
   // Two concurrent fetches each hit the network — the semaphore queues
   // them serially, but each runs to completion. (We dropped the
   // dedup-on-Retrieved short-circuit because it silently no-op'd
@@ -573,58 +609,55 @@ test("ConfigService.fetch concurrent calls serialize through the actor", async (
     return new Response(sampleConfig, { status: 200 });
   });
   const { layer } = buildStack(fetchImpl);
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      const [a, b] = yield* Effect.all([c.fetch(), c.fetch()], {
-        concurrency: "unbounded",
-      });
-      expect(a.buildId).toBe(b.buildId);
-    }).pipe(Effect.provide(layer)) as Effect.Effect<void, never, never>,
-  );
-  expect(calls).toBe(2);
-  // Strict serialization — never two fetches in flight at the same time.
-  expect(maxInFlight).toBe(1);
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    const [a, b] = yield* Effect.all([c.fetch(), c.fetch()], {
+      concurrency: "unbounded",
+    });
+    expect(a.buildId).toBe(b.buildId);
+    expect(calls).toBe(2);
+    // Strict serialization — never two fetches in flight at the same time.
+    expect(maxInFlight).toBe(1);
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.hydrateFromStorage seeds the actor in Retrieved", async () => {
+it.effect("ConfigService.hydrateFromStorage seeds the actor in Retrieved", () => {
   const { adapter, layer } = buildStack(
     mockFetch(() => Promise.reject(new Error("offline"))),
   );
-  await adapter.set(
-    STORAGE_KEYS.config,
-    JSON.stringify({
-      buildId: "cached_build",
-      payload: JSON.parse(sampleConfig),
-    }),
-  );
-  const final = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      yield* c.hydrateFromStorage();
-      return yield* c.state();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<ConfigState, never, never>,
-  );
-  expect(final._tag).toBe("Retrieved");
+  return Effect.gen(function* () {
+    yield* Effect.promise(() =>
+      Promise.resolve(adapter.set(
+        STORAGE_KEYS.config,
+        JSON.stringify({
+          buildId: "cached_build",
+          payload: JSON.parse(sampleConfig),
+        }),
+      )),
+    );
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.hydrateFromStorage();
+    const final = yield* c.state();
+    expect(final._tag).toBe("Retrieved");
+  }).pipe(Effect.provide(layer));
 });
 
-test("ConfigService.reset wipes both ref + storage", async () => {
+it.effect("ConfigService.reset wipes both ref + storage", () => {
   const { adapter, layer } = buildStack(
     mockFetch(() => new Response(sampleConfig, { status: 200 })),
   );
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const c = yield* ConfigService;
-      yield* c.fetch();
-      yield* c.reset();
-      const after = yield* c.current();
-      expect(after).toBeNull();
-    }).pipe(Effect.provide(layer)) as Effect.Effect<void, never, never>,
-  );
-  expect(await adapter.get(STORAGE_KEYS.config)).toBeNull();
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const c = yield* ConfigService;
+    yield* c.fetch();
+    yield* c.reset();
+    const after = yield* c.current();
+    expect(after).toBeNull();
+    const cached = yield* Effect.promise(() => Promise.resolve(adapter.get(STORAGE_KEYS.config)));
+    expect(cached).toBeNull();
+  }).pipe(Effect.provide(layer));
 });
 
 test("parseConfig parses paywall.surveys with snake_case wire fields", () => {

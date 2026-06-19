@@ -13,6 +13,12 @@ import type {
   SubscriptionStatus,
 } from "../types.ts";
 import type { PaywallPurchaseEvent } from "../presenter.ts";
+import {
+  Effect,
+  Fiber,
+  Schedule,
+  Duration,
+} from "effect";
 
 const REDEMPTION_PARAM = "code";
 const REDEMPTION_PREFIX = "redemption_";
@@ -54,8 +60,9 @@ export interface RedemptionOutcome {
 export const createAutomaticPurchaseController = (
   deps: AutomaticPurchaseControllerDeps,
 ): PurchaseController => {
-  let stopPolling: (() => void) | null = null;
+  let pollFiber: Fiber.RuntimeFiber<unknown, never> | null = null;
   let stopVisibility: (() => void) | null = null;
+
   /** Apply a refreshed entitlement set verbatim. Both `post_checkout_complete`
    *  and the periodic /entitlements poll are authoritative; they agree by
    *  contract (the BE has committed before either signal fires), so we
@@ -67,6 +74,54 @@ export const createAutomaticPurchaseController = (
         ? { status: "ACTIVE", entitlements: active }
         : { status: "INACTIVE" },
     );
+  };
+
+  /** Effect that performs one entitlements refresh. Never fails — errors
+   *  are logged and swallowed so the polling Schedule continues. */
+  const refreshEffect: Effect.Effect<void> = Effect.tryPromise({
+    try: () => deps.refreshEntitlements(),
+    catch: (e) => e,
+  }).pipe(
+    Effect.tap((ents) => Effect.sync(() => {
+      if (ents !== null) applyRefresh(ents);
+    })),
+    Effect.tapError((e) => Effect.sync(() => {
+      deps.logWarn(
+        "refreshEntitlements poll failed",
+        e instanceof Error ? e.message : String(e),
+      );
+    })),
+    Effect.catchAll(() => Effect.void),
+  );
+
+  const startPolling = (): void => {
+    // Interrupt any running poll fiber before starting a new one.
+    if (pollFiber !== null) {
+      void Effect.runFork(Fiber.interrupt(pollFiber));
+      pollFiber = null;
+    }
+    // Immediate one-shot refresh (Promise chain preserves original timing
+    // for callers that await a microtask after onConfigured()).
+    void deps
+      .refreshEntitlements()
+      .then((ents) => { if (ents !== null) applyRefresh(ents); })
+      .catch((e: unknown) => {
+        deps.logWarn(
+          "refreshEntitlements poll failed",
+          e instanceof Error ? e.message : String(e),
+        );
+      });
+    // Subsequent repeats managed by Effect's scheduler — no raw setInterval.
+    pollFiber = Effect.runFork(
+      Effect.repeat(refreshEffect, Schedule.fixed(Duration.millis(POLL_INTERVAL_MS))),
+    );
+  };
+
+  const stopPolling = (): void => {
+    if (pollFiber !== null) {
+      void Effect.runFork(Fiber.interrupt(pollFiber));
+      pollFiber = null;
+    }
   };
 
   /** Optimistic ACTIVE flip from config-derived entitlement ids + a
@@ -102,12 +157,8 @@ export const createAutomaticPurchaseController = (
             } satisfies Entitlement,
           ];
     deps.setSubscriptionStatus({ status: "ACTIVE", entitlements });
-    void deps
-      .refreshEntitlements()
-      .then((ents) => {
-        if (ents !== null && ents.length > 0) applyRefresh(ents);
-      })
-      .catch(() => {});
+    // Background reconcile — failures logged, never thrown.
+    void Effect.runPromise(refreshEffect);
   };
 
   const purchase = async (product: Product): Promise<PurchaseResult> =>
@@ -201,30 +252,17 @@ export const createAutomaticPurchaseController = (
             loc.href.split("?")[0] + (qs ? "?" + qs : "");
           try {
             deps.replaceHistory(cleanUrl);
-          } catch {}
+          } catch (e: unknown) {
+            deps.logWarn(
+              "replaceHistory failed after redemption",
+              e instanceof Error ? e.message : String(e),
+            );
+          }
         }
       }
     }
 
-    // One refresh + interval (re)start. Best-effort; failures swallowed.
-    const refreshNow = () => {
-      void deps
-        .refreshEntitlements()
-        .then((ents) => {
-          if (ents !== null) applyRefresh(ents);
-        })
-        .catch(() => {});
-    };
-    const startPolling = () => {
-      if (typeof setInterval === "undefined") return;
-      stopPolling?.();
-      const handle = setInterval(refreshNow, POLL_INTERVAL_MS);
-      stopPolling = () => clearInterval(handle);
-    };
-
-    // Immediate one-shot fetch so subscriptionStatus flips off UNKNOWN as
-    // soon as configure() settles — don't wait the full poll interval.
-    refreshNow();
+    // Start Effect-managed polling: immediate refresh + repeat on schedule.
     startPolling();
 
     // Pause the poll while the tab is hidden (no point hammering /entitlements
@@ -238,10 +276,8 @@ export const createAutomaticPurchaseController = (
       stopVisibility?.();
       const onVisibility = () => {
         if (document.visibilityState === "hidden") {
-          stopPolling?.();
-          stopPolling = null;
+          stopPolling();
         } else {
-          refreshNow();
           startPolling();
         }
       };
@@ -252,10 +288,9 @@ export const createAutomaticPurchaseController = (
   };
 
   const dispose = (): void => {
-    // Stop the entitlements-polling interval + visibility listener so neither
-    // the timer (and its fetch loop) nor the listener outlives the instance.
-    stopPolling?.();
-    stopPolling = null;
+    // Interrupt the polling fiber and remove the visibility listener so
+    // neither outlives the instance.
+    stopPolling();
     stopVisibility?.();
     stopVisibility = null;
   };

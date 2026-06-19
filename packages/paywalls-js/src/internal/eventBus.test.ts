@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { computedPropertiesLayer } from "./computed.ts";
 import type { PaywallInfo, SubscriptionStatus } from "../types.ts";
@@ -51,7 +51,7 @@ const buildStack = (
   const network = networkServiceLayer(config, identity);
   const computed = computedPropertiesLayer(storage);
   const upstream = Layer.merge(network, computed);
-  return eventBusLayerWithTarget(target, upstream);
+  return Layer.merge(eventBusLayerWithTarget(target, upstream), identity);
 };
 
 const stubPaywall = (id: string): PaywallInfo => ({
@@ -66,7 +66,7 @@ const stubPaywall = (id: string): PaywallInfo => ({
 // publish: EventTarget dispatch
 // ---------------------------------------------------------------------------
 
-test("publish dispatches a typed CustomEvent to the per-instance target", async () => {
+it.effect("publish dispatches a typed CustomEvent to the per-instance target", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -74,49 +74,43 @@ test("publish dispatches a typed CustomEvent to the per-instance target", async 
   const seen: PaywallInfo[] = [];
   target.addEventListener("paywall_open", (e) => seen.push(e.detail.paywall_info));
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.publish("paywall_open", { paywall_info: stubPaywall("pw_1") });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(seen).toHaveLength(1);
-  expect(seen[0]!.identifier).toBe("pw_1");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("paywall_open", { paywall_info: stubPaywall("pw_1") });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.identifier).toBe("pw_1");
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
 // publish: wire emission
 // ---------------------------------------------------------------------------
 
-test("publish posts wire-bound events to the collector", async () => {
+it.effect("publish posts wire-bound events to the collector", () => {
   const target = new SuperwallEventTarget();
   const { fetch, calls } = mockFetch();
   const stack = buildStack(fetch, target);
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.publish("paywall_close", {
-        paywall_info: stubPaywall("pw_1"),
-        close_reason: "manualClose",
-      });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
-  const body = JSON.parse(calls[0]!.body!);
-  expect(body.events).toHaveLength(1);
-  expect(body.events[0].event_name).toBe("paywall_close");
-  expect(body.events[0].parameters.paywall_info.identifier).toBe("pw_1");
-  expect(body.events[0].event_id).toMatch(/^[0-9a-f-]+$/);
-  expect(body.events[0].created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("paywall_close", {
+      paywall_info: stubPaywall("pw_1"),
+      close_reason: "manualClose",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
+    const body = JSON.parse(calls[0]!.body!);
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0].event_name).toBe("paywall_close");
+    expect(body.events[0].parameters.paywall_info.identifier).toBe("pw_1");
+    expect(body.events[0].event_id).toMatch(/^[0-9a-f-]+$/);
+    expect(body.events[0].created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  }).pipe(Effect.provide(stack));
 });
 
-test("publish does NOT post local-only events to the collector", async () => {
+it.effect("publish does NOT post local-only events to the collector", () => {
   const target = new SuperwallEventTarget();
   const { fetch, calls } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -124,38 +118,33 @@ test("publish does NOT post local-only events to the collector", async () => {
   let localCount = 0;
   target.addEventListener("paywallWillOpenURL", () => localCount++);
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.publish("paywallWillOpenURL", { url: "https://example.com" });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(localCount).toBe(1); // listener fired
-  expect(calls).toHaveLength(0); // no wire emission
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("paywallWillOpenURL", { url: "https://example.com" });
+    expect(localCount).toBe(1); // listener fired
+    expect(calls).toHaveLength(0); // no wire emission
+  }).pipe(Effect.provide(stack));
 });
 
-test("publish absorbs collector failures without throwing", async () => {
+it.effect("publish absorbs collector failures without throwing", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch(() => new Response("nope", { status: 500 }));
   const stack = buildStack(fetch, target);
 
   // Should resolve, not reject — wire failures are fire-and-forget.
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.publish("app_open", {});
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("app_open", {});
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
 // delegate: setDelegate / notifyDelegate / firehose onEvent
 // ---------------------------------------------------------------------------
 
-test("withDelegate runs the callback against the active delegate", async () => {
+it.effect("withDelegate runs the callback against the active delegate", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -167,46 +156,41 @@ test("withDelegate runs the callback against the active delegate", async () => {
     },
   };
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.setDelegate(delegate);
-      yield* bus.withDelegate((d) =>
-        d.onSubscriptionStatusChange?.(
-          { status: "INACTIVE" },
-          { status: "ACTIVE", entitlements: [] },
-        ),
-      );
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(calls).toHaveLength(1);
-  expect(calls[0]![0].status).toBe("INACTIVE");
-  expect(calls[0]![1].status).toBe("ACTIVE");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.setDelegate(delegate);
+    yield* bus.withDelegate((d) =>
+      d.onSubscriptionStatusChange?.(
+        { status: "INACTIVE" },
+        { status: "ACTIVE", entitlements: [] },
+      ),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0].status).toBe("INACTIVE");
+    expect(calls[0]![1].status).toBe("ACTIVE");
+  }).pipe(Effect.provide(stack));
 });
 
-test("withDelegate is a no-op when no delegate is set", async () => {
+it.effect("withDelegate is a no-op when no delegate is set", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
 
   let called = false;
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      // Don't set a delegate; the callback should never run.
-      yield* bus.withDelegate((d) => {
-        called = true;
-        d.onPaywallDidPresent?.(stubPaywall("pw_x"));
-      });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-  expect(called).toBe(false);
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    // Don't set a delegate; the callback should never run.
+    yield* bus.withDelegate((d) => {
+      called = true;
+      d.onPaywallDidPresent?.(stubPaywall("pw_x"));
+    });
+    expect(called).toBe(false);
+  }).pipe(Effect.provide(stack));
 });
 
-test("withDelegate gracefully skips unimplemented methods (caller uses optional chaining)", async () => {
+it.effect("withDelegate gracefully skips unimplemented methods (caller uses optional chaining)", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -217,19 +201,17 @@ test("withDelegate gracefully skips unimplemented methods (caller uses optional 
     onPaywallDidPresent: () => {},
   };
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.setDelegate(delegate);
-      yield* bus.withDelegate((d) =>
-        d.onSubscriptionStatusChange?.({ status: "INACTIVE" }, { status: "INACTIVE" }),
-      );
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.setDelegate(delegate);
+    yield* bus.withDelegate((d) =>
+      d.onSubscriptionStatusChange?.({ status: "INACTIVE" }, { status: "INACTIVE" }),
+    );
+  }).pipe(Effect.provide(stack));
 });
 
-test("withDelegate swallows delegate-thrown errors (publisher stays alive)", async () => {
+it.effect("withDelegate swallows delegate-thrown errors (publisher stays alive)", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -240,17 +222,15 @@ test("withDelegate swallows delegate-thrown errors (publisher stays alive)", asy
     },
   };
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.setDelegate(delegate);
-      yield* bus.withDelegate((d) => d.onPaywallDidPresent?.(stubPaywall("pw_x")));
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.setDelegate(delegate);
+    yield* bus.withDelegate((d) => d.onPaywallDidPresent?.(stubPaywall("pw_x")));
+  }).pipe(Effect.provide(stack));
 });
 
-test("publish fires delegate.onEvent firehose for wire-bound events only", async () => {
+it.effect("publish fires delegate.onEvent firehose for wire-bound events only", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -262,22 +242,19 @@ test("publish fires delegate.onEvent firehose for wire-bound events only", async
     },
   };
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.setDelegate(delegate);
-      yield* bus.publish("app_open", {});
-      yield* bus.publish("paywallWillOpenURL", { url: "https://example.com" });
-      yield* bus.publish("session_start", {});
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  // paywallWillOpenURL is local-only and skipped from the firehose; the rest land.
-  expect(seen).toEqual(["app_open", "session_start"]);
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.setDelegate(delegate);
+    yield* bus.publish("app_open", {});
+    yield* bus.publish("paywallWillOpenURL", { url: "https://example.com" });
+    yield* bus.publish("session_start", {});
+    // paywallWillOpenURL is local-only and skipped from the firehose; the rest land.
+    expect(seen).toEqual(["app_open", "session_start"]);
+  }).pipe(Effect.provide(stack));
 });
 
-test("setDelegate(null) detaches the active delegate", async () => {
+it.effect("setDelegate(null) detaches the active delegate", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
@@ -287,35 +264,30 @@ test("setDelegate(null) detaches the active delegate", async () => {
     onEvent: () => firehoseCount++,
   };
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const bus = yield* EventBus;
-      yield* bus.setDelegate(delegate);
-      yield* bus.publish("app_open", {});
-      yield* bus.setDelegate(null);
-      yield* bus.publish("app_open", {});
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(firehoseCount).toBe(1);
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.setDelegate(delegate);
+    yield* bus.publish("app_open", {});
+    yield* bus.setDelegate(null);
+    yield* bus.publish("app_open", {});
+    expect(firehoseCount).toBe(1);
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
 // target identity — proves the public `sw.events` and bus dispatch share one
 // ---------------------------------------------------------------------------
 
-test("target on the bus is the same instance the consumer added listeners to", async () => {
+it.effect("target on the bus is the same instance the consumer added listeners to", () => {
   const target = new SuperwallEventTarget();
   const { fetch } = mockFetch();
   const stack = buildStack(fetch, target);
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      const bus = yield* EventBus;
-      expect(bus.target).toBe(target);
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
+  return Effect.gen(function* () {
+    const bus = yield* EventBus;
+    expect(bus.target).toBe(target);
+  }).pipe(Effect.provide(stack));
 });
 
 // Suppress unused-import warning when the test file shrinks

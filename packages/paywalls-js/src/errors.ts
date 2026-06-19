@@ -2,6 +2,8 @@
 //
 // All errors extend SuperwallError and carry a stable `code` field for
 // non-TS consumers. Use `instanceof` for TS discrimination.
+// `_tag` fields are added for Effect.catchTag compatibility without
+// changing the public API or switching to Schema.TaggedError.
 
 import type { PaywallInfo } from "./types.ts";
 
@@ -17,6 +19,9 @@ export type SuperwallErrorCode =
   | "PAYWALL_NOT_AVAILABLE";
 
 export class SuperwallError extends Error {
+  // Typed as string on the base so subclass literal tags remain assignable here.
+  // Subclasses narrow to their own literal for Effect.catchTag compatibility.
+  readonly _tag: string = "SuperwallError";
   override readonly name: string = "SuperwallError";
   readonly code: SuperwallErrorCode;
 
@@ -27,6 +32,7 @@ export class SuperwallError extends Error {
 }
 
 export class NotConfiguredError extends SuperwallError {
+  override readonly _tag = "NotConfiguredError" as const;
   override readonly name = "NotConfiguredError";
   override readonly cause?: Error;
 
@@ -37,6 +43,7 @@ export class NotConfiguredError extends SuperwallError {
 }
 
 export class NoPresenterRegisteredError extends SuperwallError {
+  override readonly _tag = "NoPresenterRegisteredError" as const;
   override readonly name = "NoPresenterRegisteredError";
   readonly placement: string;
 
@@ -50,6 +57,7 @@ export class NoPresenterRegisteredError extends SuperwallError {
 }
 
 export class PaywallAlreadyPresentedError extends SuperwallError {
+  override readonly _tag = "PaywallAlreadyPresentedError" as const;
   override readonly name = "PaywallAlreadyPresentedError";
   readonly attemptedPlacement: string;
   readonly currentPaywallInfo: PaywallInfo;
@@ -65,6 +73,7 @@ export class PaywallAlreadyPresentedError extends SuperwallError {
 }
 
 export class NoDefaultSuperwallError extends SuperwallError {
+  override readonly _tag = "NoDefaultSuperwallError" as const;
   override readonly name = "NoDefaultSuperwallError";
 
   constructor() {
@@ -76,6 +85,7 @@ export class NoDefaultSuperwallError extends SuperwallError {
 }
 
 export class NetworkError extends SuperwallError {
+  override readonly _tag = "NetworkError" as const;
   override readonly name = "NetworkError";
   readonly status?: number;
   override readonly cause?: Error;
@@ -88,6 +98,7 @@ export class NetworkError extends SuperwallError {
 }
 
 export class ConfigurationFetchError extends SuperwallError {
+  override readonly _tag = "ConfigurationFetchError" as const;
   override readonly name = "ConfigurationFetchError";
   override readonly cause: Error;
   readonly attempt: number;
@@ -103,6 +114,7 @@ export class ConfigurationFetchError extends SuperwallError {
 }
 
 export class PresenterError extends SuperwallError {
+  override readonly _tag = "PresenterError" as const;
   override readonly name = "PresenterError";
   override readonly cause?: Error;
 
@@ -113,6 +125,7 @@ export class PresenterError extends SuperwallError {
 }
 
 export class PaywallNotAvailableError extends SuperwallError {
+  override readonly _tag = "PaywallNotAvailableError" as const;
   override readonly name = "PaywallNotAvailableError";
   readonly placement: string;
   readonly reason: "no_config" | "no_paywall_in_config" | "no_paywall_id_on_variant";
@@ -128,6 +141,7 @@ export class PaywallNotAvailableError extends SuperwallError {
 }
 
 export class StorageError extends SuperwallError {
+  override readonly _tag = "StorageError" as const;
   override readonly name = "StorageError";
   override readonly cause?: Error;
 

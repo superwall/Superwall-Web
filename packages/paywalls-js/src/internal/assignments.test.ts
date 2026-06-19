@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import { Effect } from "effect";
 import { STORAGE_KEYS } from "../types.ts";
 import {
@@ -34,19 +34,19 @@ const exp = (
 // pickVariant — pure helper
 // ---------------------------------------------------------------------------
 
-test("pickVariant: 0 variants → default treatment fallback", () => {
+it("pickVariant: 0 variants → default treatment fallback", () => {
   const v = pickVariant([]);
   expect(v).toEqual({ id: "default", type: "treatment" });
 });
 
-test("pickVariant: 1 variant → returns it without randomiser", () => {
+it("pickVariant: 1 variant → returns it without randomiser", () => {
   const v = pickVariant([
     { id: "v_a", type: "treatment", paywallId: "pw_a" },
   ]);
   expect(v).toEqual({ id: "v_a", type: "treatment", paywallId: "pw_a" });
 });
 
-test("pickVariant: threshold lands in first bucket → first variant", () => {
+it("pickVariant: threshold lands in first bucket → first variant", () => {
   const variants = exp([
     { id: "v_a", percentage: 50 },
     { id: "v_b", percentage: 50 },
@@ -60,7 +60,7 @@ test("pickVariant: threshold lands in first bucket → first variant", () => {
   expect(pickVariant(variants, () => 99).id).toBe("v_b");
 });
 
-test("pickVariant: respects explicit percentages at scale", () => {
+it("pickVariant: respects explicit percentages at scale", () => {
   const variants = exp([
     { id: "v_a", percentage: 90 },
     { id: "v_b", percentage: 10 },
@@ -74,7 +74,7 @@ test("pickVariant: respects explicit percentages at scale", () => {
   expect(counts.v_b).toBeLessThan(50);
 });
 
-test("pickVariant: missing percentages → even split via random index", () => {
+it("pickVariant: missing percentages → even split via random index", () => {
   const variants = exp([
     { id: "v_a" },
     { id: "v_b" },
@@ -88,7 +88,7 @@ test("pickVariant: missing percentages → even split via random index", () => {
   expect(pickVariant(variants, r).id).toBe("v_c");
 });
 
-test("pickVariant: holdout variant type is preserved", () => {
+it("pickVariant: holdout variant type is preserved", () => {
   const variants = exp([
     { id: "v_treat", type: "treatment", percentage: 99, paywallId: "pw_a" },
     { id: "v_hold", type: "holdout", percentage: 1 },
@@ -107,121 +107,103 @@ test("pickVariant: holdout variant type is preserved", () => {
 // AssignmentService.getOrAssign — sticky semantics
 // ---------------------------------------------------------------------------
 
-test("getOrAssign: same (alias, experiment) → cached variant on subsequent calls", async () => {
+it.effect("getOrAssign: same (alias, experiment) → cached variant on subsequent calls", () => {
   const layer = stack();
-  const out = await Effect.runPromise(
-    Effect.gen(function* () {
-      const a = yield* AssignmentService;
-      const e = exp([
-        { id: "v_a", percentage: 50 },
-        { id: "v_b", percentage: 50 },
-      ]);
-      const first = yield* a.getOrAssign(e, "alice");
-      const second = yield* a.getOrAssign(e, "alice");
-      const third = yield* a.getOrAssign(e, "alice");
-      return { first, second, third };
-    }).pipe(Effect.provide(layer)) as Effect.Effect<
-      { first: { variant: { id: string } }; second: { variant: { id: string } }; third: { variant: { id: string } } },
-      never,
-      never
-    >,
-  );
-  expect(out.first.variant.id).toBe(out.second.variant.id);
-  expect(out.second.variant.id).toBe(out.third.variant.id);
+  return Effect.gen(function* () {
+    const a = yield* AssignmentService;
+    const e = exp([
+      { id: "v_a", percentage: 50 },
+      { id: "v_b", percentage: 50 },
+    ]);
+    const first = yield* a.getOrAssign(e, "alice");
+    const second = yield* a.getOrAssign(e, "alice");
+    const third = yield* a.getOrAssign(e, "alice");
+    expect(first.variant.id).toBe(second.variant.id);
+    expect(second.variant.id).toBe(third.variant.id);
+  }).pipe(Effect.provide(layer));
 });
 
-test("getOrAssign: persists across runtimes (replays from storage)", async () => {
+it.effect("getOrAssign: persists across runtimes (replays from storage)", () => {
   const adapter = createMemoryStorage();
   const sharedStorage = StorageService.fromAdapter(adapter);
   const e = exp([{ id: "v_a", percentage: 50 }, { id: "v_b", percentage: 50 }]);
 
-  // First runtime — assign + persist.
-  const initial = await Effect.runPromise(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    // First runtime — assign + persist.
+    const initial = yield* Effect.gen(function* () {
       const a = yield* AssignmentService;
       return yield* a.getOrAssign(e, "alice");
-    }).pipe(Effect.provide(assignmentServiceLayer(sharedStorage))) as Effect.Effect<
-      { variant: { id: string } },
-      never,
-      never
-    >,
-  );
+    }).pipe(Effect.provide(assignmentServiceLayer(sharedStorage)));
 
-  // Second runtime — reads cache; same variant.
-  const replayed = await Effect.runPromise(
-    Effect.gen(function* () {
+    // Second runtime — reads cache; same variant.
+    const replayed = yield* Effect.gen(function* () {
       const a = yield* AssignmentService;
       return yield* a.getOrAssign(e, "alice");
-    }).pipe(Effect.provide(assignmentServiceLayer(sharedStorage))) as Effect.Effect<
-      { variant: { id: string } },
-      never,
-      never
-    >,
-  );
-  expect(replayed.variant.id).toBe(initial.variant.id);
+    }).pipe(Effect.provide(assignmentServiceLayer(sharedStorage)));
+
+    expect(replayed.variant.id).toBe(initial.variant.id);
+  });
 });
 
-test("getOrAssign: repicks if cached variant id no longer exists in config", async () => {
+it.effect("getOrAssign: repicks if cached variant id no longer exists in config", () => {
   const adapter = createMemoryStorage();
-  // Pre-seed the cache with a variant that won't be in the new config.
-  await adapter.set(
-    STORAGE_KEYS.assignments,
-    JSON.stringify([
-      {
-        experimentId: "exp_test",
-        variant: { id: "v_old", type: "treatment" },
-      },
-    ]),
-  );
 
-  const newE = exp([{ id: "v_new", type: "treatment" }]);
-  const result = await Effect.runPromise(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    // Pre-seed the cache with a variant that won't be in the new config.
+    yield* Effect.promise(() =>
+      Promise.resolve(adapter.set(
+        STORAGE_KEYS.assignments,
+        JSON.stringify([
+          {
+            experimentId: "exp_test",
+            variant: { id: "v_old", type: "treatment" },
+          },
+        ]),
+      )),
+    );
+
+    const newE = exp([{ id: "v_new", type: "treatment" }]);
+    const result = yield* Effect.gen(function* () {
       const a = yield* AssignmentService;
       return yield* a.getOrAssign(newE, "alice");
     }).pipe(
       Effect.provide(
         assignmentServiceLayer(StorageService.fromAdapter(adapter)),
       ),
-    ) as Effect.Effect<{ variant: { id: string } }, never, never>,
-  );
-  // Repicked because v_old was deleted from config.
-  expect(result.variant.id).toBe("v_new");
+    );
+    // Repicked because v_old was deleted from config.
+    expect(result.variant.id).toBe("v_new");
+  });
 });
 
-test("getAll: snapshot is a copy (caller can't mutate internal state)", async () => {
+it.effect("getAll: snapshot is a copy (caller can't mutate internal state)", () => {
   const layer = stack();
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      const a = yield* AssignmentService;
-      yield* a.getOrAssign(exp([{ id: "v_a" }]), "alice");
-      const snap = yield* a.getAll();
-      snap.push({
-        experimentId: "fake",
-        variant: { id: "fake", type: "treatment" },
-      });
-      const snap2 = yield* a.getAll();
-      expect(snap2.length).toBe(1);
-      expect(snap2[0]!.experimentId).toBe("exp_test");
-    }).pipe(Effect.provide(layer)) as Effect.Effect<void, never, never>,
-  );
+  return Effect.gen(function* () {
+    const a = yield* AssignmentService;
+    yield* a.getOrAssign(exp([{ id: "v_a" }]), "alice");
+    const snap = yield* a.getAll();
+    snap.push({
+      experimentId: "fake",
+      variant: { id: "fake", type: "treatment" },
+    });
+    const snap2 = yield* a.getAll();
+    expect(snap2.length).toBe(1);
+    expect(snap2[0]!.experimentId).toBe("exp_test");
+  }).pipe(Effect.provide(layer));
 });
 
-test("reset: clears in-memory + storage", async () => {
+it.effect("reset: clears in-memory + storage", () => {
   const adapter = createMemoryStorage();
   const sharedStorage = StorageService.fromAdapter(adapter);
-  await Effect.runPromise(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    yield* Effect.gen(function* () {
       const a = yield* AssignmentService;
       yield* a.getOrAssign(exp([{ id: "v_a" }]), "alice");
       yield* a.reset();
       const all = yield* a.getAll();
       expect(all).toEqual([]);
-    }).pipe(Effect.provide(assignmentServiceLayer(sharedStorage))) as Effect.Effect<
-      void,
-      never,
-      never
-    >,
-  );
-  expect(await adapter.get(STORAGE_KEYS.assignments)).toBeNull();
+    }).pipe(Effect.provide(assignmentServiceLayer(sharedStorage)));
+    const cached = yield* Effect.promise(() => Promise.resolve(adapter.get(STORAGE_KEYS.assignments)));
+    expect(cached).toBeNull();
+  });
 });

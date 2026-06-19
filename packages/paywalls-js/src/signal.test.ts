@@ -1,18 +1,18 @@
 // Each test names the §2 contract clause it enforces.
 
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import { asReadable, createSignal } from "./signal.ts";
 
 const tick = () => new Promise<void>((r) => queueMicrotask(r));
 
-test("readable .value reads the current value", () => {
+it("readable .value reads the current value", () => {
   const sig = createSignal(0);
   expect(sig.value).toBe(0);
   sig.set(7);
   expect(sig.value).toBe(7);
 });
 
-test("subscribe fires synchronously with the current value on attach", () => {
+it("subscribe fires synchronously with the current value on attach", () => {
   const sig = createSignal({ n: 1 });
   const seen: Array<{ n: number }> = [];
   sig.subscribe((v) => seen.push(v));
@@ -20,7 +20,7 @@ test("subscribe fires synchronously with the current value on attach", () => {
   expect(seen[0]).toEqual({ n: 1 });
 });
 
-test("subscribe returns an unsubscribe that stops further notifications", async () => {
+it("subscribe returns an unsubscribe that stops further notifications", async () => {
   const sig = createSignal(0);
   const seen: number[] = [];
   const unsub = sig.subscribe((v) => seen.push(v));
@@ -31,7 +31,7 @@ test("subscribe returns an unsubscribe that stops further notifications", async 
   expect(seen).toEqual([0]);
 });
 
-test("notifications are coalesced — N writes in one task fire one notification", async () => {
+it("notifications are coalesced — N writes in one task fire one notification", async () => {
   const sig = createSignal(0);
   const seen: number[] = [];
   sig.subscribe((v) => seen.push(v));
@@ -46,7 +46,7 @@ test("notifications are coalesced — N writes in one task fire one notification
   expect(seen).toEqual([0, 3]);
 });
 
-test("setting the same value (Object.is equal) does not notify", async () => {
+it("setting the same value (Object.is equal) does not notify", async () => {
   const obj = { x: 1 };
   const sig = createSignal(obj);
   const seen: Array<typeof obj> = [];
@@ -62,7 +62,7 @@ test("setting the same value (Object.is equal) does not notify", async () => {
   expect(seen).toHaveLength(2);
 });
 
-test("`.value` returns the same reference between change notifications (===-stable)", async () => {
+it("`.value` returns the same reference between change notifications (===-stable)", async () => {
   const initial = { a: 1 };
   const sig = createSignal(initial);
   const refA1 = sig.value;
@@ -78,7 +78,7 @@ test("`.value` returns the same reference between change notifications (===-stab
   expect(sig.value).toBe(next);
 });
 
-test("update(fn) reads-then-writes atomically", async () => {
+it("update(fn) reads-then-writes atomically", async () => {
   const sig = createSignal(10);
   const seen: number[] = [];
   sig.subscribe((v) => seen.push(v));
@@ -91,7 +91,7 @@ test("update(fn) reads-then-writes atomically", async () => {
   expect(seen).toEqual([10, 30]); // coalesced
 });
 
-test("listeners that unsubscribe themselves don't break iteration", async () => {
+it("listeners that unsubscribe themselves don't break iteration", async () => {
   const sig = createSignal(0);
   const seen: Array<["a" | "b" | "c", number]> = [];
 
@@ -116,7 +116,7 @@ test("listeners that unsubscribe themselves don't break iteration", async () => 
   expect(nined.sort()).toEqual(["a", "c"]); // b unsubscribed
 });
 
-test("asReadable() strips the writable surface", () => {
+it("asReadable() strips the writable surface", () => {
   const sig = createSignal(1);
   const ro = asReadable(sig);
   expect(ro.value).toBe(1);

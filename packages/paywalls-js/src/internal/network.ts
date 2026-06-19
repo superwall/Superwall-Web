@@ -169,6 +169,14 @@ const make = (config: NetworkConfig) =>
       function* () {
         const hosts = resolveHosts(config.environment);
         const url = `https://${hosts.base}/api/v1/static_config?pk=${encodeURIComponent(config.apiKey)}`;
+        yield* Effect.annotateCurrentSpan({
+          "http.url": url,
+          "http.method": "GET",
+          "superwall.environment":
+            typeof config.environment === "string"
+              ? config.environment
+              : "custom",
+        });
         const headers = yield* buildHeaders();
 
         const response = yield* Effect.tryPromise({
@@ -189,6 +197,10 @@ const make = (config: NetworkConfig) =>
         });
 
         if (!response.ok) {
+          yield* Effect.annotateCurrentSpan({
+            "http.status_code": response.status,
+            "error.type": "NetworkRequestError",
+          });
           return yield* Effect.fail(
             new NetworkRequestError({
               method: "GET",
@@ -199,6 +211,7 @@ const make = (config: NetworkConfig) =>
           );
         }
 
+        yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
         return yield* Effect.tryPromise({
           try: () => response.json() as Promise<JsonValue>,
           catch: (cause) =>
@@ -217,6 +230,11 @@ const make = (config: NetworkConfig) =>
     ) {
       const hosts = resolveHosts(config.environment);
       const url = `https://${hosts.collector}/api/v1/events`;
+      yield* Effect.annotateCurrentSpan({
+        "http.url": url,
+        "http.method": "POST",
+        "superwall.event_count": events.length,
+      });
       const headers = yield* buildHeaders();
 
       const response = yield* Effect.tryPromise({
@@ -236,6 +254,10 @@ const make = (config: NetworkConfig) =>
       });
 
       if (!response.ok) {
+        yield* Effect.annotateCurrentSpan({
+          "http.status_code": response.status,
+          "error.type": "NetworkRequestError",
+        });
         return yield* Effect.fail(
           new NetworkRequestError({
             method: "POST",
@@ -245,6 +267,7 @@ const make = (config: NetworkConfig) =>
           }),
         );
       }
+      yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
     });
 
     /** POST /api/v1/enrich on the enrichment host. Hard 1s timeout, no retries
@@ -254,6 +277,10 @@ const make = (config: NetworkConfig) =>
       function* (payload: EnrichmentRequest) {
         const hosts = resolveHosts(config.environment);
         const url = `https://${hosts.enrichment}/api/v1/enrich`;
+        yield* Effect.annotateCurrentSpan({
+          "http.url": url,
+          "http.method": "POST",
+        });
         const headers = yield* buildHeaders();
         // AbortController gives the timeout teeth: when the Effect is
         // interrupted at 1s we also abort the in-flight request instead of
@@ -287,6 +314,10 @@ const make = (config: NetworkConfig) =>
         );
 
         if (!response.ok) {
+          yield* Effect.annotateCurrentSpan({
+            "http.status_code": response.status,
+            "error.type": "NetworkRequestError",
+          });
           return yield* Effect.fail(
             new NetworkRequestError({
               method: "POST",
@@ -297,6 +328,7 @@ const make = (config: NetworkConfig) =>
           );
         }
 
+        yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
         return yield* Effect.tryPromise({
           try: () => response.json() as Promise<EnrichmentResponse>,
           catch: (cause) =>
@@ -334,6 +366,11 @@ const make = (config: NetworkConfig) =>
       if (payload.assignments.length === 0) return;
       const hosts = resolveHosts(config.environment);
       const url = `https://${hosts.base}/api/v1/confirm_assignments`;
+      yield* Effect.annotateCurrentSpan({
+        "http.url": url,
+        "http.method": "POST",
+        "superwall.assignment_count": payload.assignments.length,
+      });
       const headers = yield* buildHeaders();
 
       const response = yield* Effect.tryPromise({
@@ -353,6 +390,10 @@ const make = (config: NetworkConfig) =>
       });
 
       if (!response.ok) {
+        yield* Effect.annotateCurrentSpan({
+          "http.status_code": response.status,
+          "error.type": "NetworkRequestError",
+        });
         return yield* Effect.fail(
           new NetworkRequestError({
             method: "POST",
@@ -362,6 +403,7 @@ const make = (config: NetworkConfig) =>
           }),
         );
       }
+      yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
     });
 
     /** POST /api/v1/redeem — redemption-code → entitlements + customer info. */
@@ -371,6 +413,11 @@ const make = (config: NetworkConfig) =>
       const hosts = resolveHosts(config.environment);
       // Android API.kt → `/subscriptions-api/public/v1/redeem`.
       const url = `https://${hosts.subscriptions}/subscriptions-api/public/v1/redeem`;
+      yield* Effect.annotateCurrentSpan({
+        "http.url": url,
+        "http.method": "POST",
+        "superwall.redeem_code_count": payload.codes.length,
+      });
       const headers = yield* buildHeaders();
       const response = yield* Effect.tryPromise({
         try: async () =>
@@ -388,6 +435,10 @@ const make = (config: NetworkConfig) =>
           }),
       });
       if (!response.ok) {
+        yield* Effect.annotateCurrentSpan({
+          "http.status_code": response.status,
+          "error.type": "NetworkRequestError",
+        });
         return yield* Effect.fail(
           new NetworkRequestError({
             method: "POST",
@@ -397,6 +448,7 @@ const make = (config: NetworkConfig) =>
           }),
         );
       }
+      yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
       return yield* Effect.tryPromise({
         try: () => response.json() as Promise<RedeemResponse>,
         catch: (cause) =>
@@ -418,6 +470,12 @@ const make = (config: NetworkConfig) =>
       const id = params.userId ?? params.deviceId;
       const qs = new URLSearchParams({ deviceId: params.deviceId });
       const url = `https://${hosts.subscriptions}/subscriptions-api/public/v1/users/${encodeURIComponent(id)}/entitlements?${qs.toString()}`;
+      yield* Effect.annotateCurrentSpan({
+        "http.url": url,
+        "http.method": "GET",
+        "superwall.device_id": params.deviceId,
+        ...(params.userId ? { "superwall.user_id": params.userId } : {}),
+      });
       const headers = yield* buildHeaders();
       const response = yield* Effect.tryPromise({
         try: async () => requireFetch()(url, { method: "GET", headers }),
@@ -430,6 +488,10 @@ const make = (config: NetworkConfig) =>
           }),
       });
       if (!response.ok) {
+        yield* Effect.annotateCurrentSpan({
+          "http.status_code": response.status,
+          "error.type": "NetworkRequestError",
+        });
         return yield* Effect.fail(
           new NetworkRequestError({
             method: "GET",
@@ -439,6 +501,7 @@ const make = (config: NetworkConfig) =>
           }),
         );
       }
+      yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
       return yield* Effect.tryPromise({
         try: () => response.json() as Promise<WebEntitlementsResponse>,
         catch: (cause) =>

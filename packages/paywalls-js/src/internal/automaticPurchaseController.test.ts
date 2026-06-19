@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import {
   createAutomaticPurchaseController,
   type AutomaticPurchaseControllerDeps,
@@ -58,7 +58,7 @@ const stubDeps = (overrides: {
   return stub;
 };
 
-test("purchase() resolves on post_checkout_complete + ACTIVE flip uses entitlement ids from config", async () => {
+it("purchase() resolves on post_checkout_complete + ACTIVE flip uses entitlement ids from config", async () => {
   const stub = stubDeps({
     entitlementsByProduct: { pro_yearly: ["pro", "premium"] },
   });
@@ -96,7 +96,7 @@ test("purchase() resolves on post_checkout_complete + ACTIVE flip uses entitleme
   }
 });
 
-test("purchase() with no config entry for product falls back to refreshEntitlements()", async () => {
+it("purchase() with no config entry for product falls back to refreshEntitlements()", async () => {
   const stub = stubDeps({
     refresh: async () => [
       {
@@ -128,7 +128,7 @@ test("purchase() with no config entry for product falls back to refreshEntitleme
   expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
 });
 
-test("purchase() resolves cancelled on stripe_checkout_abandon", async () => {
+it("purchase() resolves cancelled on stripe_checkout_abandon", async () => {
   const stub = stubDeps({});
   const controller = createAutomaticPurchaseController(stub.deps);
   const promise = controller.purchase({
@@ -144,7 +144,7 @@ test("purchase() resolves cancelled on stripe_checkout_abandon", async () => {
   expect(stub.setStatuses).toEqual([]);
 });
 
-test("purchase() ignores events for other products", async () => {
+it("purchase() ignores events for other products", async () => {
   const stub = stubDeps({});
   const controller = createAutomaticPurchaseController(stub.deps);
   const promise = controller.purchase({
@@ -168,7 +168,7 @@ test("purchase() ignores events for other products", async () => {
   expect(r.type).toBe("purchased");
 });
 
-test("restorePurchases() calls refreshEntitlements + flips sub status", async () => {
+it("restorePurchases() calls refreshEntitlements + flips sub status", async () => {
   const stub = stubDeps({
     refresh: async () => [
       {
@@ -186,7 +186,7 @@ test("restorePurchases() calls refreshEntitlements + flips sub status", async ()
   expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
 });
 
-test("restorePurchases() returns restored even when refresh returns null (network blip)", async () => {
+it("restorePurchases() returns restored even when refresh returns null (network blip)", async () => {
   const stub = stubDeps({ refresh: async () => null });
   const controller = createAutomaticPurchaseController(stub.deps);
   const r = await controller.restorePurchases();
@@ -195,7 +195,7 @@ test("restorePurchases() returns restored even when refresh returns null (networ
   expect(stub.setStatuses).toEqual([]);
 });
 
-test("onConfigured() detects ?code=redemption_xxx in URL and redeems it", async () => {
+it("onConfigured() detects ?code=redemption_xxx in URL and redeems it", async () => {
   const replaced: string[] = [];
   const stub = stubDeps({
     redeem: async () => ({
@@ -225,7 +225,7 @@ test("onConfigured() detects ?code=redemption_xxx in URL and redeems it", async 
   expect(replaced[0]).toBe("https://app.test/?utm_source=email");
 });
 
-test("onConfigured() ignores ?code= values that don't match the redemption_ prefix", async () => {
+it("onConfigured() ignores ?code= values that don't match the redemption_ prefix", async () => {
   const stub = stubDeps({
     location: {
       search: "?code=other_abc",

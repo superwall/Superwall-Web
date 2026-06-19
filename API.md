@@ -76,7 +76,7 @@ const sw = createSuperwall({
 
   // Optional extensions (all pre-creation; no runtime setters)
   presenter: createBrowserPresenter(),        // omit on BE; required to call sw.placements.register
-  purchaseController: myPurchaseController,    // omit = observer mode
+  purchaseController: myPurchaseController,    // omit = built-in automatic (Stripe) controller
   delegate: myDelegate,                        // global event callbacks
   storage: myStorageAdapter,                   // default: localStorage + cookies in browser
   identity: {
@@ -251,7 +251,7 @@ These reject the `register` promise *and* fire `RegisterPlacementResult` as `{ t
 interface PurchasesNamespace {
   restore(): Promise<RestorationResult>;
   refreshCustomerInfo(): Promise<CustomerInfo>;
-  setSubscriptionStatus(s: SubscriptionStatus): void;        // observer mode: host pushes status after checkout
+  setSubscriptionStatus(s: SubscriptionStatus): void;        // manual checkout: host pushes status after its own checkout
 }
 ```
 
@@ -400,14 +400,26 @@ Custom implementations: BE apps (HTTP-response presenter), React Native Web, tes
 
 No platform store on web. Products carry a `store` tag from config.
 
-### Observer mode (default)
-No `purchaseController` passed to `createSuperwall`. Paywall purchase clicks dispatch `transaction_start` + `custom_placement`/custom-callback events; host app runs its own checkout (Stripe/Paddle), then calls `sw.purchases.setSubscriptionStatus({ status: "ACTIVE", entitlements: [...] })`. Core fires `subscriptionStatus_didChange` and dismisses the paywall.
+### Default — automatic (Stripe) controller
+`createSuperwall` always installs a purchase controller; omitting
+`purchaseController` uses the built-in **automatic** one. A standard Superwall
+web paywall runs Stripe checkout inside the iframe; the controller + backend
+complete it (`post_checkout_complete`) and flip `subscriptionStatus` to ACTIVE
+automatically. The host does nothing.
+
+### Manual checkout (custom billing)
+For a paywall that emits a bare `purchase` message (non-Stripe), the SDK emits
+`transaction_start` and takes no further action — it does NOT run checkout or
+dismiss. The host runs its own checkout, then calls
+`sw.purchases.setSubscriptionStatus({ status: "ACTIVE", entitlements: [...] })`
+(fires `subscriptionStatus_didChange`) and `sw.dismiss()` to close the paywall.
+`setSubscriptionStatus` does NOT auto-dismiss.
 
 ### Controller mode
 ```ts
 interface PurchaseController {
   purchase(product: Product): Promise<PurchaseResult>;   // product.store distinguishes stripe/paddle/...
-  restore(): Promise<RestorationResult>;
+  restorePurchases(): Promise<RestorationResult>;
 }
 
 type PurchaseResult =

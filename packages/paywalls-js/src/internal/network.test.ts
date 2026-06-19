@@ -1,5 +1,5 @@
-import { test, expect } from "bun:test";
-import { Effect } from "effect";
+import { it, expect } from "@effect/vitest";
+import { Effect, Either } from "effect";
 import { SDK_VERSION } from "../version.ts";
 import {
   NetworkDecodingError,
@@ -57,7 +57,7 @@ const buildStack = (fetchImpl: typeof fetch, configOverride: Partial<NetworkConf
 // resolveHosts
 // ---------------------------------------------------------------------------
 
-test("resolveHosts returns the right base/collector/enrichment per env", () => {
+it("resolveHosts returns the right base/collector/enrichment per env", () => {
   expect(resolveHosts("release").base).toBe("api.superwall.me");
   expect(resolveHosts("release").collector).toBe("collector.superwall.com");
   expect(resolveHosts("releaseCandidate").base).toBe("api.superwallcanary.com");
@@ -78,38 +78,35 @@ test("resolveHosts returns the right base/collector/enrichment per env", () => {
 // buildHeaders
 // ---------------------------------------------------------------------------
 
-test("buildHeaders includes the §11.3 header set with identity values", async () => {
+it.effect("buildHeaders includes the §11.3 header set with identity values", () => {
   const { fetch } = mockFetch(() => new Response("{}", { status: 200 }));
   const stack = buildStack(fetch);
 
-  const headers = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate({ appUserId: "u_42" });
-      const net = yield* NetworkService;
-      return yield* net.buildHeaders();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<Record<string, string>, never, never>,
-  );
-
-  expect(headers.Authorization).toBe("Bearer pk_test_abc");
-  expect(headers["Content-Type"]).toBe("application/json");
-  expect(headers["X-Platform"]).toBe("Web");
-  expect(headers["X-Platform-Wrapper"]).toBe("Web");
-  expect(headers["X-App-User-ID"]).toBe("u_42");
-  expect(headers["X-Alias-ID"]).toMatch(/^\$SuperwallAlias:/);
-  expect(headers["X-Vendor-ID"]).toMatch(/[0-9a-f-]+/);
-  expect(headers["X-App-Version"]).toBe("1.2.3");
-  expect(headers["X-Bundle-ID"]).toBe("test.example.com");
-  expect(headers["X-URL-Scheme"]).toBe("https://test.example.com");
-  expect(headers["X-SDK-Version"]).toBe(SDK_VERSION);
-  expect(headers["X-Is-Sandbox"]).toBe("false");
-  expect(headers["X-Current-Time"]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-  expect(headers["X-Device-Locale"]).toBeTruthy();
-  expect(headers["X-Device-Language-Code"]).toBeTruthy();
-  expect(headers["X-Device-Timezone-Offset"]).toMatch(/^-?\d+$/);
-  expect(headers["X-Device-Interface-Style"]).toMatch(/^(light|dark)$/);
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate({ appUserId: "u_42" });
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders();
+    expect(headers.Authorization).toBe("Bearer pk_test_abc");
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["X-Platform"]).toBe("Web");
+    expect(headers["X-Platform-Wrapper"]).toBe("Web");
+    expect(headers["X-App-User-ID"]).toBe("u_42");
+    expect(headers["X-Alias-ID"]).toMatch(/^\$SuperwallAlias:/);
+    expect(headers["X-Vendor-ID"]).toMatch(/[0-9a-f-]+/);
+    expect(headers["X-App-Version"]).toBe("1.2.3");
+    expect(headers["X-Bundle-ID"]).toBe("test.example.com");
+    expect(headers["X-URL-Scheme"]).toBe("https://test.example.com");
+    expect(headers["X-SDK-Version"]).toBe(SDK_VERSION);
+    expect(headers["X-Is-Sandbox"]).toBe("false");
+    expect(headers["X-Current-Time"]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(headers["X-Device-Locale"]).toBeTruthy();
+    expect(headers["X-Device-Language-Code"]).toBeTruthy();
+    expect(headers["X-Device-Timezone-Offset"]).toMatch(/^-?\d+$/);
+    expect(headers["X-Device-Interface-Style"]).toMatch(/^(light|dark)$/);
+  }).pipe(Effect.provide(stack));
 });
 
-test("buildHeaders marks custom environments as PRODUCTION (P1)", async () => {
+it.effect("buildHeaders marks custom environments as PRODUCTION (P1)", () => {
   const { fetch } = mockFetch(() => new Response("{}"));
   const stack = buildStack(fetch, {
     environment: {
@@ -121,168 +118,151 @@ test("buildHeaders marks custom environments as PRODUCTION (P1)", async () => {
       },
     },
   });
-  const headers = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      return yield* net.buildHeaders();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<Record<string, string>, never, never>,
-  );
-  // Custom env defaults to production (sandbox=false). Dev sets up their
-  // own header override if they need it.
-  expect(headers["X-Is-Sandbox"]).toBe("false");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders();
+    // Custom env defaults to production (sandbox=false). Dev sets up their
+    // own header override if they need it.
+    expect(headers["X-Is-Sandbox"]).toBe("false");
+  }).pipe(Effect.provide(stack));
 });
 
-test("buildHeaders marks dev/RC environments as sandbox", async () => {
+it.effect("buildHeaders marks dev/RC environments as sandbox", () => {
   const { fetch } = mockFetch(() => new Response("{}"));
   const stack = buildStack(fetch, { environment: "developer" });
 
-  const headers = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      return yield* net.buildHeaders();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<Record<string, string>, never, never>,
-  );
-
-  expect(headers["X-Is-Sandbox"]).toBe("true");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders();
+    expect(headers["X-Is-Sandbox"]).toBe("true");
+  }).pipe(Effect.provide(stack));
 });
 
-test("buildHeaders accepts extra headers (last wins)", async () => {
+it.effect("buildHeaders accepts extra headers (last wins)", () => {
   const { fetch } = mockFetch(() => new Response("{}"));
   const stack = buildStack(fetch);
 
-  const headers = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      return yield* net.buildHeaders({
-        "X-Extra": "1",
-        "X-Platform": "OverriddenPlatform",
-      });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<Record<string, string>, never, never>,
-  );
-
-  expect(headers["X-Extra"]).toBe("1");
-  expect(headers["X-Platform"]).toBe("OverriddenPlatform");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders({
+      "X-Extra": "1",
+      "X-Platform": "OverriddenPlatform",
+    });
+    expect(headers["X-Extra"]).toBe("1");
+    expect(headers["X-Platform"]).toBe("OverriddenPlatform");
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
 // getStaticConfig
 // ---------------------------------------------------------------------------
 
-test("getStaticConfig hits the right URL with all required headers", async () => {
+it.effect("getStaticConfig hits the right URL with all required headers", () => {
   const { fetch, calls } = mockFetch(
     () => new Response(JSON.stringify({ buildId: "abc" }), { status: 200 }),
   );
   const stack = buildStack(fetch);
 
-  const result = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate({ appUserId: "u_42" });
-      const net = yield* NetworkService;
-      return yield* net.getStaticConfig();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<unknown, never, never>,
-  );
-
-  expect(result).toEqual({ buildId: "abc" });
-  expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe(
-    "https://api.superwall.me/api/v1/static_config?pk=pk_test_abc",
-  );
-  expect(calls[0]!.init?.method).toBe("GET");
-  const headers = calls[0]!.init?.headers as Record<string, string>;
-  expect(headers["X-App-User-ID"]).toBe("u_42");
-  expect(headers["Authorization"]).toBe("Bearer pk_test_abc");
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate({ appUserId: "u_42" });
+    const net = yield* NetworkService;
+    const result = yield* net.getStaticConfig();
+    expect(result).toEqual({ buildId: "abc" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      "https://api.superwall.me/api/v1/static_config?pk=pk_test_abc",
+    );
+    expect(calls[0]!.init?.method).toBe("GET");
+    const headers = calls[0]!.init?.headers as Record<string, string>;
+    expect(headers["X-App-User-ID"]).toBe("u_42");
+    expect(headers["Authorization"]).toBe("Bearer pk_test_abc");
+  }).pipe(Effect.provide(stack));
 });
 
-test("getStaticConfig URL-encodes the apiKey", async () => {
+it.effect("getStaticConfig URL-encodes the apiKey", () => {
   const { fetch, calls } = mockFetch(() => new Response("{}", { status: 200 }));
   const stack = buildStack(fetch, { apiKey: "pk live/ABC+xyz" });
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      return yield* net.getStaticConfig();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<unknown, never, never>,
-  );
-
-  expect(calls[0]!.url).toBe(
-    "https://api.superwall.me/api/v1/static_config?pk=pk%20live%2FABC%2Bxyz",
-  );
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.getStaticConfig();
+    expect(calls[0]!.url).toBe(
+      "https://api.superwall.me/api/v1/static_config?pk=pk%20live%2FABC%2Bxyz",
+    );
+  }).pipe(Effect.provide(stack));
 });
 
-test("getStaticConfig surfaces non-2xx as NetworkRequestError with status", async () => {
+it.effect("getStaticConfig surfaces non-2xx as NetworkRequestError with status", () => {
   const { fetch } = mockFetch(
     () => new Response("forbidden", { status: 403 }),
   );
   const stack = buildStack(fetch);
 
-  const exit = await Effect.runPromiseExit(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    const result = yield* Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const net = yield* NetworkService;
       return yield* net.getStaticConfig();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<unknown, NetworkRequestError, never>,
-  );
+    }).pipe(Effect.either);
 
-  expect(exit._tag).toBe("Failure");
-  if (exit._tag === "Failure") {
-    const err = exit.cause._tag === "Fail" ? exit.cause.error : null;
-    expect(err).toBeInstanceOf(NetworkRequestError);
-    expect((err as NetworkRequestError).status).toBe(403);
-    expect((err as NetworkRequestError).method).toBe("GET");
-  }
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(NetworkRequestError);
+      expect((result.left as NetworkRequestError).status).toBe(403);
+      expect((result.left as NetworkRequestError).method).toBe("GET");
+    }
+  }).pipe(Effect.provide(stack));
 });
 
-test("getStaticConfig surfaces fetch rejection as NetworkRequestError without status", async () => {
+it.effect("getStaticConfig surfaces fetch rejection as NetworkRequestError without status", () => {
   const { fetch } = mockFetch(() => Promise.reject(new Error("ECONNREFUSED")));
   const stack = buildStack(fetch);
 
-  const exit = await Effect.runPromiseExit(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    const result = yield* Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const net = yield* NetworkService;
       return yield* net.getStaticConfig();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<unknown, NetworkRequestError, never>,
-  );
+    }).pipe(Effect.either);
 
-  expect(exit._tag).toBe("Failure");
-  if (exit._tag === "Failure") {
-    const err = exit.cause._tag === "Fail" ? exit.cause.error : null;
-    expect(err).toBeInstanceOf(NetworkRequestError);
-    expect((err as NetworkRequestError).status).toBeUndefined();
-    expect((err as NetworkRequestError).message).toContain("ECONNREFUSED");
-  }
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(NetworkRequestError);
+      expect((result.left as NetworkRequestError).status).toBeUndefined();
+      expect((result.left as NetworkRequestError).message).toContain("ECONNREFUSED");
+    }
+  }).pipe(Effect.provide(stack));
 });
 
-test("getStaticConfig surfaces invalid JSON as NetworkDecodingError", async () => {
+it.effect("getStaticConfig surfaces invalid JSON as NetworkDecodingError", () => {
   const { fetch } = mockFetch(
     () => new Response("not-json", { status: 200 }),
   );
   const stack = buildStack(fetch);
 
-  const exit = await Effect.runPromiseExit(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    const result = yield* Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const net = yield* NetworkService;
       return yield* net.getStaticConfig();
-    }).pipe(Effect.provide(stack)) as Effect.Effect<unknown, NetworkDecodingError, never>,
-  );
+    }).pipe(Effect.either);
 
-  expect(exit._tag).toBe("Failure");
-  if (exit._tag === "Failure") {
-    const err = exit.cause._tag === "Fail" ? exit.cause.error : null;
-    expect(err).toBeInstanceOf(NetworkDecodingError);
-  }
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(NetworkDecodingError);
+    }
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
 // postEnrichment
 // ---------------------------------------------------------------------------
 
-test("postEnrichment POSTs { user, device } to the enrichment host and merges the response", async () => {
+it.effect("postEnrichment POSTs { user, device } to the enrichment host and merges the response", () => {
   const { fetch, calls } = mockFetch(
     () =>
       new Response(JSON.stringify({ user: { plan: "pro" }, device: {} }), {
@@ -291,68 +271,57 @@ test("postEnrichment POSTs { user, device } to the enrichment host and merges th
   );
   const stack = buildStack(fetch);
 
-  const result = await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      return yield* net.postEnrichment({
-        user: { country: "US" },
-        device: { vendorId: "v1" },
-      });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<
-      { user: Record<string, unknown>; device: Record<string, unknown> },
-      never,
-      never
-    >,
-  );
-
-  expect(result.user.plan).toBe("pro");
-  expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe(
-    "https://enrichment-api.superwall.com/api/v1/enrich",
-  );
-  expect(calls[0]!.init?.method).toBe("POST");
-  expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({
-    user: { country: "US" },
-    device: { vendorId: "v1" },
-  });
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const result = yield* net.postEnrichment({
+      user: { country: "US" },
+      device: { vendorId: "v1" },
+    });
+    expect(result.user.plan).toBe("pro");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(
+      "https://enrichment-api.superwall.com/api/v1/enrich",
+    );
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({
+      user: { country: "US" },
+      device: { vendorId: "v1" },
+    });
+  }).pipe(Effect.provide(stack));
 });
 
-test("postEnrichment enforces a hard 1s timeout (NetworkRequestError, no hang)", async () => {
-  // A fetch that never resolves — only the 1s hard ceiling can end the call.
+// Uses real clock (Effect-based 1s timeout needs real time — it.effect uses frozen TestClock)
+it("postEnrichment enforces a hard 1s timeout (NetworkRequestError, no hang)", async () => {
   const { fetch } = mockFetch(() => new Promise<Response>(() => {}));
   const stack = buildStack(fetch);
 
-  const start = Date.now();
-  const exit = await Effect.runPromiseExit(
+  await Effect.runPromise(
     Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      return yield* net.postEnrichment({ user: {}, device: {} });
-    }).pipe(Effect.provide(stack)) as Effect.Effect<
-      unknown,
-      NetworkRequestError,
-      never
-    >,
-  );
-  const elapsed = Date.now() - start;
+      const start = Date.now();
+      const result = yield* Effect.gen(function* () {
+        yield* IdentityService.hydrate();
+        const net = yield* NetworkService;
+        return yield* net.postEnrichment({ user: {}, device: {} });
+      }).pipe(Effect.either);
+      const elapsed = Date.now() - start;
 
-  expect(exit._tag).toBe("Failure");
-  if (exit._tag === "Failure") {
-    const err = exit.cause._tag === "Fail" ? exit.cause.error : null;
-    expect(err).toBeInstanceOf(NetworkRequestError);
-    expect((err as NetworkRequestError).message).toContain("timed out");
-  }
-  // Bounded near the 1s budget — proves the call gave up rather than hung.
-  expect(elapsed).toBeGreaterThanOrEqual(900);
-  expect(elapsed).toBeLessThan(2500);
-});
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(NetworkRequestError);
+        expect((result.left as NetworkRequestError).message).toContain("timed out");
+      }
+      expect(elapsed).toBeGreaterThanOrEqual(900);
+      expect(elapsed).toBeLessThan(2500);
+    }).pipe(Effect.provide(stack)),
+  );
+}, 10_000);
 
 // ---------------------------------------------------------------------------
 // postEvents
 // ---------------------------------------------------------------------------
 
-test("postEvents POSTs the §11.4 envelope to the collector host", async () => {
+it.effect("postEvents POSTs the §11.4 envelope to the collector host", () => {
   const { fetch, calls } = mockFetch(() => new Response("", { status: 204 }));
   const stack = buildStack(fetch);
 
@@ -365,44 +334,40 @@ test("postEvents POSTs the §11.4 envelope to the collector host", async () => {
     },
   ];
 
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      yield* net.postEvents(events);
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(calls).toHaveLength(1);
-  expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
-  expect(calls[0]!.init?.method).toBe("POST");
-  expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({ events });
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.postEvents(events);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
+    expect(calls[0]!.init?.method).toBe("POST");
+    expect(JSON.parse(calls[0]!.init!.body as string)).toEqual({ events });
+  }).pipe(Effect.provide(stack));
 });
 
-test("postEvents on non-2xx returns NetworkRequestError with status", async () => {
+it.effect("postEvents on non-2xx returns NetworkRequestError with status", () => {
   const { fetch } = mockFetch(() => new Response("rate limited", { status: 429 }));
   const stack = buildStack(fetch);
 
-  const exit = await Effect.runPromiseExit(
-    Effect.gen(function* () {
+  return Effect.gen(function* () {
+    const result = yield* Effect.gen(function* () {
       yield* IdentityService.hydrate();
       const net = yield* NetworkService;
       yield* net.postEvents([]);
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, NetworkRequestError, never>,
-  );
+    }).pipe(Effect.either);
 
-  expect(exit._tag).toBe("Failure");
-  if (exit._tag === "Failure") {
-    const err = exit.cause._tag === "Fail" ? exit.cause.error : null;
-    expect((err as NetworkRequestError).status).toBe(429);
-  }
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect((result.left as NetworkRequestError).status).toBe(429);
+    }
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
 // custom environment hosts
 // ---------------------------------------------------------------------------
 
-test("custom environment routes to the supplied hosts", async () => {
+it.effect("custom environment routes to the supplied hosts", () => {
   const { fetch, calls } = mockFetch(() => new Response("{}"));
   const stack = buildStack(fetch, {
     environment: {
@@ -415,19 +380,16 @@ test("custom environment routes to the supplied hosts", async () => {
     },
   });
 
-  // Single runPromise so the same Layer-instantiated services are shared
-  // across both calls. (Each runPromise materializes the Layer afresh.)
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      yield* IdentityService.hydrate();
-      const net = yield* NetworkService;
-      yield* net.getStaticConfig();
-      yield* net.postEvents([]);
-    }).pipe(Effect.provide(stack)) as Effect.Effect<void, never, never>,
-  );
-
-  expect(calls[0]!.url).toBe(
-    "https://api.local.test/api/v1/static_config?pk=pk_test_abc",
-  );
-  expect(calls[1]!.url).toBe("https://collector.local.test/api/v1/events");
+  // Single effect so the same Layer-instantiated services are shared
+  // across both calls. (Each Effect.provide materializes the Layer afresh.)
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.getStaticConfig();
+    yield* net.postEvents([]);
+    expect(calls[0]!.url).toBe(
+      "https://api.local.test/api/v1/static_config?pk=pk_test_abc",
+    );
+    expect(calls[1]!.url).toBe("https://collector.local.test/api/v1/events");
+  }).pipe(Effect.provide(stack));
 });

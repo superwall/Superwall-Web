@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it, test } from "@effect/vitest";
 import {
   hasSeenSurvey,
   presentSurveyIfAvailable,

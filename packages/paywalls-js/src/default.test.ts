@@ -3,7 +3,7 @@
 // IMPORTANT: each test must dispose its instance, otherwise the
 // module-level default leaks into subsequent tests.
 
-import { test, expect, beforeEach } from "bun:test";
+import { it, expect, beforeEach } from "@effect/vitest";
 import {
   createSuperwall,
   entitlements,
@@ -57,18 +57,18 @@ const make = () =>
 // Default-instance lifecycle
 // ---------------------------------------------------------------------------
 
-test("getDefaultSuperwall throws NoDefaultSuperwallError before createSuperwall", () => {
+it("getDefaultSuperwall throws NoDefaultSuperwallError before createSuperwall", () => {
   expect(() => getDefaultSuperwall()).toThrow(NoDefaultSuperwallError);
 });
 
-test("first createSuperwall registers itself as the default; dispose clears", async () => {
+it("first createSuperwall registers itself as the default; dispose clears", async () => {
   const sw = make();
   expect(getDefaultSuperwall()).toBe(sw);
   await sw.dispose();
   expect(() => getDefaultSuperwall()).toThrow(NoDefaultSuperwallError);
 });
 
-test("subsequent createSuperwall calls do NOT replace the default (first-wins)", async () => {
+it("subsequent createSuperwall calls do NOT replace the default (first-wins)", async () => {
   const a = make();
   const b = make();
   expect(getDefaultSuperwall()).toBe(a);
@@ -82,18 +82,18 @@ test("subsequent createSuperwall calls do NOT replace the default (first-wins)",
 // Pre-creation: methods throw on invocation, not property access
 // ---------------------------------------------------------------------------
 
-test("destructuring a method off a namespace before createSuperwall is legal", () => {
+it("destructuring a method off a namespace before createSuperwall is legal", () => {
   // Property access is safe — the bug class P2-6 in the review.
   const { identify } = user;
   expect(typeof identify).toBe("function");
 });
 
-test("invoking the destructured method before createSuperwall throws NoDefaultSuperwallError", () => {
+it("invoking the destructured method before createSuperwall throws NoDefaultSuperwallError", async () => {
   const { identify } = user;
-  expect(() => identify("u1")).toThrow(NoDefaultSuperwallError);
+  await expect(identify("u1")).rejects.toThrow(NoDefaultSuperwallError);
 });
 
-test("readable .value access on a namespace before createSuperwall throws on read", () => {
+it("readable .value access on a namespace before createSuperwall throws on read", () => {
   // Property access on `user.id` returns the lazy Readable wrapper without
   // throwing; calling `.value` triggers the default-required throw.
   const id = user.id;
@@ -105,7 +105,7 @@ test("readable .value access on a namespace before createSuperwall throws on rea
 // Wired up after createSuperwall
 // ---------------------------------------------------------------------------
 
-test("user.* delegates to the default instance after createSuperwall", async () => {
+it("user.* delegates to the default instance after createSuperwall", async () => {
   const sw = make();
   await sw.ready;
 
@@ -132,7 +132,7 @@ test("user.* delegates to the default instance after createSuperwall", async () 
   await sw.dispose();
 });
 
-test("register routes to the default instance", async () => {
+it("register routes to the default instance", async () => {
   const sw = make();
   await sw.ready;
   // No presenter wired → returns { type: "error", error: NoPresenterRegisteredError }.
@@ -141,7 +141,7 @@ test("register routes to the default instance", async () => {
   await sw.dispose();
 });
 
-test("placements.getPresentationResult / confirmAllAssignments / preload route through", async () => {
+it("placements.getPresentationResult / confirmAllAssignments / preload route through", async () => {
   const sw = make();
   await sw.ready;
   expect(await placements.getPresentationResult("p")).toEqual({
@@ -153,7 +153,7 @@ test("placements.getPresentationResult / confirmAllAssignments / preload route t
   await sw.dispose();
 });
 
-test("purchases.setSubscriptionStatus routes through and updates entitlements", async () => {
+it("purchases.setSubscriptionStatus routes through and updates entitlements", async () => {
   const sw = make();
   await sw.ready;
 
@@ -171,7 +171,7 @@ test("purchases.setSubscriptionStatus routes through and updates entitlements", 
   await sw.dispose();
 });
 
-test("events.addEventListener routes to the default instance's EventTarget", async () => {
+it("events.addEventListener routes to the default instance's EventTarget", async () => {
   const sw = make();
   let count = 0;
   // Attach BEFORE ready — listener should fire as the lifecycle events drain.
@@ -186,7 +186,7 @@ test("events.addEventListener routes to the default instance's EventTarget", asy
 // After dispose
 // ---------------------------------------------------------------------------
 
-test("after dispose, named exports throw NoDefaultSuperwallError again", async () => {
+it("after dispose, named exports throw NoDefaultSuperwallError again", async () => {
   const sw = make();
   await sw.ready;
   await sw.dispose();
@@ -202,7 +202,7 @@ test("after dispose, named exports throw NoDefaultSuperwallError again", async (
 // Multi-instance scenarios — explicit instance reads still work
 // ---------------------------------------------------------------------------
 
-test("explicit instance is unaffected by named-export proxy state", async () => {
+it("explicit instance is unaffected by named-export proxy state", async () => {
   const a = make();
   const b = make();
   await Promise.all([a.ready, b.ready]);
@@ -218,7 +218,7 @@ test("explicit instance is unaffected by named-export proxy state", async () => 
 });
 
 // Lazy Readable subscribe still honors sync-on-attach.
-test("lazy Readable subscribe fires synchronously with current value", async () => {
+it("lazy Readable subscribe fires synchronously with current value", async () => {
   const sw = make();
   await sw.ready;
   const seen: string[] = [];

@@ -4,7 +4,7 @@
 // as a match) so a runtime hiccup presents the paywall rather than silently
 // dropping the placement. An `Err` envelope from a valid eval returns "error".
 
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Option } from "effect";
 // Lazy + environment-conditional Superscript import: the `/node` entry uses
 // `fs.readFileSync` to load the WASM (works in Bun/Node, breaks in browsers);
 // the `/browser` entry uses bundler `import './*.wasm'` glue (works in browsers
@@ -194,11 +194,16 @@ const make = Effect.gen(function* () {
       // Pre-resolve every computed-property the rule could reference —
       // the WASM `computed_property` callback must be sync, so we can't
       // do async work inside it.
-      const computedSnapshot = new Map<string, number | null>();
-      for (const type of COMPUTED_KEYS) {
-        const value = yield* computed.compute({ type, eventName: "" });
-        computedSnapshot.set(type, value);
-      }
+      const computedEntries = yield* Effect.forEach(
+        COMPUTED_KEYS,
+        (type) =>
+          Effect.map(
+            computed.compute({ type, eventName: "" }),
+            (value) => [type, value] as const,
+          ),
+        { concurrency: 1 },
+      );
+      const computedSnapshot = new Map<string, number | null>(computedEntries);
 
       const variables = passableMap({
         user: context.user as JsonValue,
@@ -263,13 +268,23 @@ const make = Effect.gen(function* () {
       // Superscript returns a JSON envelope `{Ok|Err}`; older builds
       // returned a direct boolean — handle both.
       if (typeof result === "boolean") return result ? "match" : "no-match";
-      try {
-        const parsed = JSON.parse(String(result)) as
-          | { Ok?: { type?: string; value?: unknown }; Err?: unknown }
-          | unknown;
+
+      // Parse the JSON envelope in Effect.try so JSON.parse failures stay in
+      // the Effect error channel instead of escaping via a bare try/catch.
+      const parsedOpt = yield* Effect.try({
+        try: () =>
+          JSON.parse(String(result)) as
+            | { Ok?: { type?: string; value?: unknown }; Err?: unknown }
+            | unknown,
+        catch: () => null,
+      }).pipe(Effect.option);
+
+      if (Option.isSome(parsedOpt)) {
+        const parsed = parsedOpt.value;
         if (parsed && typeof parsed === "object" && "Ok" in parsed) {
           const ok = (parsed as { Ok: { type?: string; value?: unknown } }).Ok;
-          if (ok && ok.type === "bool") return ok.value === true ? "match" : "no-match";
+          if (ok && ok.type === "bool")
+            return ok.value === true ? "match" : "no-match";
           // Non-boolean results are treated as match if truthy.
           return ok && ok.value ? "match" : "no-match";
         }
@@ -282,7 +297,8 @@ const make = Effect.gen(function* () {
           );
           return "error";
         }
-      } catch {}
+      }
+
       const trimmed = String(result).trim().toLowerCase();
       return trimmed === "true" ? "match" : "no-match";
     }).pipe(Effect.withSpan("AudienceEvaluator.evaluate"));
@@ -295,19 +311,13 @@ export class AudienceEvaluator extends Context.Tag(
 )<AudienceEvaluator, AudienceEvaluatorImpl>() {}
 
 /** Build an AudienceEvaluator Layer over an upstream providing
- *  `ComputedProperties` + `Logger`. */
-export const audienceEvaluatorLayer = (
-  upstream: Layer.Layer<ComputedProperties | Logger>,
-): Layer.Layer<
-  AudienceEvaluator | ComputedProperties | Logger,
-  never,
-  never
-> =>
+ *  `ComputedProperties` + `Logger` plus any additional services (`Extra`).
+ *  The `Extra` type parameter preserves passthrough services so callers
+ *  don't need to cast away the richer upstream type. */
+export const audienceEvaluatorLayer = <Extra = never>(
+  upstream: Layer.Layer<ComputedProperties | Logger | Extra>,
+): Layer.Layer<AudienceEvaluator | ComputedProperties | Logger | Extra, never, never> =>
   Layer.provideMerge(
     Layer.effect(AudienceEvaluator, make),
     upstream,
-  ) as Layer.Layer<
-    AudienceEvaluator | ComputedProperties | Logger,
-    never,
-    never
-  >;
+  ) as Layer.Layer<AudienceEvaluator | ComputedProperties | Logger | Extra, never, never>;

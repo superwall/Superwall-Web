@@ -1,4 +1,4 @@
-import { test, expect, beforeEach } from "bun:test";
+import { it, expect, beforeEach } from "@effect/vitest";
 import type { PaywallInfo } from "../types.ts";
 import type { PresentationContext } from "../presenter.ts";
 import { createBrowserPresenter } from "./presenter.ts";
@@ -37,7 +37,7 @@ beforeEach(() => {
 // mount / dismiss / overlay structure
 // ---------------------------------------------------------------------------
 
-test("present mounts an iframe overlay into document.body", async () => {
+it("present mounts an iframe overlay into document.body", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(stubInfo("pw_x"), newCtx());
   await tick();
@@ -55,7 +55,7 @@ test("present mounts an iframe overlay into document.body", async () => {
   expect(document.querySelector('[data-sw-presenter="overlay"]')).toBeNull();
 });
 
-test("iframe URL has platform=web&transport=web&debug=false appended (§7.3)", async () => {
+it("iframe URL has platform=web&transport=web&debug=false appended (§7.3)", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(stubInfo("pw_a"), newCtx());
   await tick();
@@ -72,7 +72,7 @@ test("iframe URL has platform=web&transport=web&debug=false appended (§7.3)", a
   await presentation;
 });
 
-test("test mode flips debug=true in the iframe URL", async () => {
+it("test mode flips debug=true in the iframe URL", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(stubInfo("pw_a"), newCtx({ testMode: true }));
   await tick();
@@ -85,7 +85,7 @@ test("test mode flips debug=true in the iframe URL", async () => {
   await presentation;
 });
 
-test("iframe URL carries #init=<base64> hash with placementSessionToken + identity + apiBase + collector", async () => {
+it("iframe URL carries #init=<base64> hash with placementSessionToken + identity + apiBase + collector", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
     stubInfo("pw_init"),
@@ -131,7 +131,7 @@ test("iframe URL carries #init=<base64> hash with placementSessionToken + identi
   await presentation;
 });
 
-test("anonymous user → collector.identity.userId is the aliasId variant", async () => {
+it("anonymous user → collector.identity.userId is the aliasId variant", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
     stubInfo("pw_anon"),
@@ -165,7 +165,7 @@ test("anonymous user → collector.identity.userId is the aliasId variant", asyn
   await presentation;
 });
 
-test("weighted endpoint pick uses urlEndpoints when present", async () => {
+it("weighted endpoint pick uses urlEndpoints when present", async () => {
   // Single endpoint = always picked, regardless of weight.
   const presenter = createBrowserPresenter();
   const info: PaywallInfo = {
@@ -184,7 +184,7 @@ test("weighted endpoint pick uses urlEndpoints when present", async () => {
   await presentation;
 });
 
-test("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.bootstrap is set", async () => {
+it("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.bootstrap is set", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
     stubInfo("pw_b"),
@@ -226,7 +226,7 @@ test("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.boot
   await presentation;
 });
 
-test("post_checkout_complete (flat shape from controller's postMessageToHost) resolves purchased", async () => {
+it("post_checkout_complete (flat shape from controller's postMessageToHost) resolves purchased", async () => {
   // The in-iframe controller posts a flat `{event_name, ...}` message — NOT
   // the v1 envelope. Our handler accepts both shapes.
   const presenter = createBrowserPresenter();
@@ -255,7 +255,7 @@ test("post_checkout_complete (flat shape from controller's postMessageToHost) re
   if (r.type === "purchased") expect(r.productId).toBe("pro_yearly");
 });
 
-test("redirect_required calls window.open and emits paywallWillOpenURL", async () => {
+it("redirect_required calls window.open and emits paywallWillOpenURL", async () => {
   const emitted: Array<[string, unknown]> = [];
   const opens: string[] = [];
   const originalOpen = globalThis.open;
@@ -299,7 +299,7 @@ test("redirect_required calls window.open and emits paywallWillOpenURL", async (
   }
 });
 
-test("post_checkout_complete resolves purchased + routes via onPurchaseEvent + does NOT emit transaction_complete (BE does it)", async () => {
+it("post_checkout_complete resolves purchased + routes via onPurchaseEvent + does NOT emit transaction_complete (BE does it)", async () => {
   const emitted: Array<[string, unknown]> = [];
   const purchaseEvents: unknown[] = [];
   const presenter = createBrowserPresenter();
@@ -346,7 +346,7 @@ test("post_checkout_complete resolves purchased + routes via onPurchaseEvent + d
   expect(pc!.checkoutContextId).toBe("ckctx_42");
 });
 
-test("custom container option mounts the overlay there instead of body", async () => {
+it("custom container option mounts the overlay there instead of body", async () => {
   const host = document.createElement("section");
   host.id = "custom-host";
   document.body.appendChild(host);
@@ -364,7 +364,7 @@ test("custom container option mounts the overlay there instead of body", async (
   await presentation;
 });
 
-test("calling present while one is active rejects", async () => {
+it("calling present while one is active rejects", async () => {
   const presenter = createBrowserPresenter();
   const first = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -375,7 +375,7 @@ test("calling present while one is active rejects", async () => {
   await first;
 });
 
-test("dismiss before any present is a no-op", () => {
+it("dismiss before any present is a no-op", () => {
   const presenter = createBrowserPresenter();
   expect(() => presenter.dismiss()).not.toThrow();
 });
@@ -384,7 +384,7 @@ test("dismiss before any present is a no-op", () => {
 // AbortSignal-driven dismissal (sw.dismiss / sw.dispose)
 // ---------------------------------------------------------------------------
 
-test("aborting the context's signal tears down the overlay + resolves declined", async () => {
+it("aborting the context's signal tears down the overlay + resolves declined", async () => {
   const ac = new AbortController();
   const presenter = createBrowserPresenter();
   const result = presenter.present(stubInfo(), newCtx({ signal: ac.signal }));
@@ -411,7 +411,7 @@ const dispatchFromPaywall = (
   globalThis.dispatchEvent(event);
 };
 
-test("close message resolves the presentation as declined", async () => {
+it("close message resolves the presentation as declined", async () => {
   const presenter = createBrowserPresenter();
   const result = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -420,7 +420,7 @@ test("close message resolves the presentation as declined", async () => {
   await expect(result).resolves.toEqual({ type: "declined" });
 });
 
-test("stripe_checkout_start/abandon/fail surface public transaction_* events", async () => {
+it("stripe_checkout_start/abandon/fail surface public transaction_* events", async () => {
   const emitted: Array<[string, Record<string, unknown>]> = [];
   const purchaseEvents: unknown[] = [];
   const presenter = createBrowserPresenter();
@@ -453,7 +453,7 @@ test("stripe_checkout_start/abandon/fail surface public transaction_* events", a
   await result;
 });
 
-test("stripe_checkout_fail surfaces transaction_fail with the error message", async () => {
+it("stripe_checkout_fail surfaces transaction_fail with the error message", async () => {
   const emitted: Array<[string, Record<string, unknown>]> = [];
   const presenter = createBrowserPresenter();
   const result = presenter.present(
@@ -473,7 +473,7 @@ test("stripe_checkout_fail surfaces transaction_fail with the error message", as
   await result;
 });
 
-test("restore message fires lifecycle events and resolves restored", async () => {
+it("restore message fires lifecycle events and resolves restored", async () => {
   const emitted: Array<[string, unknown]> = [];
   const presenter = createBrowserPresenter();
   const result = presenter.present(
@@ -490,7 +490,7 @@ test("restore message fires lifecycle events and resolves restored", async () =>
   expect(names).toContain("restore_complete");
 });
 
-test("origin filter drops messages from the wrong origin", async () => {
+it("origin filter drops messages from the wrong origin", async () => {
   const presenter = createBrowserPresenter();
   const result = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -512,7 +512,7 @@ test("origin filter drops messages from the wrong origin", async () => {
   await expect(result).resolves.toEqual({ type: "declined" });
 });
 
-test("source filter drops messages whose source isn't the iframe", async () => {
+it("source filter drops messages whose source isn't the iframe", async () => {
   const presenter = createBrowserPresenter();
   const result = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -532,7 +532,7 @@ test("source filter drops messages whose source isn't the iframe", async () => {
   await expect(result).resolves.toEqual({ type: "declined" });
 });
 
-test("unknown version is dropped", async () => {
+it("unknown version is dropped", async () => {
   const presenter = createBrowserPresenter();
   const result = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -556,7 +556,7 @@ test("unknown version is dropped", async () => {
 // Test mode purchase flow
 // ---------------------------------------------------------------------------
 
-test("test mode purchase with onTestPurchase=purchased resolves as purchased", async () => {
+it("test mode purchase with onTestPurchase=purchased resolves as purchased", async () => {
   const presenter = createBrowserPresenter({
     onTestPurchase: async () => "purchased",
   });
@@ -576,7 +576,7 @@ test("test mode purchase with onTestPurchase=purchased resolves as purchased", a
   expect(r).toEqual({ type: "purchased", productId: "pro_yearly" });
 });
 
-test("test mode purchase with onTestPurchase=declined keeps paywall open", async () => {
+it("test mode purchase with onTestPurchase=declined keeps paywall open", async () => {
   let abandonCount = 0;
   const presenter = createBrowserPresenter({
     onTestPurchase: async () => "declined",
@@ -607,7 +607,7 @@ test("test mode purchase with onTestPurchase=declined keeps paywall open", async
   await presentation;
 });
 
-test("test mode purchase with should_dismiss=false stays open after purchase resolves", async () => {
+it("test mode purchase with should_dismiss=false stays open after purchase resolves", async () => {
   const purchases: string[] = [];
   const presenter = createBrowserPresenter({
     onTestPurchase: async () => "purchased",
@@ -642,7 +642,7 @@ test("test mode purchase with should_dismiss=false stays open after purchase res
 // open_url_external — opens a new tab via window.open
 // ---------------------------------------------------------------------------
 
-test("custom_placement is forwarded via ctx.emit (P1)", async () => {
+it("custom_placement is forwarded via ctx.emit (P1)", async () => {
   const emitted: Array<{ name: string; detail: unknown }> = [];
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
@@ -677,7 +677,7 @@ test("custom_placement is forwarded via ctx.emit (P1)", async () => {
   await presentation;
 });
 
-test("open_url_external calls globalThis.open with the url", async () => {
+it("open_url_external calls globalThis.open with the url", async () => {
   const opened: Array<[string, string | undefined, string | undefined]> = [];
   const originalOpen = globalThis.open;
   // happy-dom's open returns a Window proxy; replace with a recorder.
@@ -716,7 +716,7 @@ test("open_url_external calls globalThis.open with the url", async () => {
 // Backdrop click closes (modal mode default)
 // ---------------------------------------------------------------------------
 
-test("modal backdrop click resolves declined when closeOnBackdrop is true (default)", async () => {
+it("modal backdrop click resolves declined when closeOnBackdrop is true (default)", async () => {
   const presenter = createBrowserPresenter();
   const result = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -730,7 +730,7 @@ test("modal backdrop click resolves declined when closeOnBackdrop is true (defau
   await expect(result).resolves.toEqual({ type: "declined" });
 });
 
-test("closeOnBackdrop=false does NOT dismiss on backdrop click", async () => {
+it("closeOnBackdrop=false does NOT dismiss on backdrop click", async () => {
   const presenter = createBrowserPresenter({ closeOnBackdrop: false });
   const presentation = presenter.present(stubInfo(), newCtx());
   await tick();
@@ -746,7 +746,7 @@ test("closeOnBackdrop=false does NOT dismiss on backdrop click", async () => {
   await presentation;
 });
 
-test("preload(): mounts a hidden iframe and removes it after load", async () => {
+it("preload(): mounts a hidden iframe and removes it after load", async () => {
   const presenter = createBrowserPresenter();
   const info = {
     ...stubInfo("pw_warm"),

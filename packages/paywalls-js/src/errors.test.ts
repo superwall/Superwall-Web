@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import {
   SuperwallError,
   NotConfiguredError,
@@ -20,7 +20,7 @@ const stubPaywall = (id: string): PaywallInfo => ({
   products: [],
 });
 
-test("every error extends SuperwallError and Error, carries a stable code", () => {
+it("every error extends SuperwallError and Error, carries a stable code", () => {
   const cases: Array<[SuperwallError, string]> = [
     [new NotConfiguredError(), "NOT_CONFIGURED"],
     [new NoPresenterRegisteredError("upgrade"), "NO_PRESENTER"],
@@ -45,7 +45,7 @@ test("every error extends SuperwallError and Error, carries a stable code", () =
   }
 });
 
-test("PaywallAlreadyPresentedError surfaces conflicting paywall info", () => {
+it("PaywallAlreadyPresentedError surfaces conflicting paywall info", () => {
   const current = stubPaywall("p_current");
   const err = new PaywallAlreadyPresentedError("p_attempted", current);
   expect(err.attemptedPlacement).toBe("p_attempted");
@@ -54,13 +54,13 @@ test("PaywallAlreadyPresentedError surfaces conflicting paywall info", () => {
   expect(err.message).toContain("p_attempted");
 });
 
-test("NoPresenterRegisteredError surfaces the attempted placement", () => {
+it("NoPresenterRegisteredError surfaces the attempted placement", () => {
   const err = new NoPresenterRegisteredError("checkout");
   expect(err.placement).toBe("checkout");
   expect(err.message).toContain("checkout");
 });
 
-test("ConfigurationFetchError surfaces attempt + cause", () => {
+it("ConfigurationFetchError surfaces attempt + cause", () => {
   const cause = new Error("ENETUNREACH");
   const err = new ConfigurationFetchError(cause, 6);
   expect(err.attempt).toBe(6);
@@ -68,13 +68,13 @@ test("ConfigurationFetchError surfaces attempt + cause", () => {
   expect(err.message).toContain("attempt 6");
 });
 
-test("NetworkError defaults status/cause to undefined when omitted", () => {
+it("NetworkError defaults status/cause to undefined when omitted", () => {
   const err = new NetworkError("offline");
   expect(err.status).toBeUndefined();
   expect(err.cause).toBeUndefined();
 });
 
-test("NetworkError surfaces status + cause when provided", () => {
+it("NetworkError surfaces status + cause when provided", () => {
   const cause = new Error("ECONNRESET");
   const err = new NetworkError("upstream 502", 502, cause);
   expect(err.status).toBe(502);

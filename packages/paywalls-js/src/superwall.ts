@@ -2,7 +2,7 @@
 // Layer + ManagedRuntime); one ManagedRuntime per instance so service state
 // is shared across method calls. Public methods are thin Promise façades.
 
-import { Effect, Layer, ManagedRuntime, Stream } from "effect";
+import { Array as Arr, Effect, Layer, ManagedRuntime, Match, Option, Stream } from "effect";
 import { _clearDefault, _registerDefault } from "./default.ts";
 import { SDK_VERSION } from "./version.ts";
 import {
@@ -14,6 +14,7 @@ import {
 } from "./errors.ts";
 import {
   SuperwallEventTarget,
+  type AllSuperwallEvents,
   type SuperwallDelegate,
 } from "./events.ts";
 import type {
@@ -56,7 +57,7 @@ import {
   type UserAttributes,
   type CustomerInfo,
 } from "./types.ts";
-import { asStorageKey } from "./internal/brands.ts";
+import { asPresentationId, asStorageKey, type PresentationId } from "./internal/brands.ts";
 import {
   EventBus,
   eventBusLayerWithTarget,
@@ -556,11 +557,17 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   // Mutable interface-style override. Closure-read per request by the
   // network layer so `sw.setInterfaceStyle(...)` takes effect immediately.
   let interfaceStyleOverride: "light" | "dark" | null = null;
-  // PartialSuperwallOptions deeply-partializes `networkEnvironment`'s
-  // `{ custom: ... }` shape; trust the caller and cast back.
+  // PartialSuperwallOptions deeply-partializes the `{ custom: ... }` shape of
+  // networkEnvironment. The runtime value is always a valid NetworkEnvironment;
+  // narrow at this single typed boundary rather than casting inline everywhere.
+  const resolveNetworkEnvironment = (
+    env: PartialSuperwallOptions["networkEnvironment"],
+  ): NetworkConfig["environment"] =>
+    (env ?? "release") as NetworkConfig["environment"];
+
   const networkConfig: NetworkConfig = {
     apiKey: opts.apiKey,
-    environment: (opts.options?.networkEnvironment ?? "release") as NetworkConfig["environment"],
+    environment: resolveNetworkEnvironment(opts.options?.networkEnvironment),
     ...(opts.options?.appVersion !== undefined && { appVersion: opts.options.appVersion }),
     ...(opts.options?.bundleId !== undefined && { bundleId: opts.options.bundleId }),
     ...(opts.fetch !== undefined && { fetch: opts.fetch }),
@@ -575,47 +582,27 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const assignmentLayer = assignmentServiceLayer(storageLayer);
   const upstreamForBus = Layer.merge(networkLayer, computedLayer);
   const busLayer = eventBusLayerWithTarget(target, upstreamForBus);
-  const layerWithConfig = Layer.merge(
-    Layer.merge(busLayer, configLayer),
+  const layerWithConfig = Layer.mergeAll(
+    busLayer,
+    configLayer,
     assignmentLayer,
+    identityLayer,
   );
   const baseLayer = loggerLayer(
     opts.options?.logging?.level ?? "warn",
     layerWithConfig,
   );
-  // AudienceEvaluator's Logger + ComputedProperties already live in
-  // baseLayer; cast for the upstream signature.
-  const audienceLayer = audienceEvaluatorLayer(
-    baseLayer as Layer.Layer<ComputedProperties | Logger>,
-  );
-  // Redemption needs Network + Identity + Logger + Storage — all already
-  // satisfied by audienceLayer's transitive context.
-  const fullLayer = redemptionServiceLayer(
-    audienceLayer as Layer.Layer<
-      NetworkService | IdentityService | Logger | StorageService
-    >,
-  );
-
-  const runtime = ManagedRuntime.make(
-    fullLayer as Layer.Layer<
-      | Logger
-      | EventBus
-      | NetworkService
-      | ComputedProperties
-      | ConfigService
-      | IdentityService
-      | StorageService
-      | AudienceEvaluator
-      | AssignmentService
-      | RedemptionService
-    >,
-  );
+  const audienceLayer = audienceEvaluatorLayer(baseLayer);
+  const fullLayer = redemptionServiceLayer(audienceLayer);
+  const runtime = ManagedRuntime.make(fullLayer);
 
   // Public-facing signals. Driven by background subscriptions in configure().
   const idSig = createSignal<string>("");
   const aliasSig = createSignal<string>("");
   const effectiveSig = createSignal<string>("");
   const loggedInSig = createSignal<boolean>(false);
+  // Empty object is a valid UserAttributes baseline (Record<string, JsonValue> with no keys).
+  // UserAttributes extends Record<string,JsonValue>; empty object is always valid.
   const attrsSig = createSignal<UserAttributes>({} as UserAttributes);
   const intAttrsSig = createSignal<
     Partial<Record<IntegrationAttribute, string>>
@@ -668,6 +655,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     : undefined;
 
   const configure = Effect.gen(function* () {
+    yield* Effect.annotateCurrentSpan("sdk.version", SDK_VERSION);
     const bus = yield* EventBus;
 
     if (opts.delegate) {
@@ -808,7 +796,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     // network fetch revalidates.
     const config = yield* ConfigService;
     const assignments = yield* AssignmentService;
-    yield* config.hydrateFromStorage().pipe(Effect.catchAll(() => Effect.void));
+    yield* config.hydrateFromStorage().pipe(
+      Effect.tapError((e) => Effect.logDebug("Config hydration from storage failed", { error: String(e) })),
+      Effect.catchAll(() => Effect.void),
+    );
     // Eager assignment over the cached config so first register() is fast
     // and confirmAllAssignments returns a complete snapshot.
     yield* eagerAssign(config, assignments);
@@ -818,6 +809,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     const hydrated = yield* config.current();
     const enrichmentEffect = runEnrichment(bus).pipe(
+      Effect.tapError((e) => Effect.logDebug("Enrichment failed", { error: String(e) })),
       Effect.catchAll(() => Effect.void),
     );
 
@@ -847,6 +839,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* Effect.all(
             [
               config.fetch().pipe(
+                Effect.tapError((e) => Effect.logDebug("Background config revalidation failed", { error: String(e) })),
                 Effect.catchAll(() => Effect.void),
                 Effect.tap(() => applyFreshConfig()),
               ),
@@ -864,6 +857,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             .fetch()
             .pipe(
               Effect.tap(() => Effect.sync(() => { haveConfig = true; })),
+              Effect.tapError((e) => Effect.logDebug("Initial config fetch failed", { error: String(e) })),
               Effect.catchAll(() => Effect.void),
             ),
           enrichmentEffect,
@@ -880,18 +874,17 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     yield* IdentityService.endPending(IdentityPending.Configuration);
     configuredSig.set(haveConfig);
     statusSig.set(haveConfig ? "configured" : "failed");
-  });
+  }).pipe(Effect.withSpan("Superwall.configure"));
 
   /** Hand every trigger experiment to AssignmentService.chooseAllVariants. */
-  const eagerAssign = (
+  const eagerAssign = Effect.fn("Superwall.eagerAssign")(function*(
     config: ConfigServiceImpl,
     assignments: AssignmentServiceImpl,
-  ) =>
-    Effect.gen(function* () {
+  ) {
       const cfg = yield* config.current();
       if (!cfg) return;
-      const experiments = cfg.triggerOptions.flatMap((t) =>
-        t.rules.map((r) => r.experiment),
+      const experiments = Arr.flatMap(cfg.triggerOptions, (t) =>
+        Arr.map(t.rules, (r) => r.experiment),
       );
       yield* assignments.chooseAllVariants(experiments);
     });
@@ -939,13 +932,15 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         .get(asStorageKey(STORAGE_KEYS.subscriptionStatus))
         .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
       if (raw === null) return;
-      try {
-        const parsed = JSON.parse(raw) as SubscriptionStatus;
-        if (parsed.status === "ACTIVE" || parsed.status === "INACTIVE") {
-          subStatusSig.set(parsed);
+      const parsed = yield* Effect.try({
+        try: () => JSON.parse(raw) as SubscriptionStatus,
+        catch: () => null,
+      }).pipe(Effect.option);
+      if (Option.isSome(parsed) && parsed.value !== null) {
+        const s = parsed.value;
+        if (s.status === "ACTIVE" || s.status === "INACTIVE") {
+          subStatusSig.set(s);
         }
-      } catch {
-        /* corrupt cache → ignore, stay UNKNOWN */
       }
     });
 
@@ -994,35 +989,39 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     });
 
   /** Best-effort POST of cached assignments — local cache is authoritative. */
-  const confirmAssignments = (assignments: AssignmentServiceImpl) =>
-    Effect.gen(function* () {
+  const confirmAssignments = Effect.fn("Superwall.confirmAssignments")(function* (
+    assignments: AssignmentServiceImpl,
+  ) {
       const all = yield* assignments.getAll();
       if (all.length === 0) return;
       const network = yield* NetworkService;
       // Flat snake_case, digit-string ids, max 100 per call (BE contract).
       yield* network
         .postConfirmAssignments({
-          assignments: all.slice(0, 100).map((a) => ({
+          assignments: Arr.map(Arr.take(all, 100), (a) => ({
             experiment_id: a.experimentId,
             variant_id: a.variant.id,
           })),
         })
-        .pipe(Effect.catchAll(() => Effect.void));
+        .pipe(
+          Effect.tapError((e) => Effect.logDebug("Assignment confirmation failed", { error: String(e) })),
+          Effect.catchAll(() => Effect.void),
+        );
     });
 
   /** Hand each cached paywall URL to the presenter's optional preload hook
    *  so the browser warms the HTTP cache before first present. Best-effort,
    *  bounded concurrency to avoid hammering on large catalogs. */
-  const warmPaywalls = (config: ConfigServiceImpl) =>
-    Effect.gen(function* () {
+  const warmPaywalls = Effect.fn("Superwall.warmPaywalls")(function* (
+    config: ConfigServiceImpl,
+  ) {
       const presenter = yield* Effect.promise(() => getDefaultPresenter());
       if (!presenter?.preload) return;
       const cfg = yield* config.current();
       if (!cfg) return;
-      const infos = cfg.paywallResponses
-        .filter((p) => p.url)
-        .slice(0, 6) // arbitrary cap so we don't spawn an iframe for every paywall
-        .map((p): PaywallInfo => ({
+      const infos = Arr.map(
+        Arr.take(Arr.filter(cfg.paywallResponses, (p) => Boolean(p.url)), 6),
+        (p): PaywallInfo => ({
           identifier: p.identifier,
           name: p.name,
           url: p.url,
@@ -1035,7 +1034,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       // Run with concurrency 2 — iOS Safari throttles hidden iframes, no
       // point queuing more than a couple at a time.
       yield* Effect.all(
-        infos.map((info) =>
+        Arr.map(infos, (info) =>
           Effect.tryPromise({
             try: () => presenter.preload!(info),
             catch: () => undefined,
@@ -1048,8 +1047,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   /** Snapshot device attributes from current identity + sub state. Called
    *  by enrichment and audience eval. */
   const snapshotDeviceAttributes = (): Record<string, JsonValue> => {
-    const id = idSig.value as string;
-    const alias = aliasSig.value as string;
+    const id = idSig.value;
+    const alias = aliasSig.value;
     const customer = customerSig.value;
     const activeEntitlements =
       customer?.entitlements
@@ -1072,13 +1071,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       appUserId: id,
       vendorId: "",
       deviceId: "",
-      bundleId: opts.options?.bundleId,
-      appVersion: opts.options?.appVersion,
+      bundleId: opts.options?.bundleId ?? "",
+      appVersion: opts.options?.appVersion ?? "",
       isSandbox: isSandbox(env),
       // Approximation — inferred from "no prior counter increments".
       isFirstAppOpen: totalPaywallViewsSig.value === 0,
-      firstSeenAtMs: firstSeenAtSig.value ?? undefined,
-      lastPaywallViewAtMs: lastPaywallViewAtSig.value ?? undefined,
+      ...(firstSeenAtSig.value != null ? { firstSeenAtMs: firstSeenAtSig.value } : {}),
+      ...(lastPaywallViewAtSig.value != null ? { lastPaywallViewAtMs: lastPaywallViewAtSig.value } : {}),
       totalPaywallViews: totalPaywallViewsSig.value,
       reviewRequestCount: 0,
       subscriptionStatus: subStatusSig.value.status,
@@ -1088,8 +1087,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     return buildDeviceAttributes(input);
   };
 
-  const runEnrichment = (bus: EventBusImpl) =>
-    Effect.gen(function* () {
+  const runEnrichment = Effect.fn("Superwall.runEnrichment")(function* (
+    bus: EventBusImpl,
+  ) {
       const network = yield* NetworkService;
       yield* bus.publish("enrichment_start", {});
       // vendorId / deviceId aren't mirrored to signals — pull from the service.
@@ -1101,24 +1101,25 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         idSnap !== null
           ? {
               ...baseDevice,
-              vendorId: idSnap.vendorId as string,
-              deviceId: idSnap.deviceId as string,
+              vendorId: idSnap.vendorId,
+              deviceId: idSnap.deviceId,
             }
           : baseDevice;
       const result = yield* network
         .postEnrichment({
-          user: attrsSig.value as Record<string, JsonValue>,
+          user: attrsSig.value,
           device,
         })
         .pipe(Effect.tapError(() => bus.publish("enrichment_fail", {})));
 
       // Server values override client values for the user attribute merge.
       const merged: Record<string, JsonValue> = {
-        ...(attrsSig.value as Record<string, JsonValue>),
+        ...(attrsSig.value),
       };
       for (const [k, v] of Object.entries(result.user)) {
         if (v !== null) merged[k] = v;
       }
+      // UserAttributes extends Record<string, JsonValue>; merged satisfies the same shape.
       attrsSig.set(merged as UserAttributes);
 
       yield* bus.publish("enrichment_complete", {
@@ -1129,9 +1130,26 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   // Public façades
 
-  const runPublic = <A>(eff: Effect.Effect<A, unknown, never>): Promise<A> =>
+  // RuntimeServices = the union of all services the ManagedRuntime provides.
+  // Typed explicitly so runPublic can accept effects that use any subset
+  // without suppressing their R channel with `as never` casts.
+  type RuntimeServices =
+    | Logger
+    | EventBus
+    | NetworkService
+    | ComputedProperties
+    | ConfigService
+    | IdentityService
+    | StorageService
+    | AudienceEvaluator
+    | AssignmentService
+    | RedemptionService;
+
+  const runPublic = <A>(
+    eff: Effect.Effect<A, unknown, RuntimeServices | never>,
+  ): Promise<A> =>
     runtime
-      .runPromise(eff as Effect.Effect<A, unknown, never>)
+      .runPromise(eff as Effect.Effect<A, unknown, RuntimeServices>)
       .catch((cause: unknown) => {
         throw translateInternalError(cause);
       });
@@ -1160,7 +1178,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const runFireAndForget = (
     scope: LogScope,
     label: string,
-    eff: Effect.Effect<unknown, unknown, never>,
+    eff: Effect.Effect<unknown, unknown, RuntimeServices>,
   ): void => {
     void runtime
       .runPromise(eff)
@@ -1178,6 +1196,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     identify: (userId, _identityOpts) =>
       runPublic(
         Effect.gen(function* () {
+          // Capture the appUserId before the identity mutation so we can detect
+          // whether the user actually changed (empty = anonymous).
+          const prevAppUserId = idSig.value;
+
           // Pending bracket — register() blocks on phase=Ready until both
           // Identification and Seed clear. Closes the race where an in-flight
           // identify() lets audience eval read stale attributes.
@@ -1185,22 +1207,35 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             IdentityPending.Identification(userId),
           );
           yield* IdentityService.beginPending(IdentityPending.Seed);
-          try {
-            yield* IdentityService.identify(userId);
-          } finally {
-            yield* IdentityService.endPending(IdentityPending.Seed);
-            yield* IdentityService.endPending(
-              IdentityPending.Identification(userId),
-            );
-          }
+          yield* IdentityService.identify(userId).pipe(
+            Effect.ensuring(
+              Effect.all([
+                IdentityService.endPending(IdentityPending.Seed),
+                IdentityService.endPending(IdentityPending.Identification(userId)),
+              ], { discard: true }),
+            ),
+          );
           // Mirrors Android `IdentityChanged` action — emits identity_alias
           // + user_attributes after the snapshot mutation lands.
           const bus = yield* EventBus;
           yield* bus.publish("identity_alias", {});
           yield* bus.publish("user_attributes", {
-            attributes: attrsSig.value as Partial<UserAttributes>,
+            attributes: attrsSig.value,
           });
-        }) as Effect.Effect<void, unknown, never>,
+          // If the user ID changed (anonymous → identified, or account switch),
+          // trigger a background /entitlements refresh so subscriptionStatus
+          // reflects the new identity immediately rather than waiting for the
+          // next periodic poll (~10 min).
+          if (userId !== prevAppUserId && purchaseController.onConfigured) {
+            purchaseController.onConfigured().catch((cause: unknown) =>
+              logViaRuntime(
+                "identityManager",
+                "entitlements refresh on identify failed",
+                cause,
+              ),
+            );
+          }
+        }),
       ),
 
     signOut: () =>
@@ -1212,9 +1247,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           const bus = yield* EventBus;
           yield* bus.publish("identity_alias", {});
           yield* bus.publish("user_attributes", {
-            attributes: attrsSig.value as Partial<UserAttributes>,
+            attributes: attrsSig.value,
           });
-        }) as Effect.Effect<void, unknown, never>,
+        }),
       ),
 
     setAttributes: (next) => {
@@ -1227,7 +1262,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         Effect.gen(function* () {
           const bus = yield* EventBus;
           yield* bus.publish("user_attributes", {
-            attributes: attrsSig.value as Partial<UserAttributes>,
+            attributes: attrsSig.value,
           });
         }),
       );
@@ -1353,15 +1388,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     | { kind: "holdout"; experiment: Experiment }
     | { kind: "paywall"; experiment: Experiment };
 
-  const evaluatePlacement = (
+  const evaluatePlacement = Effect.fn("Superwall.evaluatePlacement")(function* (
     placementName: string,
     params: PlacementParams,
-  ): Effect.Effect<
-    PlacementDecision,
-    never,
-    ConfigService | AudienceEvaluator | AssignmentService
-  > =>
-    Effect.gen(function* () {
+  ) {
       const config = yield* ConfigService;
       const trigger = yield* config.getPlacement(placementName);
       if (trigger === null) return { kind: "placementNotFound" } as const;
@@ -1370,31 +1400,32 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const assignments = yield* AssignmentService;
       const aliasId = aliasSig.value;
       const ctx = {
-        user: attrsSig.value as Partial<UserAttributes>,
+        user: attrsSig.value,
         params: params as Record<string, JsonValue>,
         device: snapshotDeviceAttributes(),
       };
 
-      for (const rule of trigger.rules) {
-        const result = yield* evaluator.evaluate(rule.expression, ctx);
-        if (result === "match") {
-          // Sticky variant pick — cached per (alias, experiment).
-          const confirmed = yield* assignments.getOrAssign(
-            rule.experiment,
-            aliasId,
-          );
-          const experiment: Experiment = {
-            id: rule.experiment.id,
-            groupId: rule.experiment.groupId,
-            variant: confirmed.variant,
-          };
-          if (experiment.variant.type === "holdout") {
-            return { kind: "holdout", experiment } as const;
-          }
-          return { kind: "paywall", experiment } as const;
-        }
+      // Find the first rule whose audience expression matches the current user.
+      const matchedRule = yield* Effect.findFirst(trigger.rules, (rule) =>
+        evaluator.evaluate(rule.expression, ctx).pipe(Effect.map((r) => r === "match")),
+      );
+
+      if (Option.isNone(matchedRule)) return { kind: "noAudienceMatch" } as const;
+
+      // Sticky variant pick — cached per (alias, experiment).
+      const confirmed = yield* assignments.getOrAssign(
+        matchedRule.value.experiment,
+        aliasId,
+      );
+      const experiment: Experiment = {
+        id: matchedRule.value.experiment.id,
+        groupId: matchedRule.value.experiment.groupId,
+        variant: confirmed.variant,
+      };
+      if (experiment.variant.type === "holdout") {
+        return { kind: "holdout", experiment } as const;
       }
-      return { kind: "noAudienceMatch" } as const;
+      return { kind: "paywall", experiment } as const;
     });
 
   const runFeature = async (
@@ -1410,7 +1441,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   const register: Superwall["register"] = async (args) => {
       const { placement, params, handler, feature } = args;
-      currentPresentationId = randomUuid();
+      currentPresentationId = asPresentationId(randomUuid());
       try {
         // Block until identity is Ready — closes the race where an
         // in-flight identify/reset/configure lets audience eval read stale data.
@@ -1509,16 +1540,17 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             "no_paywall_id_on_variant",
           );
         }
-        const info = await buildPaywallInfo(
+        const infoResult = await buildPaywallInfo(
           variantPaywallId,
           decision.experiment,
         );
-        if (!info) {
+        if (!infoResult) {
           throw new PaywallNotAvailableError(
             placement,
             "no_paywall_in_config",
           );
         }
+        let info: PaywallInfo = infoResult;
 
         // No URL derivation — every paywall iframes its own editor URL
         // (`paywall_responses[].url` / `url_config.endpoints`). The
@@ -1537,12 +1569,19 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         try {
           await runtime.runPromise(
             Effect.gen(function* () {
+              yield* Effect.annotateCurrentSpan({
+                "superwall.paywall_id": info.identifier,
+                "superwall.placement": placement,
+                "superwall.experiment_id": decision.experiment.id,
+                "superwall.variant_id": decision.experiment.variant.id,
+                "superwall.variant_type": decision.experiment.variant.type,
+              });
               const bus = yield* EventBus;
               yield* bus.withDelegate((d) => d.onPaywallWillPresent?.(info));
               yield* bus.publish("paywall_open", { paywall_info: info }, wireOpts);
               yield* bus.withDelegate((d) => d.onPaywallDidPresent?.(info));
               yield* recordPaywallView();
-            }),
+            }).pipe(Effect.withSpan("Superwall.register.open")),
           );
           openSucceeded = true;
         } finally {
@@ -1640,14 +1679,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           placement,
           params: (params ?? ({} as PlacementParams)),
           signal: ac.signal,
-          emit: (name, detail) => {
+          emit: <K extends keyof AllSuperwallEvents>(name: K, detail: AllSuperwallEvents[K]) => {
             // Fire-and-forget — presenter shouldn't block on event delivery.
             runFireAndForget(
               "paywallEvents",
               `bus.publish(${String(name)}) failed`,
               Effect.gen(function* () {
                 const bus = yield* EventBus;
-                yield* bus.publish(name as never, detail as never);
+                yield* bus.publish(name, detail);
               }),
             );
           },
@@ -1671,8 +1710,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
         // Per-call presentation-style override wins over the paywall config.
         if (args.overrides?.presentationStyle) {
-          (info as { presentationStyle?: PaywallPresentationStyle }).presentationStyle =
-            args.overrides.presentationStyle;
+          info = { ...info, presentationStyle: args.overrides.presentationStyle };
         }
 
         // Track the active presenter so sw.dismiss() can force-close it.
@@ -1688,9 +1726,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           presentedSig.set(false);
           const reason: PaywallCloseReason =
             pendingCloseReason ?? "webViewFailedToLoad";
-          (info as { closeReason?: PaywallCloseReason }).closeReason = reason;
+          info = { ...info, closeReason: reason };
           await runtime.runPromise(
             Effect.gen(function* () {
+              yield* Effect.annotateCurrentSpan({ "superwall.close_reason": reason });
               const bus = yield* EventBus;
               yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
               yield* bus.publish(
@@ -1699,7 +1738,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
                 wireOpts,
               );
               yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
-            }),
+            }).pipe(Effect.withSpan("Superwall.register.close")),
           );
           try {
             handler?.onError?.(err);
@@ -1716,9 +1755,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         const closeReason: PaywallCloseReason =
           pendingCloseReason ??
           (result.type === "declined" ? "manualClose" : "systemLogic");
-        (info as { closeReason?: PaywallCloseReason }).closeReason = closeReason;
+        info = { ...info, closeReason: closeReason };
         await runtime.runPromise(
           Effect.gen(function* () {
+            yield* Effect.annotateCurrentSpan({
+              "superwall.close_reason": closeReason,
+              "superwall.result_type": result.type,
+            });
             const bus = yield* EventBus;
             yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
             if (result.type === "declined") {
@@ -1730,7 +1773,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
               wireOpts,
             );
             yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
-          }),
+          }).pipe(Effect.withSpan("Superwall.register.close")),
         );
         try {
           handler?.onDismiss?.(info, result);
@@ -1819,17 +1862,15 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         const decision = await runtime.runPromise(
           evaluatePlacement(placement, (params ?? {}) as PlacementParams),
         );
-        switch (decision.kind) {
-          case "placementNotFound":
-            return { type: "placementNotFound" };
-          case "noAudienceMatch":
-            return { type: "noAudienceMatch" };
-          case "holdout":
-            return { type: "holdout", experiment: decision.experiment };
-          case "paywall":
-            return { type: "paywall", experiment: decision.experiment };
-        }
-      } catch {
+        return Match.value(decision).pipe(
+          Match.when({ kind: "placementNotFound" }, (): PresentationResult => ({ type: "placementNotFound" })),
+          Match.when({ kind: "noAudienceMatch" }, (): PresentationResult => ({ type: "noAudienceMatch" })),
+          Match.when({ kind: "holdout" }, (d): PresentationResult => ({ type: "holdout", experiment: d.experiment })),
+          Match.when({ kind: "paywall" }, (d): PresentationResult => ({ type: "paywall", experiment: d.experiment })),
+          Match.exhaustive,
+        );
+      } catch (e) {
+        logViaRuntime("placements", "getPresentationResult failed", e);
         return { type: "paywallNotAvailable" };
       }
     },
@@ -1839,7 +1880,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         Effect.gen(function* () {
           const a = yield* AssignmentService;
           return yield* a.getAll();
-        }) as unknown as Effect.Effect<ConfirmedAssignment[], unknown, never>,
+        }),
       ),
 
     confirmAllAssignments: () =>
@@ -1848,7 +1889,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           const a = yield* AssignmentService;
           yield* confirmAssignments(a);
           return yield* a.getAll();
-        }) as unknown as Effect.Effect<ConfirmedAssignment[], unknown, never>,
+        }),
       ),
 
     preloadAll: async () => {
@@ -1960,7 +2001,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   /** Per-`register()` presentation id. Threaded into every event's
    *  `$presentation_id` auto-context so an analytics consumer can correlate
    *  `register → paywall_open → transaction_complete` as one session. */
-  let currentPresentationId: string | null = null;
+  let currentPresentationId: PresentationId | null = null;
 
   // Internal pub-sub for paywall stripe_checkout_* postMessages. The
   // PurchaseController subscribes to these to await checkout completion.
@@ -2069,7 +2110,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         const ci = res.customerInfo?.entitlements;
         const list = ci && ci.length > 0 ? ci : (res.entitlements ?? ci ?? []);
         return list.map((e) => {
-          const ent = e as { id?: string; identifier?: string; isActive?: boolean; productIds?: string[] };
+          const ent = typeof e === "object" && e !== null
+            ? (e as { id?: string; identifier?: string; isActive?: boolean; productIds?: string[] })
+            : {};
           return {
             id: ent.identifier ?? ent.id ?? "",
             type: "SERVICE_LEVEL" as const,
@@ -2145,6 +2188,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   ): Promise<
     { type: "purchased" } | { type: "declined" } | { type: "error"; error: Error }
   > => {
+    // directPurchase runs outside a register() call so no PaywallInfo is available,
+    // but the transaction events were designed with paywall_info as required. We cast
+    // here to emit the events with partial detail; the paywall_info field will be
+    // absent on non-register purchase paths (a known design debt, TODO: make optional).
     const emit = (
       name: "transaction_start" | "transaction_complete" | "transaction_abandon" | "transaction_fail" | "subscription_start",
       detail: Record<string, unknown>,
@@ -2153,7 +2200,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         .runPromise(
           Effect.gen(function* () {
             const bus = yield* EventBus;
-            yield* bus.publish(name as never, detail as never);
+            yield* bus.publish(name as keyof AllSuperwallEvents, detail as AllSuperwallEvents[keyof AllSuperwallEvents]);
           }),
         )
         .catch((cause: unknown) =>
@@ -2405,7 +2452,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           const bus = yield* EventBus;
           yield* bus.publish("reset", {});
           yield* IdentityService.endPending(IdentityPending.Reset);
-        }) as Effect.Effect<void, unknown, never>,
+        }),
       );
       // Identity changed → re-run the post-configure entitlements check for
       // the new (anonymous) identity. Reset left status at UNKNOWN; this
@@ -2441,13 +2488,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           const assignments = yield* AssignmentService;
           // ConfigService.fetch is serialized by its actor — concurrent
           // refresh calls share the in-flight transition.
-          yield* config.fetch().pipe(Effect.catchAll(() => Effect.void));
+          yield* config.fetch();
           yield* eagerAssign(config, assignments);
           yield* applyEntitlementsByProductId(config);
           yield* confirmAssignments(assignments);
           yield* config.preload();
           yield* warmPaywalls(config);
-        }) as Effect.Effect<void, unknown, never>,
+        }),
       ),
 
     dispose: async () => {

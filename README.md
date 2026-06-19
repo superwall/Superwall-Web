@@ -150,22 +150,36 @@ function ConfigGate({ children }: { children: React.ReactNode }) {
 
 ## Common recipes
 
-### Observer mode (no `PurchaseController`)
+### Checkout
 
-The default. Paywall purchase clicks dispatch `transaction_start` + a custom callback; you run your own checkout (Stripe, Paddle, …) and tell Superwall the result:
+**Default — built-in Stripe checkout.** A standard Superwall web paywall runs
+Stripe checkout inside the paywall iframe; the SDK + backend complete it and
+flip `sw.subscriptionStatus` to `ACTIVE` automatically (via the default
+purchase controller). You don't run checkout or set status yourself — just
+read `sw.subscriptionStatus` / gate on entitlements.
+
+**Manual checkout (custom billing / non-Stripe paywalls).** If your paywall
+emits a bare `purchase` message instead of running Stripe, the SDK emits
+`transaction_start` and does nothing else — it does **not** run checkout or
+dismiss the paywall. Run your own checkout and report the result; dismiss
+yourself if you want the paywall closed:
 
 ```ts
 sw.events.addEventListener("transaction_start", async (e) => {
   const product = e.detail.product;
-  const ok = await myStripe.checkout(product.id);
+  const ok = await myBilling.checkout(product.id);
   if (ok) {
     sw.purchases.setSubscriptionStatus({
       status: "ACTIVE",
       entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: [product.id] }],
     });
+    sw.dismiss(); // setSubscriptionStatus does NOT auto-dismiss
   }
 });
 ```
+
+**Full control — custom `PurchaseController`.** Pass `purchaseController` to
+`createSuperwall` to own `purchase` + `restorePurchases` end-to-end.
 
 ### Custom user / placement types
 

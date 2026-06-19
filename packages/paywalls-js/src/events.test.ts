@@ -1,11 +1,11 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import {
   LOCAL_ONLY,
   SuperwallEventTarget,
   type SuperwallCustomEvent,
 } from "./events.ts";
 
-test("SuperwallEventTarget dispatches typed CustomEvent with detail", () => {
+it("SuperwallEventTarget dispatches typed CustomEvent with detail", () => {
   const target = new SuperwallEventTarget();
   const seen: Array<{ paywall_info: { identifier: string } }> = [];
   target.addEventListener("paywall_open", (e) => seen.push(e.detail));
@@ -28,7 +28,7 @@ test("SuperwallEventTarget dispatches typed CustomEvent with detail", () => {
   expect(seen[0]!.paywall_info.identifier).toBe("pw_1");
 });
 
-test("AbortSignal removes the listener", () => {
+it("AbortSignal removes the listener", () => {
   const target = new SuperwallEventTarget();
   const ac = new AbortController();
   let count = 0;
@@ -42,7 +42,7 @@ test("AbortSignal removes the listener", () => {
   expect(count).toBe(1);
 });
 
-test("removeEventListener detaches a previously-added listener", () => {
+it("removeEventListener detaches a previously-added listener", () => {
   const target = new SuperwallEventTarget();
   let count = 0;
   const handler = (_e: SuperwallCustomEvent<"app_open">) => count++;
@@ -56,7 +56,7 @@ test("removeEventListener detaches a previously-added listener", () => {
   expect(count).toBe(1);
 });
 
-test("LOCAL_ONLY contains the documented local-only events", () => {
+it("LOCAL_ONLY contains the documented local-only events", () => {
   expect(LOCAL_ONLY.has("paywallWillOpenURL")).toBe(true);
   expect(LOCAL_ONLY.has("paywallWillOpenDeepLink")).toBe(true);
   expect(LOCAL_ONLY.has("paywall_open")).toBe(false);

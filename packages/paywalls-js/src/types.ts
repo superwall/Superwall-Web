@@ -1,5 +1,8 @@
 // Public type surface for @superwall/paywalls-js. Pure types — no runtime.
 
+import type { TransactionId, ProductIdentifier } from "./internal/brands.ts";
+export type { TransactionId, ProductIdentifier } from "./internal/brands.ts";
+
 // Cross-SDK domain types live in @superwall/core. Imported for in-file
 // references and re-exported so the browser SDK's public surface is unchanged.
 import type {
@@ -38,7 +41,7 @@ export type {
 //     interface CustomCallbacks { submitEmail: { input: { email: string }; output: { ok: boolean } } }
 //   }
 
-export interface UserAttributes {}
+export interface UserAttributes extends Record<string, JsonValue> {}
 export interface PlacementParams {}
 export interface CustomCallbacks {}
 
@@ -124,8 +127,8 @@ export interface CustomerInfo {
 }
 
 export interface SubscriptionTransaction {
-  transactionId: string;
-  productId: string;
+  transactionId: TransactionId;
+  productId: ProductIdentifier;
   purchaseDate: number; // ms since epoch
   willRenew: boolean;
   isRevoked: boolean;
@@ -139,8 +142,8 @@ export interface SubscriptionTransaction {
 }
 
 export interface NonSubscriptionTransaction {
-  transactionId: string;
-  productId: string;
+  transactionId: TransactionId;
+  productId: ProductIdentifier;
   purchaseDate: number;
   isConsumable: boolean;
   isRevoked: boolean;

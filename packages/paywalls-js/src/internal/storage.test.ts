@@ -1,5 +1,5 @@
-import { test, expect } from "bun:test";
-import { Effect } from "effect";
+import { it, expect } from "@effect/vitest";
+import { Effect, Either } from "effect";
 import { STORAGE_KEYS, type StorageAdapter } from "../types.ts";
 import { asStorageKey } from "./brands.ts";
 import {
@@ -12,10 +12,7 @@ import { createMemoryStorage, StorageService } from "./storage.ts";
 
 const ALIAS_KEY = asStorageKey(STORAGE_KEYS.aliasId);
 
-const run = <A, E>(eff: Effect.Effect<A, E, StorageService>) =>
-  Effect.runPromise(eff.pipe(Effect.provide(StorageService.Default)) as Effect.Effect<A, E, never>);
-
-test("memory adapter: round-trips get/set/remove/clear", async () => {
+it("memory adapter: round-trips get/set/remove/clear", async () => {
   const adapter = createMemoryStorage();
   expect(await adapter.get("k")).toBeNull();
   await adapter.set("k", "v");
@@ -30,35 +27,31 @@ test("memory adapter: round-trips get/set/remove/clear", async () => {
   expect(await adapter.get("b")).toBeNull();
 });
 
-test("StorageService.Default uses an in-memory adapter", async () => {
-  const out = await run(
-    Effect.gen(function* () {
-      yield* StorageService.set(ALIAS_KEY, "$SuperwallAlias:abc");
-      const got = yield* StorageService.get(ALIAS_KEY);
-      return got;
-    }),
-  );
-  expect(out).toBe("$SuperwallAlias:abc");
-});
+it.effect("StorageService.Default uses an in-memory adapter", () =>
+  Effect.gen(function* () {
+    yield* StorageService.set(ALIAS_KEY, "$SuperwallAlias:abc");
+    const got = yield* StorageService.get(ALIAS_KEY);
+    expect(got).toBe("$SuperwallAlias:abc");
+  }).pipe(Effect.provide(StorageService.Default)),
+);
 
-test("StorageService.get returns null for missing keys", async () => {
-  const out = await run(StorageService.get(asStorageKey("missing")));
-  expect(out).toBeNull();
-});
+it.effect("StorageService.get returns null for missing keys", () =>
+  Effect.gen(function* () {
+    const out = yield* StorageService.get(asStorageKey("missing"));
+    expect(out).toBeNull();
+  }).pipe(Effect.provide(StorageService.Default)),
+);
 
-test("StorageService.fromAdapter wraps a custom sync adapter", async () => {
+it.effect("StorageService.fromAdapter wraps a custom sync adapter", () => {
   const adapter = createMemoryStorage();
-  const program = Effect.gen(function* () {
+  return Effect.gen(function* () {
     yield* StorageService.set(ALIAS_KEY, "from-custom");
-    return yield* StorageService.get(ALIAS_KEY);
-  });
-  const out = await Effect.runPromise(
-    program.pipe(Effect.provide(StorageService.fromAdapter(adapter))),
-  );
-  expect(out).toBe("from-custom");
+    const out = yield* StorageService.get(ALIAS_KEY);
+    expect(out).toBe("from-custom");
+  }).pipe(Effect.provide(StorageService.fromAdapter(adapter)));
 });
 
-test("StorageService.fromAdapter wraps an async adapter", async () => {
+it.effect("StorageService.fromAdapter wraps an async adapter", () => {
   const inner = new Map<string, string>();
   const asyncAdapter: StorageAdapter = {
     get: async (k) => inner.get(k) ?? null,
@@ -70,17 +63,14 @@ test("StorageService.fromAdapter wraps an async adapter", async () => {
     },
   };
 
-  const program = Effect.gen(function* () {
+  return Effect.gen(function* () {
     yield* StorageService.set(ALIAS_KEY, "async-write");
-    return yield* StorageService.get(ALIAS_KEY);
-  });
-  const out = await Effect.runPromise(
-    program.pipe(Effect.provide(StorageService.fromAdapter(asyncAdapter))),
-  );
-  expect(out).toBe("async-write");
+    const out = yield* StorageService.get(ALIAS_KEY);
+    expect(out).toBe("async-write");
+  }).pipe(Effect.provide(StorageService.fromAdapter(asyncAdapter)));
 });
 
-test("adapter throws → StorageService surfaces a tagged StorageGetError", async () => {
+it.effect("adapter throws → StorageService surfaces a tagged StorageGetError", () => {
   const broken: StorageAdapter = {
     get: () => {
       throw new Error("disk full");
@@ -89,22 +79,21 @@ test("adapter throws → StorageService surfaces a tagged StorageGetError", asyn
     remove: () => {},
   };
 
-  const result = await Effect.runPromiseExit(
-    StorageService.get(ALIAS_KEY).pipe(
+  return Effect.gen(function* () {
+    const result = yield* StorageService.get(ALIAS_KEY).pipe(
       Effect.provide(StorageService.fromAdapter(broken)),
-    ),
-  );
-
-  expect(result._tag).toBe("Failure");
-  if (result._tag === "Failure") {
-    const err = result.cause._tag === "Fail" ? result.cause.error : null;
-    expect(err).toBeInstanceOf(StorageGetError);
-    expect((err as StorageGetError).key).toBe(ALIAS_KEY);
-    expect((err as StorageGetError).message).toContain("disk full");
-  }
+      Effect.either,
+    );
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(StorageGetError);
+      expect((result.left as StorageGetError).key).toBe(ALIAS_KEY);
+      expect((result.left as StorageGetError).message).toContain("disk full");
+    }
+  });
 });
 
-test("adapter rejects → tagged StorageSetError", async () => {
+it.effect("adapter rejects → tagged StorageSetError", () => {
   const broken: StorageAdapter = {
     get: () => null,
     set: async () => {
@@ -113,22 +102,21 @@ test("adapter rejects → tagged StorageSetError", async () => {
     remove: () => {},
   };
 
-  const result = await Effect.runPromiseExit(
-    StorageService.set(ALIAS_KEY, "x").pipe(
+  return Effect.gen(function* () {
+    const result = yield* StorageService.set(ALIAS_KEY, "x").pipe(
       Effect.provide(StorageService.fromAdapter(broken)),
-    ),
-  );
-
-  expect(result._tag).toBe("Failure");
-  if (result._tag === "Failure") {
-    const err = result.cause._tag === "Fail" ? result.cause.error : null;
-    expect(err).toBeInstanceOf(StorageSetError);
-    expect((err as StorageSetError).key).toBe(ALIAS_KEY);
-    expect((err as StorageSetError).message).toContain("quota exceeded");
-  }
+      Effect.either,
+    );
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(StorageSetError);
+      expect((result.left as StorageSetError).key).toBe(ALIAS_KEY);
+      expect((result.left as StorageSetError).message).toContain("quota exceeded");
+    }
+  });
 });
 
-test("adapter throws on remove → tagged StorageRemoveError", async () => {
+it.effect("adapter throws on remove → tagged StorageRemoveError", () => {
   const broken: StorageAdapter = {
     get: () => null,
     set: () => {},
@@ -137,20 +125,19 @@ test("adapter throws on remove → tagged StorageRemoveError", async () => {
     },
   };
 
-  const result = await Effect.runPromiseExit(
-    StorageService.remove(ALIAS_KEY).pipe(
+  return Effect.gen(function* () {
+    const result = yield* StorageService.remove(ALIAS_KEY).pipe(
       Effect.provide(StorageService.fromAdapter(broken)),
-    ),
-  );
-
-  expect(result._tag).toBe("Failure");
-  if (result._tag === "Failure") {
-    const err = result.cause._tag === "Fail" ? result.cause.error : null;
-    expect(err).toBeInstanceOf(StorageRemoveError);
-  }
+      Effect.either,
+    );
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(StorageRemoveError);
+    }
+  });
 });
 
-test("clear() on adapter without clear() fails with StorageClearError", async () => {
+it.effect("clear() on adapter without clear() fails with StorageClearError", () => {
   const noClear: StorageAdapter = {
     get: () => null,
     set: () => {},
@@ -158,21 +145,20 @@ test("clear() on adapter without clear() fails with StorageClearError", async ()
     // intentionally no `clear`
   };
 
-  const result = await Effect.runPromiseExit(
-    StorageService.clear().pipe(
+  return Effect.gen(function* () {
+    const result = yield* StorageService.clear().pipe(
       Effect.provide(StorageService.fromAdapter(noClear)),
-    ),
-  );
-
-  expect(result._tag).toBe("Failure");
-  if (result._tag === "Failure") {
-    const err = result.cause._tag === "Fail" ? result.cause.error : null;
-    expect(err).toBeInstanceOf(StorageClearError);
-    expect((err as StorageClearError).message).toContain("does not implement clear");
-  }
+      Effect.either,
+    );
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left).toBeInstanceOf(StorageClearError);
+      expect((result.left as StorageClearError).message).toContain("does not implement clear");
+    }
+  });
 });
 
-test("Effect.catchTag narrows on the tagged error", async () => {
+it.effect("Effect.catchTag narrows on the tagged error", () => {
   const broken: StorageAdapter = {
     get: () => {
       throw new Error("boom");
@@ -181,18 +167,18 @@ test("Effect.catchTag narrows on the tagged error", async () => {
     remove: () => {},
   };
 
-  const recovered = await Effect.runPromise(
-    StorageService.get(ALIAS_KEY).pipe(
+  return Effect.gen(function* () {
+    const recovered = yield* StorageService.get(ALIAS_KEY).pipe(
       Effect.catchTag("StorageGetError", (e) =>
         Effect.succeed(`recovered: ${e.key}`),
       ),
       Effect.provide(StorageService.fromAdapter(broken)),
-    ),
-  );
-  expect(recovered).toBe(`recovered: ${ALIAS_KEY}`);
+    );
+    expect(recovered).toBe(`recovered: ${ALIAS_KEY}`);
+  });
 });
 
-test("STORAGE_KEYS contract is the documented set (snapshot)", () => {
+it("STORAGE_KEYS contract is the documented set (snapshot)", () => {
   expect(STORAGE_KEYS).toEqual({
     aliasId: "superwall.aliasId",
     appUserId: "superwall.appUserId",

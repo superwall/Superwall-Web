@@ -3,6 +3,7 @@ import { BadgeCheck, Crown, Plus, Search, Sparkles, UserRound } from "lucide-rea
 import { usePlacement, useSignal, useSuperwall, useUser } from "@superwall/paywalls-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import "./index.css";
 
 interface Horse {
@@ -57,6 +58,7 @@ export function App() {
   const isConfigured = useSignal(sw.isConfigured);
   const { register, state } = usePlacement();
   const [horses, setHorses] = useState<Horse[]>([]);
+  const [horsesLoading, setHorsesLoading] = useState(true);
   const [collection, setCollection] = useState<CollectionEntry[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string>(USERS[0].id);
   const [query, setQuery] = useState("");
@@ -82,23 +84,39 @@ export function App() {
     return haystack.includes(query.toLowerCase()) && (activeRarity === "All" || horse.rarity === activeRarity);
   });
 
+  // user is a stable SDK singleton — intentionally excluded from deps
   useEffect(() => {
     void user.identify(selectedUserId, { restorePaywallAssignments: true });
     setNotice(`${selectedUser.name} is browsing the frontier market.`);
-  }, [selectedUserId]);
+  }, [selectedUserId, selectedUser.name]);
 
   useEffect(() => {
-    fetch("/api/horses")
+    const controller = new AbortController();
+    setHorsesLoading(true);
+    fetch("/api/horses", { signal: controller.signal })
       .then((res) => res.json() as Promise<{ horses: Horse[] }>)
-      .then((data) => setHorses(data.horses))
-      .catch(() => setNotice("The frontier market could not be loaded."));
+      .then((data) => { setHorses(data.horses); setHorsesLoading(false); })
+      .catch((e: unknown) => {
+        if (e instanceof Error && e.name === "AbortError") return;
+        setNotice("The frontier market could not be loaded.");
+        setHorsesLoading(false);
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    fetch("/api/collection", { headers: { "x-demo-user": selectedUserId } })
+    const controller = new AbortController();
+    fetch("/api/collection", {
+      headers: { "x-demo-user": selectedUserId },
+      signal: controller.signal,
+    })
       .then((res) => res.json() as Promise<CollectionResponse>)
       .then((data) => setCollection(data.collection))
-      .catch(() => setCollection([]));
+      .catch((e: unknown) => {
+        if (e instanceof Error && e.name === "AbortError") return;
+        setCollection([]);
+      });
+    return () => controller.abort();
   }, [selectedUserId]);
 
   const showPaywall = async (reason: string) => {
@@ -131,46 +149,48 @@ export function App() {
 
     let claimed = false;
     let claimMessage = "The server did not confirm a Pro entitlement.";
-    const result = await register({
-      placement: "home",
-      params: { horse_id: horse.id, rarity: horse.rarity },
-      feature: async () => {
-        const response = await fetch("/api/collection", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-demo-user": selectedUserId,
-          },
-          body: JSON.stringify({ horseId: horse.id }),
-        });
+    try {
+      const result = await register({
+        placement: "home",
+        params: { horse_id: horse.id, rarity: horse.rarity },
+        feature: async () => {
+          const response = await fetch("/api/collection", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-demo-user": selectedUserId,
+            },
+            body: JSON.stringify({ horseId: horse.id }),
+          });
 
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
-          claimMessage = body?.message ?? claimMessage;
-          return;
-        }
+          if (!response.ok) {
+            const body = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
+            claimMessage = body?.message ?? claimMessage;
+            return;
+          }
 
-        const data = (await response.json()) as CollectionResponse;
-        setCollection(data.collection);
-        claimMessage = `${horse.name} was claimed for ${selectedUser.name}'s ranch book.`;
-        claimed = true;
-      },
-    });
+          const data = (await response.json()) as CollectionResponse;
+          setCollection(data.collection);
+          claimMessage = `${horse.name} was claimed for ${selectedUser.name}'s ranch book.`;
+          claimed = true;
+        },
+      });
 
-    if (result.type === "error") {
-      setNotice(result.error.message);
+      if (result.type === "error") {
+        setNotice(result.error.message);
+        return;
+      }
+
+      setNotice(
+        claimed
+          ? claimMessage
+          : result.type === "presented" && result.result.type === "declined"
+            ? "Claim cancelled. A Pro pass is required before the server will stamp this card."
+            : claimMessage,
+      );
+    } finally {
       setPendingHorseId(null);
-      return;
     }
-
-    setNotice(
-      claimed
-        ? claimMessage
-        : result.type === "presented" && result.result.type === "declined"
-          ? "Claim cancelled. A Pro pass is required before the server will stamp this card."
-          : claimMessage,
-    );
-    setPendingHorseId(null);
   };
 
   return (
@@ -186,17 +206,18 @@ export function App() {
               <h1 className="mt-2 text-3xl font-bold tracking-normal sm:text-4xl">Dusty Spur Horse Ledger</h1>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <select
-                value={selectedUserId}
-                onChange={(event) => setSelectedUserId(event.target.value)}
-                className="h-10 rounded-md border border-[#b87a41] bg-white px-3 text-sm shadow-xs"
-              >
-                {USERS.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
+              <Select value={selectedUserId} onValueChange={setSelectedUserId}>
+                <SelectTrigger className="h-10 w-[160px] border-[#b87a41] bg-white">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {USERS.map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {item.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <Button variant={hasSubscription ? "secondary" : "default"} onClick={buyProPass}>
                 {hasSubscription ? <BadgeCheck /> : <Crown />}
                 {hasSubscription ? "Pro Pass Active" : "Buy Pro Pass"}
@@ -204,7 +225,7 @@ export function App() {
             </div>
           </div>
           <div className="grid gap-3 md:grid-cols-4">
-            <Metric label="Catalog" value={horses.length.toString()} />
+            <Metric label="Catalog" value={horsesLoading ? "…" : horses.length.toString()} />
             <Metric label="Collection" value={collection.length.toString()} />
             <Metric label="Est. value" value={`$${collectionValue}`} />
             <Metric label="SDK" value={isConfigured ? "Ready" : "Loading"} />
@@ -238,17 +259,29 @@ export function App() {
             </div>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {filteredHorses.map((horse) => (
-              <HorseCard
-                key={horse.id}
-                horse={horse}
-                owned={collectionIds.has(horse.id)}
-                pending={pendingHorseId === horse.id}
-                onAdd={() => void claimHorse(horse)}
-              />
-            ))}
-          </div>
+          {horsesLoading ? (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="h-64 animate-pulse rounded-lg bg-stone-200" />
+              ))}
+            </div>
+          ) : filteredHorses.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-stone-300 p-8 text-center text-sm text-stone-500">
+              {horses.length === 0 ? "Could not load the catalog." : "No horses match your search."}
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {filteredHorses.map((horse) => (
+                <HorseCard
+                  key={horse.id}
+                  horse={horse}
+                  owned={collectionIds.has(horse.id)}
+                  pending={pendingHorseId === horse.id}
+                  onAdd={() => void claimHorse(horse)}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         <aside className="space-y-5">
@@ -291,7 +324,7 @@ export function App() {
                     if (!horse) return null;
                     return (
                       <div key={entry.id} className="flex items-center gap-3">
-                        <img src={horse.image} alt="" className="size-12 rounded-md object-cover" />
+                        <img src={horse.image} alt={horse.name} className="size-12 rounded-md object-cover" />
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium">{horse.name}</div>
                           <div className="text-xs text-stone-500">{fmtDate(entry.acquiredAt)}</div>

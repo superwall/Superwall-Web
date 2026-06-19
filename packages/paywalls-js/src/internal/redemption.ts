@@ -4,7 +4,17 @@
 // for refresh. Used by the default automaticPurchaseController; consumers
 // don't interact with this directly.
 
-import { Context, Effect, Layer, Ref, SubscriptionRef } from "effect";
+import {
+  Context,
+  Duration,
+  Effect,
+  Fiber,
+  Layer,
+  Option,
+  Ref,
+  Schedule,
+  SubscriptionRef,
+} from "effect";
 import {
   STORAGE_KEYS,
   type Entitlement,
@@ -95,7 +105,9 @@ const make = Effect.gen(function* () {
   const identity = yield* IdentityService;
   const logger = yield* Logger;
   const ref = yield* SubscriptionRef.make<RedeemResponse | null>(null);
-  const pollHandle = yield* Ref.make<ReturnType<typeof setInterval> | null>(
+  // Stores the active polling fiber so it can be interrupted on reset() or
+  // when startPolling is called a second time (idempotent cancel-and-restart).
+  const pollFiber = yield* Ref.make<Fiber.RuntimeFiber<void, never> | null>(
     null,
   );
 
@@ -104,16 +116,34 @@ const make = Effect.gen(function* () {
     .get(REDEMPTION_KEY)
     .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
   if (stored !== null) {
-    try {
-      const parsed = JSON.parse(stored) as RedeemResponse;
-      yield* SubscriptionRef.set(ref, parsed);
-    } catch {}
+    // Fix 1: bare try/catch → Effect.try + Effect.option
+    const parsed = yield* Effect.try({
+      try: () => JSON.parse(stored) as RedeemResponse,
+      catch: (e) => e,
+    }).pipe(
+      Effect.tapError((e) =>
+        Effect.logDebug("Redemption: failed to parse stored response", {
+          error: String(e),
+        }),
+      ),
+      Effect.option,
+    );
+    if (Option.isSome(parsed)) {
+      yield* SubscriptionRef.set(ref, parsed.value);
+    }
   }
 
   const persist = (res: RedeemResponse) =>
     storage
       .set(REDEMPTION_KEY, JSON.stringify(res))
-      .pipe(Effect.catchAll(() => Effect.void));
+      .pipe(
+        Effect.tapError((e) =>
+          Effect.logDebug("Redemption: failed to persist response", {
+            error: String(e),
+          }),
+        ),
+        Effect.catchAll(() => Effect.void),
+      );
 
   const redeem: RedemptionServiceImpl["redeem"] = (type) =>
     Effect.gen(function* () {
@@ -135,18 +165,14 @@ const make = Effect.gen(function* () {
           // `DeviceVendorId`). Our SDK's `snap.deviceId` is the truncated
           // sha256 hash — wrong for this endpoint.
           deviceId: snap.vendorId as string,
-          appUserId: snap.appUserId === "" ? undefined : (snap.appUserId as string),
+          ...(snap.appUserId !== "" && { appUserId: snap.appUserId as string }),
           aliasId: snap.aliasId as string,
           codes: allCodes,
         })
         .pipe(
+          // Fix 3: pass full structured error, not just .message
           Effect.tapError((err) =>
-            logger.warn(
-              "transactions",
-              "redeem POST failed",
-              null,
-              err.message,
-            ),
+            logger.warn("transactions", "redeem POST failed", null, String(err)),
           ),
           Effect.catchAll(() => Effect.succeed(null as RedeemResponse | null)),
         );
@@ -180,12 +206,13 @@ const make = Effect.gen(function* () {
             ...(queryUserId && { userId: queryUserId }),
           })
           .pipe(
+            // Fix 3: pass full structured error, not just .message
             Effect.tapError((err) =>
               logger.warn(
                 "transactions",
                 "entitlements GET failed",
                 null,
-                err.message,
+                String(err),
               ),
             ),
             Effect.catchAll(() =>
@@ -195,26 +222,31 @@ const make = Effect.gen(function* () {
         return result;
       });
 
+  // Fix 2: replace setInterval with Effect.runFork + Schedule.fixed.
+  // refreshWebEntitlements() closes over resolved service impls (R = never),
+  // so Effect.runFork can run it without an explicit runtime context.
+  // The cleanup callback interrupts the fiber synchronously.
   const startPolling: RedemptionServiceImpl["startPolling"] = (intervalMs) => {
-    if (typeof setInterval === "undefined") return () => {};
     // Cancel any prior poller — idempotent.
-    Effect.runSync(
-      Ref.get(pollHandle).pipe(
-        Effect.flatMap((h) => {
-          if (h !== null) clearInterval(h);
-          return Effect.void;
-        }),
-      ),
+    const prior = Effect.runSync(Ref.get(pollFiber));
+    if (prior !== null) {
+      Effect.runFork(Fiber.interrupt(prior));
+    }
+
+    const pollEffect = refreshWebEntitlements().pipe(
+      Effect.catchAll(() => Effect.void),
+      // Run once immediately, then repeat every intervalMs.
+      Effect.repeat(Schedule.fixed(Duration.millis(intervalMs))),
+      // Absorb the repeat's output type (number of repetitions) → void.
+      Effect.asVoid,
     );
-    const handle = setInterval(() => {
-      void Effect.runPromise(
-        refreshWebEntitlements().pipe(Effect.catchAll(() => Effect.void)),
-      ).catch(() => {});
-    }, intervalMs);
-    Effect.runSync(Ref.set(pollHandle, handle));
+
+    const fiber = Effect.runFork(pollEffect);
+    Effect.runSync(Ref.set(pollFiber, fiber));
+
     return () => {
-      clearInterval(handle);
-      Effect.runSync(Ref.set(pollHandle, null));
+      Effect.runFork(Fiber.interrupt(fiber));
+      Effect.runSync(Ref.set(pollFiber, null));
     };
   };
 
@@ -226,10 +258,10 @@ const make = Effect.gen(function* () {
       yield* storage
         .remove(REDEMPTION_KEY)
         .pipe(Effect.catchAll(() => Effect.void));
-      const handle = yield* Ref.get(pollHandle);
-      if (handle !== null) {
-        clearInterval(handle);
-        yield* Ref.set(pollHandle, null);
+      const fiber = yield* Ref.get(pollFiber);
+      if (fiber !== null) {
+        yield* Fiber.interrupt(fiber);
+        yield* Ref.set(pollFiber, null);
       }
     });
 
@@ -246,7 +278,14 @@ export class RedemptionService extends Context.Tag(
   "@superwall/RedemptionService",
 )<RedemptionService, RedemptionServiceImpl>() {}
 
-export const redemptionServiceLayer = (
-  upstream: Layer.Layer<NetworkService | IdentityService | Logger | StorageService>,
-) =>
-  Layer.provideMerge(Layer.effect(RedemptionService, make), upstream);
+/** Build a RedemptionService Layer over an upstream providing
+ *  `NetworkService | IdentityService | Logger | StorageService` plus any
+ *  additional services (`Extra`). `Extra` is preserved in the output so
+ *  callers don't need to cast the richer upstream type away. */
+export const redemptionServiceLayer = <Extra = never>(
+  upstream: Layer.Layer<NetworkService | IdentityService | Logger | StorageService | Extra>,
+): Layer.Layer<RedemptionService | NetworkService | IdentityService | Logger | StorageService | Extra, never, never> =>
+  Layer.provideMerge(
+    Layer.effect(RedemptionService, make),
+    upstream,
+  ) as Layer.Layer<RedemptionService | NetworkService | IdentityService | Logger | StorageService | Extra, never, never>;

@@ -107,12 +107,14 @@ export class Logger extends Context.Tag("@superwall/Logger")<
   LoggerImpl
 >() {}
 
-/** Build a Logger Layer over the supplied EventBus (re-exposed for downstream). */
-export const loggerLayer = (
+/** Build a Logger Layer over an upstream providing `EventBus` plus any
+ *  additional services (`Extra`). `Extra` is preserved so callers don't
+ *  need to cast away richer upstream types. */
+export const loggerLayer = <Extra = never>(
   initialLevel: LogLevel,
-  busLayer: Layer.Layer<EventBus>,
-): Layer.Layer<Logger | EventBus, never, never> =>
+  busLayer: Layer.Layer<EventBus | Extra>,
+): Layer.Layer<Logger | EventBus | Extra, never, never> =>
   Layer.provideMerge(
     Layer.effect(Logger, make(initialLevel)),
     busLayer,
-  ) as Layer.Layer<Logger | EventBus, never, never>;
+  ) as Layer.Layer<Logger | EventBus | Extra, never, never>;

@@ -1,8 +1,9 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import {
   createSuperwall as _createSuperwall,
   NoPresenterRegisteredError,
   NotConfiguredError,
+  type PlacementParams,
   type StorageAdapter,
   type SubscriptionStatus,
   type Superwall,
@@ -59,7 +60,7 @@ const EMPTY_STATIC_CONFIG = JSON.stringify({
 // everything else.
 import { buildInitPayload } from "./superwall.ts";
 
-test("buildInitPayload includes all controller-required slices + resolveVariables:true", () => {
+it("buildInitPayload includes all controller-required slices + resolveVariables:true", () => {
   const payload = buildInitPayload({
     info: {
       identifier: "pw_init",
@@ -82,7 +83,7 @@ test("buildInitPayload includes all controller-required slices + resolveVariable
       darkBackgroundColorHex: "#000000",
     },
     placement: "checkout",
-    params: { src: "home" },
+    params: { src: "home" } as PlacementParams,
     decision: {
       kind: "paywall",
       experiment: {
@@ -272,7 +273,7 @@ const makeWithPaywall = (
 // factory + ready
 // ---------------------------------------------------------------------------
 
-test("createSuperwall returns an instance synchronously", () => {
+it("createSuperwall returns an instance synchronously", () => {
   const sw = make();
   expect(sw.apiKey).toBe("pk_test");
   expect(sw.ready).toBeInstanceOf(Promise);
@@ -280,7 +281,7 @@ test("createSuperwall returns an instance synchronously", () => {
   expect(sw.user).toBeDefined();
 });
 
-test("sw.ready resolves once identity hydrates and lifecycle events fire", async () => {
+it("sw.ready resolves once identity hydrates and lifecycle events fire", async () => {
   const sw = make();
   await sw.ready;
   expect(sw.isConfigured.value).toBe(true);
@@ -288,7 +289,7 @@ test("sw.ready resolves once identity hydrates and lifecycle events fire", async
   await sw.dispose();
 });
 
-test("subscriptionStatus is persisted and replayed on reopen (shared storage)", async () => {
+it("subscriptionStatus is persisted and replayed on reopen (shared storage)", async () => {
   const adapter = newAdapter();
   // First session: go ACTIVE, then dispose (simulates closing the tab).
   const sw1 = make({ storage: adapter });
@@ -309,7 +310,7 @@ test("subscriptionStatus is persisted and replayed on reopen (shared storage)", 
   await sw2.dispose();
 });
 
-test("reset() clears the cached subscriptionStatus so it doesn't replay", async () => {
+it("reset() clears the cached subscriptionStatus so it doesn't replay", async () => {
   const adapter = newAdapter();
   const sw1 = make({ storage: adapter });
   await sw1.ready;
@@ -329,7 +330,7 @@ test("reset() clears the cached subscriptionStatus so it doesn't replay", async 
   await sw2.dispose();
 });
 
-test("reset() re-checks entitlements for the new identity → UNKNOWN resolves to INACTIVE", async () => {
+it("reset() re-checks entitlements for the new identity → UNKNOWN resolves to INACTIVE", async () => {
   // Entitlements endpoint returns a valid empty set → the post-reset
   // re-check should flip UNKNOWN → INACTIVE (not leave it UNKNOWN).
   const entFetch = ((input: RequestInfo | URL) => {
@@ -361,7 +362,7 @@ test("reset() re-checks entitlements for the new identity → UNKNOWN resolves t
   await sw.dispose();
 });
 
-test("identity hydration writes alias + vendor + device into the storage adapter", async () => {
+it("identity hydration writes alias + vendor + device into the storage adapter", async () => {
   const adapter = newAdapter();
   const sw = make({ storage: adapter });
   await sw.ready;
@@ -371,7 +372,7 @@ test("identity hydration writes alias + vendor + device into the storage adapter
   await sw.dispose();
 });
 
-test("seeded identity values are picked up + persisted", async () => {
+it("seeded identity values are picked up + persisted", async () => {
   const adapter = newAdapter();
   const sw = make({
     storage: adapter,
@@ -389,7 +390,7 @@ test("seeded identity values are picked up + persisted", async () => {
 // user namespace
 // ---------------------------------------------------------------------------
 
-test("identify updates id / effectiveId / isLoggedIn signals", async () => {
+it("identify updates id / effectiveId / isLoggedIn signals", async () => {
   const sw = make();
   await sw.ready;
   expect(sw.user.id.value).toBe("");
@@ -405,7 +406,7 @@ test("identify updates id / effectiveId / isLoggedIn signals", async () => {
   await sw.dispose();
 });
 
-test("signOut clears the userId but keeps the alias", async () => {
+it("signOut clears the userId but keeps the alias", async () => {
   const sw = make();
   await sw.ready;
   await sw.user.identify("user_42");
@@ -422,7 +423,41 @@ test("signOut clears the userId but keeps the alias", async () => {
   await sw.dispose();
 });
 
-test("setAttributes merges into the attributes signal", async () => {
+it("identify() triggers a background /entitlements refresh when the user ID changes", async () => {
+  let entitlementsCalls = 0;
+  const entFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config"))
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    if (url.includes("/entitlements")) {
+      entitlementsCalls++;
+      return Promise.resolve(
+        new Response(JSON.stringify({ entitlements: [], customerInfo: { entitlements: [] } })),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+  const sw = make({ fetch: entFetch });
+  await sw.ready;
+  // onConfigured fires once at startup
+  const callsAfterConfigure = entitlementsCalls;
+
+  // Identifying as a new user should trigger a background refresh
+  await sw.user.identify("user_new");
+  await new Promise<void>((r) => setTimeout(r, 20));
+  expect(entitlementsCalls).toBeGreaterThan(callsAfterConfigure);
+
+  // Identifying with the same ID again should NOT trigger another refresh
+  const callsAfterFirst = entitlementsCalls;
+  await sw.user.identify("user_new");
+  await new Promise<void>((r) => setTimeout(r, 20));
+  expect(entitlementsCalls).toBe(callsAfterFirst);
+
+  await sw.dispose();
+});
+
+it("setAttributes merges into the attributes signal", async () => {
   const sw = make();
   await sw.ready;
   sw.user.setAttributes({ email: "a@b.co" } as Partial<typeof sw.user.attributes.value>);
@@ -430,7 +465,7 @@ test("setAttributes merges into the attributes signal", async () => {
   await sw.dispose();
 });
 
-test("setIntegrationAttribute writes + null clears", async () => {
+it("setIntegrationAttribute writes + null clears", async () => {
   const sw = make();
   await sw.ready;
   sw.user.setIntegrationAttribute("mixpanelDistinctId", "abc-123");
@@ -444,7 +479,7 @@ test("setIntegrationAttribute writes + null clears", async () => {
 // purchases.setSubscriptionStatus + entitlements derivation
 // ---------------------------------------------------------------------------
 
-test("setSubscriptionStatus updates subscriptionStatus + entitlements + fires delegate", async () => {
+it("setSubscriptionStatus updates subscriptionStatus + entitlements + fires delegate", async () => {
   const transitions: Array<[SubscriptionStatus, SubscriptionStatus]> = [];
   const sw = make({
     delegate: {
@@ -513,7 +548,7 @@ const entitlementsFetch = (
     return Promise.resolve(new Response("", { status: 204 }));
   }) as unknown as typeof fetch;
 
-test("surfaces entitlementsToken from /entitlements via getter + readable", async () => {
+it("surfaces entitlementsToken from /entitlements via getter + readable", async () => {
   const sw = make({
     fetch: entitlementsFetch(() => ({
       entitlements: [{ id: "pro", isActive: true }],
@@ -527,7 +562,7 @@ test("surfaces entitlementsToken from /entitlements via getter + readable", asyn
   await sw.dispose();
 });
 
-test("entitlementsToken is null when the backend omits it (best-effort)", async () => {
+it("entitlementsToken is null when the backend omits it (best-effort)", async () => {
   const sw = make({
     fetch: entitlementsFetch(() => ({
       entitlements: [{ id: "pro", isActive: true }],
@@ -541,7 +576,7 @@ test("entitlementsToken is null when the backend omits it (best-effort)", async 
   await sw.dispose();
 });
 
-test("reset() clears the entitlements token", async () => {
+it("reset() clears the entitlements token", async () => {
   const sw = make({
     fetch: entitlementsFetch(() => ({
       entitlements: [{ id: "pro", isActive: true }],
@@ -562,7 +597,7 @@ test("reset() clears the entitlements token", async () => {
 // events
 // ---------------------------------------------------------------------------
 
-test("sw.events receives the lifecycle events fired during configure", async () => {
+it("sw.events receives the lifecycle events fired during configure", async () => {
   const sw = make();
   const seen: string[] = [];
   sw.events.addEventListener("first_seen", () => seen.push("first_seen"));
@@ -584,7 +619,7 @@ test("sw.events receives the lifecycle events fired during configure", async () 
 // setDelegate
 // ---------------------------------------------------------------------------
 
-test("setDelegate(null) detaches the active delegate", async () => {
+it("setDelegate(null) detaches the active delegate", async () => {
   let count = 0;
   const delegate: SuperwallDelegate = {
     onSubscriptionStatusChange: () => count++,
@@ -608,7 +643,7 @@ test("setDelegate(null) detaches the active delegate", async () => {
 // reset
 // ---------------------------------------------------------------------------
 
-test("reset regenerates identity, clears subscription + paywall state", async () => {
+it("reset regenerates identity, clears subscription + paywall state", async () => {
   const sw = make();
   await sw.ready;
   await sw.user.identify("u1");
@@ -659,7 +694,7 @@ const presenterThatResolves = (
   };
 };
 
-test("register with no DOM + no presenter returns NoPresenterRegisteredError", async () => {
+it("register with no DOM + no presenter returns NoPresenterRegisteredError", async () => {
   // With a DOM, no-presenter falls back to the default browser presenter.
   // Without one (SSR / headless), there's nothing to present → error.
   const realDoc = (globalThis as { document?: unknown }).document;
@@ -678,7 +713,7 @@ test("register with no DOM + no presenter returns NoPresenterRegisteredError", a
   }
 });
 
-test("register with a per-call presenter override uses it (no create-time presenter)", async () => {
+it("register with a per-call presenter override uses it (no create-time presenter)", async () => {
   const presenter = presenterThatResolves({ type: "purchased", productId: "pro_yearly" });
   const sw = makeWithPaywall(); // no presenter at construction
   await sw.ready;
@@ -688,7 +723,7 @@ test("register with a per-call presenter override uses it (no create-time presen
   await sw.dispose();
 });
 
-test("register: ACTIVE subscription → skipped { type: 'userSubscribed' } and runs feature", async () => {
+it("register: ACTIVE subscription → skipped { type: 'userSubscribed' } and runs feature", async () => {
   // Mirrors Android `PaywallSkippedReason.UserIsSubscribed`: skip the
   // paywall, fire onSkip(reason), run feature.
   const presenter = presenterThatResolves({ type: "purchased", productId: "x" });
@@ -717,7 +752,7 @@ test("register: ACTIVE subscription → skipped { type: 'userSubscribed' } and r
   await sw.dispose();
 });
 
-test("register({ paywall }) renders a custom paywall, fires lifecycle, and controller.buy resolves purchased", async () => {
+it("register({ paywall }) renders a custom paywall, fires lifecycle, and controller.buy resolves purchased", async () => {
   // Custom PurchaseController so controller.buy actually resolves (the
   // default one would await an iframe checkout that never comes).
   const customController = {
@@ -761,7 +796,7 @@ test("register({ paywall }) renders a custom paywall, fires lifecycle, and contr
   await sw.dispose();
 });
 
-test("register({ paywall }) controller.close resolves declined + tears down", async () => {
+it("register({ paywall }) controller.close resolves declined + tears down", async () => {
   const customController = {
     purchase: async () => ({ type: "purchased" as const }),
     restorePurchases: async () => ({ type: "restored" as const }),
@@ -784,7 +819,7 @@ test("register({ paywall }) controller.close resolves declined + tears down", as
   await sw.dispose();
 });
 
-test("register presents, awaits result, fires lifecycle events + handler callbacks", async () => {
+it("register presents, awaits result, fires lifecycle events + handler callbacks", async () => {
   const presenter = presenterThatResolves({ type: "purchased", productId: "p1" });
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
@@ -826,7 +861,7 @@ test("register presents, awaits result, fires lifecycle events + handler callbac
   await sw.dispose();
 });
 
-test("register fires trigger_fire with the placement + paywall result", async () => {
+it("register fires trigger_fire with the placement + paywall result", async () => {
   const presenter = presenterThatResolves({ type: "declined" });
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
@@ -841,7 +876,7 @@ test("register fires trigger_fire with the placement + paywall result", async ()
   await sw.dispose();
 });
 
-test("register does NOT fire trigger_fire for an unknown placement", async () => {
+it("register does NOT fire trigger_fire for an unknown placement", async () => {
   const presenter = presenterThatResolves({ type: "declined" });
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
@@ -854,7 +889,7 @@ test("register does NOT fire trigger_fire for an unknown placement", async () =>
   await sw.dispose();
 });
 
-test("register: declined result on a config-driven nonGated paywall RUNS the feature", async () => {
+it("register: declined result on a config-driven nonGated paywall RUNS the feature", async () => {
   // Config carries `featureGatingBehavior: "nonGated"` on the paywall —
   // even when the user dismisses, the consumer's feature callback fires.
   // Mirrors Android `featureGatingBehavior` semantics.
@@ -928,7 +963,7 @@ test("register: declined result on a config-driven nonGated paywall RUNS the fea
   await sw.dispose();
 });
 
-test("register: declined result on a config-driven gated paywall does NOT run feature", async () => {
+it("register: declined result on a config-driven gated paywall does NOT run feature", async () => {
   // Same setup as above but featureGatingBehavior: "gated" — feature must NOT fire.
   const fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -999,7 +1034,7 @@ test("register: declined result on a config-driven gated paywall does NOT run fe
   await sw.dispose();
 });
 
-test("register: declined result on a (default-gated) paywall does NOT run feature", async () => {
+it("register: declined result on a (default-gated) paywall does NOT run feature", async () => {
   const presenter = presenterThatResolves({ type: "declined" });
   const sw = makeWithPaywall({ presenter });
   await sw.ready;
@@ -1017,7 +1052,7 @@ test("register: declined result on a (default-gated) paywall does NOT run featur
   await sw.dispose();
 });
 
-test("register enforces the single-paywall invariant — second call → PaywallAlreadyPresentedError", async () => {
+it("register enforces the single-paywall invariant — second call → PaywallAlreadyPresentedError", async () => {
   // Externally-controlled present() with a "started" signal so the test can
   // wait until the presenter has actually been invoked before triggering
   // the second register call (otherwise we race the runtime).
@@ -1058,7 +1093,7 @@ test("register enforces the single-paywall invariant — second call → Paywall
   await sw.dispose();
 });
 
-test("register: presenter throw → { type: 'error', error: PresenterError }, isPaywallPresented resets", async () => {
+it("register: presenter throw → { type: 'error', error: PresenterError }, isPaywallPresented resets", async () => {
   const boom: PaywallPresenter = {
     present: () => {
       throw new Error("iframe gone");
@@ -1088,7 +1123,7 @@ test("register: presenter throw → { type: 'error', error: PresenterError }, is
   await sw.dispose();
 });
 
-test("register: presentation context exposes placement + params + signal + emit", async () => {
+it("register: presentation context exposes placement + params + signal + emit", async () => {
   let capturedCtx: PresentationContext | null = null;
   const presenter: PaywallPresenter = {
     present: async (_info, ctx) => {
@@ -1113,7 +1148,7 @@ test("register: presentation context exposes placement + params + signal + emit"
   await sw.dispose();
 });
 
-test("dismiss aborts the in-flight presentation and tells the presenter", async () => {
+it("dismiss aborts the in-flight presentation and tells the presenter", async () => {
   let dismissCalls = 0;
   let resolveStarted!: () => void;
   const started = new Promise<void>((r) => {
@@ -1146,7 +1181,7 @@ test("dismiss aborts the in-flight presentation and tells the presenter", async 
   await sw.dispose();
 });
 
-test("getPresentationResult returns placementNotFound for placements not in config", async () => {
+it("getPresentationResult returns placementNotFound for placements not in config", async () => {
   // No real config response (noopFetch returns 204), so any placement
   // lookup misses → placementNotFound. When config processing returns a
   // matching trigger, the result will become `paywallNotAvailable` until
@@ -1158,7 +1193,7 @@ test("getPresentationResult returns placementNotFound for placements not in conf
   await sw.dispose();
 });
 
-test("confirmAllAssignments returns [] until experiments processing lands", async () => {
+it("confirmAllAssignments returns [] until experiments processing lands", async () => {
   const sw = make();
   await sw.ready;
   const r = await sw.placements.confirmAllAssignments();
@@ -1166,7 +1201,7 @@ test("confirmAllAssignments returns [] until experiments processing lands", asyn
   await sw.dispose();
 });
 
-test("preloadAll / preloadFor are no-ops without config (do not throw)", async () => {
+it("preloadAll / preloadFor are no-ops without config (do not throw)", async () => {
   const sw = make();
   await sw.ready;
   await sw.placements.preloadAll();
@@ -1178,7 +1213,7 @@ test("preloadAll / preloadFor are no-ops without config (do not throw)", async (
 // dispose idempotence
 // ---------------------------------------------------------------------------
 
-test("dispose is idempotent + safe to call multiple times", async () => {
+it("dispose is idempotent + safe to call multiple times", async () => {
   const sw = make();
   await sw.ready;
   await sw.dispose();
@@ -1217,7 +1252,7 @@ const fetchRecorder = () => {
   };
 };
 
-test("configure POSTs enrichment with current user attributes + merges response into the user signal", async () => {
+it("configure POSTs enrichment with current user attributes + merges response into the user signal", async () => {
   const { fetch, calls } = fetchRecorder();
   const sw = createSuperwall({
     apiKey: "pk_test",
@@ -1250,7 +1285,7 @@ test("configure POSTs enrichment with current user attributes + merges response 
   await sw.dispose();
 });
 
-test("enrichment failure does NOT block sw.ready (emits enrichment_fail)", async () => {
+it("enrichment failure does NOT block sw.ready (emits enrichment_fail)", async () => {
   const { fetch, setEnrichmentResponder } = fetchRecorder();
   setEnrichmentResponder(() => new Response("nope", { status: 500 }));
   const sw = createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
@@ -1267,7 +1302,7 @@ test("enrichment failure does NOT block sw.ready (emits enrichment_fail)", async
   await sw.dispose();
 });
 
-test("configure emits enrichment_start + enrichment_complete around the network call", async () => {
+it("configure emits enrichment_start + enrichment_complete around the network call", async () => {
   const { fetch } = fetchRecorder();
   const sw = createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
   const order: string[] = [];
@@ -1283,7 +1318,7 @@ test("configure emits enrichment_start + enrichment_complete around the network 
 // Offline assignment cache
 // ---------------------------------------------------------------------------
 
-test("configure replays cached ConfirmedAssignment[] from storage", async () => {
+it("configure replays cached ConfirmedAssignment[] from storage", async () => {
   const adapter = newAdapter();
   // Seed the cache directly — simulates a return visit.
   await adapter.set(
@@ -1301,14 +1336,14 @@ test("configure replays cached ConfirmedAssignment[] from storage", async () => 
   await sw.dispose();
 });
 
-test("confirmAllAssignments returns [] when storage is empty (fresh install)", async () => {
+it("confirmAllAssignments returns [] when storage is empty (fresh install)", async () => {
   const sw = make();
   await sw.ready;
   expect(await sw.placements.confirmAllAssignments()).toEqual([]);
   await sw.dispose();
 });
 
-test("corrupt assignments cache is silently dropped (no throw)", async () => {
+it("corrupt assignments cache is silently dropped (no throw)", async () => {
   const adapter = newAdapter();
   await adapter.set(STORAGE_KEYS.assignments, "{not json");
   const sw = createSuperwall({ apiKey: "pk_test", fetch: noopFetch, storage: adapter });
@@ -1317,7 +1352,7 @@ test("corrupt assignments cache is silently dropped (no throw)", async () => {
   await sw.dispose();
 });
 
-test("reset() clears the assignments cache from both signal and storage", async () => {
+it("reset() clears the assignments cache from both signal and storage", async () => {
   const adapter = newAdapter();
   await adapter.set(
     STORAGE_KEYS.assignments,
@@ -1338,7 +1373,7 @@ test("reset() clears the assignments cache from both signal and storage", async 
 // Restore state cache
 // ---------------------------------------------------------------------------
 
-test("purchases.restore() emits lifecycle events and persists lastRestoreAt", async () => {
+it("purchases.restore() emits lifecycle events and persists lastRestoreAt", async () => {
   const adapter = newAdapter();
   const sw = createSuperwall({ apiKey: "pk_test", fetch: noopFetch, storage: adapter });
   await sw.ready;
@@ -1362,7 +1397,7 @@ test("purchases.restore() emits lifecycle events and persists lastRestoreAt", as
   await sw.dispose();
 });
 
-test("configure replays lastRestoreAt from storage on a return visit", async () => {
+it("configure replays lastRestoreAt from storage on a return visit", async () => {
   const adapter = newAdapter();
   await adapter.set(STORAGE_KEYS.lastRestoreAt, "1700000000000");
   const sw = createSuperwall({ apiKey: "pk_test", fetch: noopFetch, storage: adapter });
@@ -1376,7 +1411,7 @@ test("configure replays lastRestoreAt from storage on a return visit", async () 
   await sw.dispose();
 });
 
-test("reset() clears the lastRestoreAt cache from storage", async () => {
+it("reset() clears the lastRestoreAt cache from storage", async () => {
   const adapter = newAdapter();
   await adapter.set(STORAGE_KEYS.lastRestoreAt, "1700000000000");
   const sw = createSuperwall({ apiKey: "pk_test", fetch: noopFetch, storage: adapter });
@@ -1391,7 +1426,7 @@ test("reset() clears the lastRestoreAt cache from storage", async () => {
 // Delegate bridges — userAttributesDidChange + customerInfoDidChange
 // ---------------------------------------------------------------------------
 
-test("delegate.onUserAttributesChange fires when sw.user.setAttributes is called", async () => {
+it("delegate.onUserAttributesChange fires when sw.user.setAttributes is called", async () => {
   const seen: Array<Partial<typeof sw.user.attributes.value>> = [];
   const sw = make({
     delegate: {
@@ -1418,7 +1453,7 @@ test("delegate.onUserAttributesChange fires when sw.user.setAttributes is called
 // paywall_open_url + paywall_open_deep_link → delegate bridge
 // ---------------------------------------------------------------------------
 
-test("paywallWillOpenURL local event is delivered to the delegate", async () => {
+it("paywallWillOpenURL local event is delivered to the delegate", async () => {
   const captured: string[] = [];
   const sw = make({
     delegate: {
@@ -1445,7 +1480,7 @@ test("paywallWillOpenURL local event is delivered to the delegate", async () => 
 // Code-review fixes (regression coverage)
 // ---------------------------------------------------------------------------
 
-test("paywall_open with stub info does NOT POST to collector (P0-3)", async () => {
+it("paywall_open with stub info does NOT POST to collector (P0-3)", async () => {
   const { fetch, calls } = fetchRecorder();
   const presenter: PaywallPresenter = {
     present: async () => ({ type: "purchased", productId: "p1" }),
@@ -1483,7 +1518,7 @@ test("paywall_open with stub info does NOT POST to collector (P0-3)", async () =
   await sw.dispose();
 });
 
-test("paywall_decline fires on declined results (P1, parity with Android)", async () => {
+it("paywall_decline fires on declined results (P1, parity with Android)", async () => {
   const presenter: PaywallPresenter = {
     present: async () => ({ type: "declined" }),
     dismiss: () => {},
@@ -1501,7 +1536,7 @@ test("paywall_decline fires on declined results (P1, parity with Android)", asyn
   await sw.dispose();
 });
 
-test("paywall_decline does NOT fire on purchased / restored results", async () => {
+it("paywall_decline does NOT fire on purchased / restored results", async () => {
   const presenter: PaywallPresenter = {
     present: async () => ({ type: "purchased", productId: "p" }),
     dismiss: () => {},
@@ -1517,7 +1552,7 @@ test("paywall_decline does NOT fire on purchased / restored results", async () =
   await sw.dispose();
 });
 
-test("after declined dismiss, isPaywallPresented resets to false (regression for P0-2)", async () => {
+it("after declined dismiss, isPaywallPresented resets to false (regression for P0-2)", async () => {
   // Sanity test that the open-lifecycle try/finally + close-lifecycle path
   // both leave the SDK ready to register again. The P0-2 fix specifically
   // guards against `runtime.runPromise(open-lifecycle)` rejection — hard
@@ -1598,7 +1633,7 @@ const configFetchRecorder = (cfg: ReturnType<typeof configResponse>) => {
   return { fetch: impl, calls };
 };
 
-test("register: empty audience matches → presents the config-driven paywall", async () => {
+it("register: empty audience matches → presents the config-driven paywall", async () => {
   const { fetch } = configFetchRecorder(
     configResponse({
       triggers: [
@@ -1646,7 +1681,7 @@ test("register: empty audience matches → presents the config-driven paywall", 
   await sw.dispose();
 });
 
-test("register: holdout variant → skipped { type: 'holdout', experiment }", async () => {
+it("register: holdout variant → skipped { type: 'holdout', experiment }", async () => {
   const { fetch } = configFetchRecorder(
     configResponse({
       triggers: [
@@ -1691,7 +1726,7 @@ test("register: holdout variant → skipped { type: 'holdout', experiment }", as
   await sw.dispose();
 });
 
-test("register: placement not in config → skipped placementNotFound", async () => {
+it("register: placement not in config → skipped placementNotFound", async () => {
   const { fetch } = configFetchRecorder(
     configResponse({
       triggers: [{ placementName: "other", rules: [{ expression: "" }] }],
@@ -1725,7 +1760,7 @@ test("register: placement not in config → skipped placementNotFound", async ()
   await sw.dispose();
 });
 
-test("register: variant pick is sticky — same alias re-evaluates → same paywall", async () => {
+it("register: variant pick is sticky — same alias re-evaluates → same paywall", async () => {
   // Two-variant experiment with explicit 50/50; the alias-driven hash
   // bucket determines which one fires. Either way, BOTH register calls
   // should land on the same one.
@@ -1787,7 +1822,7 @@ test("register: variant pick is sticky — same alias re-evaluates → same payw
   await sw.dispose();
 });
 
-test("register: rule expression evaluates against user attributes via Superscript", async () => {
+it("register: rule expression evaluates against user attributes via Superscript", async () => {
   const { fetch } = configFetchRecorder(
     configResponse({
       triggers: [
@@ -1836,7 +1871,7 @@ test("register: rule expression evaluates against user attributes via Superscrip
   await sw.dispose();
 });
 
-test("paywallWillOpenDeepLink local event is delivered to the delegate", async () => {
+it("paywallWillOpenDeepLink local event is delivered to the delegate", async () => {
   const captured: string[] = [];
   const sw = make({
     delegate: {
@@ -1858,7 +1893,7 @@ test("paywallWillOpenDeepLink local event is delivered to the delegate", async (
   await sw.dispose();
 });
 
-test("configure: failing static_config fetch retries exactly once before giving up", async () => {
+it("configure: failing static_config fetch retries exactly once before giving up", async () => {
   // Android `ConfigState.kt:HandleFetchFailure` — single retry max.
   let configCalls = 0;
   const failingFetch = (async (input: RequestInfo | URL) => {
@@ -1884,118 +1919,7 @@ test("configure: failing static_config fetch retries exactly once before giving 
   await sw.dispose();
 });
 
-// Skipped: `sw.purchases.purchase()` is hidden from the public API for now
-// (see PurchasesNamespace). The impl lives on internally as `directPurchase`;
-// restore these alongside re-exposing the method.
-test.skip("paywall post_checkout_complete flows through PurchaseController.purchase()", async () => {
-  // Custom presenter that fires post_checkout_complete via ctx.onPurchaseEvent —
-  // the terminal success signal from the paywall's WebPaywallController on the
-  // `client_surface=web-sdk` branch.
-  const fakePresenter: PaywallPresenter = {
-    present: (_info, ctx) =>
-      new Promise<PaywallResult>((resolve) => {
-        queueMicrotask(() => {
-          ctx.onPurchaseEvent?.({
-            type: "postCheckout",
-            productId: "pro_yearly",
-            checkoutContextId: "ckctx_test",
-          });
-          setTimeout(() => resolve({ type: "purchased", productId: "pro_yearly" }), 5);
-        });
-      }),
-    dismiss: () => {},
-  };
-  const sw = makeWithPaywall({ presenter: fakePresenter });
-  await sw.ready;
-  // Drive the controller-level purchase by calling sw.purchases.purchase()
-  // and concurrently presenting a paywall that fires the complete event.
-  // The controller subscribe wires both sides.
-  const productPromise = hiddenPurchase(sw, {
-    id: "pro_yearly",
-    store: "stripe",
-    entitlements: [],
-  });
-  // Trigger a paywall presentation in parallel — this hooks the same
-  // ctx.onPurchaseEvent the controller subscribes to.
-  void sw.register({ placement: "checkout" }).catch(() => {});
-  const r = await productPromise;
-  expect(r.type).toBe("purchased");
-  // Optimistic flip from config-derived entitlements — synchronous on
-  // the postCheckout event, no need to wait for the /entitlements
-  // refresh to land.
-  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
-  await sw.dispose();
-});
-
-// Skipped: public `sw.purchases.purchase()` is hidden for now (see above).
-test.skip("purchases.purchase: routes through PurchaseController + emits transaction lifecycle on success", async () => {
-  // Custom controller that simulates a successful purchase synchronously.
-  const customController = {
-    purchase: async () => ({ type: "purchased" as const }),
-    restorePurchases: async () => ({ type: "restored" as const }),
-  };
-  const sw = createSuperwall({
-    apiKey: "pk_test",
-    fetch: noopFetch,
-    storage: newAdapter(),
-    purchaseController: customController,
-  });
-  await sw.ready;
-
-  const events: string[] = [];
-  for (const name of [
-    "transaction_start",
-    "transaction_complete",
-    "subscription_start",
-  ]) {
-    sw.events.addEventListener(name as never, () => events.push(name));
-  }
-  const r = await hiddenPurchase(sw, {
-    id: "pro_yearly",
-    store: "stripe",
-    entitlements: [],
-  });
-  expect(r.type).toBe("purchased");
-  await tick();
-  await tick();
-  expect(events).toEqual([
-    "transaction_start",
-    "transaction_complete",
-    "subscription_start",
-  ]);
-  await sw.dispose();
-});
-
-// Skipped: public `sw.purchases.purchase()` is hidden for now (see above).
-test.skip("purchases.purchase: cancelled → transaction_abandon, no subscription_start", async () => {
-  const customController = {
-    purchase: async () => ({ type: "cancelled" as const }),
-    restorePurchases: async () => ({ type: "restored" as const }),
-  };
-  const sw = createSuperwall({
-    apiKey: "pk_test",
-    fetch: noopFetch,
-    storage: newAdapter(),
-    purchaseController: customController,
-  });
-  await sw.ready;
-  const events: string[] = [];
-  for (const name of ["transaction_abandon", "subscription_start"]) {
-    sw.events.addEventListener(name as never, () => events.push(name));
-  }
-  const r = await hiddenPurchase(sw, {
-    id: "pro_yearly",
-    store: "stripe",
-    entitlements: [],
-  });
-  expect(r.type).toBe("declined");
-  await tick();
-  await tick();
-  expect(events).toEqual(["transaction_abandon"]);
-  await sw.dispose();
-});
-
-test("purchases.getProducts: returns config-derived products as Product[]", async () => {
+it("purchases.getProducts: returns config-derived products as Product[]", async () => {
   const fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("/api/v1/static_config")) {
@@ -2046,7 +1970,7 @@ test("purchases.getProducts: returns config-derived products as Product[]", asyn
   await sw.dispose();
 });
 
-test("purchases.getCustomerInfo: returns the current customerSig snapshot", async () => {
+it("purchases.getCustomerInfo: returns the current customerSig snapshot", async () => {
   const sw = make();
   await sw.ready;
   expect(await sw.purchases.getCustomerInfo()).toBeNull();
@@ -2060,8 +1984,8 @@ test("purchases.getCustomerInfo: returns the current customerSig snapshot", asyn
   await sw.dispose();
 });
 
-test("logger: failures inside delegate callbacks are surfaced via onLog instead of silently swallowed", async () => {
-  const logs: Array<{ scope: string; message: string; error: string | null }> = [];
+it("logger: failures inside delegate callbacks are surfaced via onLog instead of silently swallowed", async () => {
+  const logs: Array<{ scope: string; message: string | null; error: string | null }> = [];
   const delegate: SuperwallDelegate = {
     onLog: (_level, scope, message, _info, error) => {
       logs.push({ scope, message, error });
@@ -2086,7 +2010,7 @@ test("logger: failures inside delegate callbacks are surfaced via onLog instead 
   await tick();
 
   const captured = logs.find((l) =>
-    l.message.includes("onUserAttributesChange threw"),
+    l.message?.includes("onUserAttributesChange threw"),
   );
   expect(captured).toBeDefined();
   expect(captured!.scope).toBe("superwallCore");
@@ -2094,7 +2018,7 @@ test("logger: failures inside delegate callbacks are surfaced via onLog instead 
   await sw.dispose();
 });
 
-test("counters: firstSeenAt bootstrapped on first run + totalPaywallViews increments on paywall_open", async () => {
+it("counters: firstSeenAt bootstrapped on first run + totalPaywallViews increments on paywall_open", async () => {
   const adapter = newAdapter();
   const captured: Array<Record<string, unknown>> = [];
   const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2151,7 +2075,7 @@ test("counters: firstSeenAt bootstrapped on first run + totalPaywallViews increm
   await sw2.dispose();
 });
 
-test("entitlements.byProductIds: returns config-derived entitlements before any purchase", async () => {
+it("entitlements.byProductIds: returns config-derived entitlements before any purchase", async () => {
   const fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("/api/v1/static_config")) {
@@ -2199,7 +2123,7 @@ test("entitlements.byProductIds: returns config-derived entitlements before any 
   await sw.dispose();
 });
 
-test("configure: POSTs confirm_assignments after eager assignment", async () => {
+it("configure: POSTs confirm_assignments after eager assignment", async () => {
   const calls: Array<{ url: string; body: string | undefined }> = [];
   const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -2262,7 +2186,7 @@ test("configure: POSTs confirm_assignments after eager assignment", async () => 
   await sw.dispose();
 });
 
-test("refreshConfiguration: re-fetches static_config and re-runs eager assignment", async () => {
+it("refreshConfiguration: re-fetches static_config and re-runs eager assignment", async () => {
   let configCalls = 0;
   const buildConfig = (buildId: string) =>
     JSON.stringify({
@@ -2333,7 +2257,7 @@ test("refreshConfiguration: re-fetches static_config and re-runs eager assignmen
   await sw.dispose();
 });
 
-test("configure: cached config makes sw.ready resolve before a hanging fetch — register() can fire against cache", async () => {
+it("configure: cached config makes sw.ready resolve before a hanging fetch — register() can fire against cache", async () => {
   // Pre-seed storage with a cached config carrying the enableConfigRefresh
   // toggle. On configure(), the fetch deadline should fire (1s) and the
   // cached config stays in place — `register()` must resolve to the

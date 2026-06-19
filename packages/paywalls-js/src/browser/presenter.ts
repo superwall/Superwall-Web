@@ -12,6 +12,13 @@ import type {
   PaywallPresenter,
   PresentationContext,
 } from "../presenter.ts";
+import type { JsonValue } from "../types.ts";
+import {
+  asProductIdentifier,
+  asTransactionId,
+  type ProductIdentifier,
+  type TransactionId,
+} from "../internal/brands.ts";
 
 export interface BrowserPresenterOptions {
   /** Where to mount the overlay portal. Default: `document.body`. */
@@ -412,6 +419,10 @@ const initialTransformFor = (enter: PresentationSpec["enter"]): string => {
   }
 };
 
+// Use globalThis so this works under happy-dom / RN Web without double-casting at every call site.
+const globalEvents = (): EventTarget =>
+  typeof window !== "undefined" ? window : (globalThis as unknown as EventTarget);
+
 const mount = (
   info: PaywallInfo,
   ctx: PresentationContext,
@@ -527,7 +538,7 @@ const mount = (
     cleanupOnce();
     a.resolve({ type: "declined" });
   };
-  (globalThis as unknown as EventTarget).addEventListener(
+  globalEvents().addEventListener(
     "keydown",
     onKeydown as EventListener,
   );
@@ -548,7 +559,7 @@ const mount = (
     );
   };
   // `globalThis` instead of `window` so this works under happy-dom / RN Web.
-  (globalThis as unknown as EventTarget).addEventListener(
+  globalEvents().addEventListener(
     "message",
     messageListener as EventListener,
   );
@@ -568,20 +579,26 @@ const mount = (
 
 const tearDown = (a: ActivePresentation) => {
   try {
-    (globalThis as unknown as EventTarget).removeEventListener(
+    globalEvents().removeEventListener(
       "message",
       a.messageListener as EventListener,
     );
-  } catch {}
+  } catch (e) {
+    console.warn("[Superwall] tearDown cleanup failed:", e);
+  }
   try {
-    (globalThis as unknown as EventTarget).removeEventListener(
+    globalEvents().removeEventListener(
       "keydown",
       a.keydownListener as EventListener,
     );
-  } catch {}
+  } catch (e) {
+    console.warn("[Superwall] tearDown cleanup failed:", e);
+  }
   try {
     a.overlay.remove();
-  } catch {}
+  } catch (e) {
+    console.warn("[Superwall] tearDown cleanup failed:", e);
+  }
 };
 
 // Inbound v1 envelope handling — see API.md §7.2
@@ -596,15 +613,24 @@ const readString = (
   key: string,
 ): string | null => (typeof evt[key] === "string" ? (evt[key] as string) : null);
 
-const readTransactionField = (
+function readTransactionField(evt: { [k: string]: unknown }, key: "productIdentifier"): ProductIdentifier | null;
+function readTransactionField(evt: { [k: string]: unknown }, key: "transactionId"): TransactionId | null;
+function readTransactionField(
   evt: { [k: string]: unknown },
   key: "productIdentifier" | "transactionId",
-): string | null => {
+): ProductIdentifier | TransactionId | null {
   const td = evt["transactionData"];
   if (!td || typeof td !== "object") return null;
   const v = (td as Record<string, unknown>)[key];
-  return typeof v === "string" ? v : null;
-};
+  if (typeof v !== "string") return null;
+  return key === "productIdentifier" ? asProductIdentifier(v) : asTransactionId(v);
+}
+
+/** Read the product identifier from an iframe event, returning a branded type. */
+const readProductId = (evt: { [k: string]: unknown }): ProductIdentifier =>
+  asProductIdentifier(
+    readString(evt, "product_identifier") ?? readString(evt, "product") ?? "",
+  );
 
 const readEntitlements = (
   evt: { [k: string]: unknown },
@@ -709,37 +735,37 @@ const handleInbound = (
       // (`complete` is in-flight only; the terminal success event is emitted
       // from post_checkout_complete.)
       case "stripe_checkout_start": {
-        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
-        ctx.onPurchaseEvent?.({ type: "start", productId });
+        const productId = readProductId(evt);
+        ctx.onPurchaseEvent?.({ type: "start", productId: String(productId) });
         ctx.emit("transaction_start", {
-          product: { id: productId, store: "stripe", entitlements: [] },
+          product: { id: String(productId), store: "stripe", entitlements: [] },
           paywall_info: info,
         });
         break;
       }
       case "stripe_checkout_submit": {
-        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
-        ctx.onPurchaseEvent?.({ type: "submit", productId });
+        const productId = readProductId(evt);
+        ctx.onPurchaseEvent?.({ type: "submit", productId: String(productId) });
         break;
       }
       case "stripe_checkout_complete": {
-        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        const productId = readProductId(evt);
         const sessionId = readString(evt, "session_id") ?? readString(evt, "checkout_session_id");
         const entitlements = readEntitlements(evt);
         ctx.onPurchaseEvent?.({
           type: "complete",
-          productId,
+          productId: String(productId),
           ...(sessionId !== null && { sessionId }),
           ...(entitlements && { entitlements }),
         });
         break;
       }
       case "stripe_checkout_fail": {
-        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
+        const productId = readProductId(evt);
         const error = readString(evt, "error") ?? readString(evt, "message");
         ctx.onPurchaseEvent?.({
           type: "fail",
-          productId,
+          productId: String(productId),
           ...(error !== null && { error }),
         });
         ctx.emit("transaction_fail", {
@@ -749,10 +775,10 @@ const handleInbound = (
         break;
       }
       case "stripe_checkout_abandon": {
-        const productId = readString(evt, "product_identifier") ?? readString(evt, "product") ?? "";
-        ctx.onPurchaseEvent?.({ type: "abandon", productId });
+        const productId = readProductId(evt);
+        ctx.onPurchaseEvent?.({ type: "abandon", productId: String(productId) });
         ctx.emit("transaction_abandon", {
-          product: { id: productId, store: "stripe", entitlements: [] },
+          product: { id: String(productId), store: "stripe", entitlements: [] },
           paywall_info: info,
         });
         break;
@@ -765,9 +791,11 @@ const handleInbound = (
       // ---------------------------------------------------------------
       // Two parallel terminal-success paths exist in this dispatcher and
       // they MUST stay separate:
-      //   • `purchase` (line ~`case "purchase":` above) — StoreKit-style
-      //     trigger from non-Stripe / observer-mode paywalls. Resolves
-      //     immediately on click.
+      //   • `purchase` (line ~`case "purchase":` above) — bare purchase-intent
+      //     message from non-Stripe paywalls. The SDK doesn't run checkout for
+      //     it; the consumer drives their own and reports state via
+      //     `sw.purchases.setSubscriptionStatus`. Resolves immediately on click
+      //     only in test mode.
       //   • `post_checkout_complete` (this case) — Stripe-checkout flow on
       //     `client_surface=web-sdk`. Resolves AFTER the paywall's
       //     WebPaywallController finishes its server-side post-checkout
@@ -786,20 +814,20 @@ const handleInbound = (
         //    consumers see double events.
         // APC handler reads `/entitlements` after this fires to populate
         // the entitlement set + transaction details.
-        const productId =
-          readString(evt, "product_identifier") ??
-          readTransactionField(evt, "productIdentifier") ??
-          "";
+        const rawProductId = readString(evt, "product_identifier");
+        const productId: ProductIdentifier = rawProductId
+          ? asProductIdentifier(rawProductId)
+          : (readTransactionField(evt, "productIdentifier") ?? asProductIdentifier(""));
         const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
         const entitlementsToken = readString(evt, "entitlements_token");
         ctx.onPurchaseEvent?.({
           type: "postCheckout",
-          productId,
+          productId: String(productId),
           checkoutContextId,
           ...(entitlementsToken !== null && { entitlementsToken }),
         });
         cleanup();
-        resolve({ type: "purchased", productId });
+        resolve({ type: "purchased", productId: String(productId) });
         return;
       }
       // The paywall's `redirect` checkout directive would otherwise do
@@ -812,10 +840,7 @@ const handleInbound = (
       case "redirect_required": {
         const url = readString(evt, "url");
         if (!url) break;
-        ctx.emit(
-          "paywallWillOpenURL" as never,
-          { url } as never,
-        );
+        ctx.emit("paywallWillOpenURL", { url });
         if (typeof globalThis.open === "function") {
           try {
             globalThis.open(url, "_blank", "noopener");
@@ -841,10 +866,8 @@ const handleInbound = (
         const browserType =
           evt["browser_type"] === "payment_sheet" ? "payment_sheet" : undefined;
         ctx.emit(
-          "paywallWillOpenURL" as never,
-          (browserType !== undefined
-            ? { url, browserType }
-            : { url }) as never,
+          "paywallWillOpenURL",
+          browserType !== undefined ? { url, browserType } : { url },
         );
         break;
       }
@@ -852,10 +875,7 @@ const handleInbound = (
         // Wire payload key is `link`, not `url`.
         const link = typeof evt["link"] === "string" ? (evt["link"] as string) : null;
         if (!link) break;
-        ctx.emit(
-          "paywallWillOpenDeepLink" as never,
-          { url: link } as never,
-        );
+        ctx.emit("paywallWillOpenDeepLink", { url: link });
         break;
       }
       case "custom_placement": {
@@ -864,12 +884,12 @@ const handleInbound = (
           typeof evt["name"] === "string" ? (evt["name"] as string) : "";
         const params =
           typeof evt["params"] === "object" && evt["params"] !== null
-            ? (evt["params"] as Record<string, never>)
+            ? (evt["params"] as Record<string, JsonValue>)
             : {};
         ctx.emit("custom_placement", {
           placementName,
           paywall_info: info,
-          params: params as never,
+          params,
         });
         break;
       }
@@ -901,9 +921,9 @@ const handlePurchase = (
         product_identifier: product.id,
       });
       // Emit `subscription_start` alongside transaction_complete. Web has
-      // no trial-detection signal in observer mode, so consumers that need
-      // to distinguish first-time non-trial activations from trials should
-      // dedup via product id + subscriptionStatus history.
+      // no trial-detection signal, so consumers that need to distinguish
+      // first-time non-trial activations from trials should dedup via
+      // product id + subscriptionStatus history.
       ctx.emit("subscription_start", {
         product,
         paywall_info: _info,
@@ -937,8 +957,11 @@ const handlePurchase = (
     return;
   }
 
-  // Non-test mode: observer-mode consumers run their own checkout and call
-  // `sw.purchases.setSubscriptionStatus`. The presenter leaves the paywall open.
+  // Non-test mode: the SDK doesn't run checkout for the bare `purchase`
+  // message. The consumer runs their own checkout (listening for
+  // `transaction_start`) and reports the outcome via
+  // `sw.purchases.setSubscriptionStatus`. The presenter leaves the paywall
+  // open and takes no further action.
 };
 
 /** Send the templates bundle (API.md §7.2): products + template_variables
@@ -1003,7 +1026,9 @@ const postRawAccept64 = (a: ActivePresentation, base64: string): void => {
   };
   try {
     a.iframe.contentWindow!.postMessage(message, a.paywallOrigin || "*");
-  } catch {}
+  } catch (e) {
+    console.warn("[Superwall] postMessage to paywall failed:", e);
+  }
 };
 
 const base64OfJson = (value: unknown): string => {

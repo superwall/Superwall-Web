@@ -2,7 +2,7 @@
 // caches by buildId in storage for revalidation. Only fields actually
 // consumed are modeled; the rest is preserved on `.raw`.
 
-import { Context, Effect, Layer, Option, Schema, SubscriptionRef } from "effect";
+import { Array as Arr, Context, Effect, Layer, Option, Schema, SubscriptionRef } from "effect";
 import {
   STORAGE_KEYS,
   type JsonValue,
@@ -12,7 +12,7 @@ import {
 } from "../types.ts";
 import { makeActor } from "./actor.ts";
 import { asStorageKey } from "./brands.ts";
-import { ConfigParseError } from "./errors.ts";
+import { ConfigParseError, IdentityNotHydratedError, NetworkDecodingError, NetworkRequestError } from "./errors.ts";
 import { NetworkService } from "./network.ts";
 import { StorageService } from "./storage.ts";
 
@@ -642,7 +642,7 @@ export const extractEntitlementsByReferenceName = (
 
 export interface ConfigServiceImpl {
   /** Fetch fresh config, parse, publish state transitions, persist. */
-  readonly fetch: () => Effect.Effect<RawConfig, ConfigParseError | Error>;
+  readonly fetch: () => Effect.Effect<RawConfig, ConfigParseError | NetworkRequestError | NetworkDecodingError | IdentityNotHydratedError>;
   /** Read the current parsed config (null unless Retrieved). */
   readonly current: () => Effect.Effect<RawConfig | null>;
   readonly state: () => Effect.Effect<ConfigState>;
@@ -680,7 +680,14 @@ const make = (apiKey: string) =>
         CONFIG_KEY,
         JSON.stringify({ apiKey, buildId: cfg.buildId, payload: cfg.raw }),
       )
-      .pipe(Effect.catchAll(() => Effect.void));
+      .pipe(
+        Effect.tapError((e) =>
+          Effect.logDebug("ConfigService: failed to persist config to storage", {
+            error: String(e),
+          }),
+        ),
+        Effect.catchAll(() => Effect.void),
+      );
 
   const hydrateFromStorage: ConfigServiceImpl["hydrateFromStorage"] = () =>
     dispatch(
@@ -690,28 +697,58 @@ const make = (apiKey: string) =>
           .get(CONFIG_KEY)
           .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
         if (cached === null) return null;
-        try {
-          const decoded = JSON.parse(cached) as {
-            apiKey?: string;
-            buildId?: string;
-            payload?: JsonValue;
-          };
-          if (!decoded.payload) return null;
-          // Cache scoped by api key — switching keys (different app /
-          // environment) MUST NOT serve the previous app's config.
-          // Legacy entries without `apiKey` get evicted on next persist.
-          if (decoded.apiKey !== undefined && decoded.apiKey !== apiKey) {
-            yield* storage
-              .remove(CONFIG_KEY)
-              .pipe(Effect.catchAll(() => Effect.void));
-            return null;
-          }
-          const parsed = parseConfig(decoded.payload);
-          yield* update(ConfigUpdates.SetRetrieved(parsed));
-          return parsed;
-        } catch {
+
+        const decodedResult = yield* Effect.try({
+          try: () =>
+            JSON.parse(cached) as {
+              apiKey?: string;
+              buildId?: string;
+              payload?: JsonValue;
+            },
+          catch: (e) => e,
+        }).pipe(
+          Effect.tapError((e) =>
+            Effect.logDebug("ConfigService: cache JSON parse failed, will fetch fresh", {
+              error: String(e),
+            }),
+          ),
+          Effect.option,
+        );
+        if (Option.isNone(decodedResult)) return null;
+        const decoded = decodedResult.value;
+        if (!decoded.payload) return null;
+
+        // Cache scoped by api key — switching keys (different app /
+        // environment) MUST NOT serve the previous app's config.
+        // Legacy entries without `apiKey` get evicted on next persist.
+        if (decoded.apiKey !== undefined && decoded.apiKey !== apiKey) {
+          yield* storage
+            .remove(CONFIG_KEY)
+            .pipe(
+              Effect.tapError((e) =>
+                Effect.logDebug("ConfigService: failed to evict stale cache", {
+                  error: String(e),
+                }),
+              ),
+              Effect.catchAll(() => Effect.void),
+            );
           return null;
         }
+
+        const parsedResult = yield* Effect.try({
+          try: () => parseConfig(decoded.payload!),
+          catch: (e) => e,
+        }).pipe(
+          Effect.tapError((e) =>
+            Effect.logDebug("ConfigService: cache config parse failed, will fetch fresh", {
+              error: String(e),
+            }),
+          ),
+          Effect.option,
+        );
+        if (Option.isNone(parsedResult)) return null;
+        yield* update(ConfigUpdates.SetRetrieved(parsedResult.value));
+        return parsedResult.value;
       }),
     );
 
@@ -750,18 +787,28 @@ const make = (apiKey: string) =>
             ),
           );
 
+        const retryOnce = (err: NetworkRequestError | NetworkDecodingError) =>
+          update(ConfigUpdates.SetRetrying).pipe(
+            Effect.flatMap(() => tryFetch()),
+            Effect.tapError((finalErr) =>
+              update(ConfigUpdates.SetFailed(finalErr as Error, 1)),
+            ),
+            // Surface the original network error if the retry also fails.
+            Effect.catchAll(() => Effect.fail(err)),
+          );
+
         return yield* tryFetch()
           .pipe(
-            Effect.catchAll((err) =>
-              update(ConfigUpdates.SetRetrying).pipe(
-                Effect.flatMap(() => tryFetch()),
-                Effect.tapError((finalErr) =>
-                  update(ConfigUpdates.SetFailed(finalErr as Error, 1)),
-                ),
-                // Surface the original error type to the outer pipe.
-                Effect.catchAll(() => Effect.fail(err)),
+            // ConfigParseError is deterministic — the server returned
+            // unparseable JSON. Mark failed immediately, no retry.
+            Effect.catchTag("ConfigParseError", (e) =>
+              update(ConfigUpdates.SetFailed(e, 0)).pipe(
+                Effect.flatMap(() => Effect.fail(e)),
               ),
             ),
+            // Transient network/decode failures get one retry.
+            Effect.catchTag("NetworkRequestError", retryOnce),
+            Effect.catchTag("NetworkDecodingError", retryOnce),
             Effect.tap((parsed) => persist(parsed)),
             Effect.tap((parsed) => update(ConfigUpdates.SetRetrieved(parsed))),
             Effect.onInterrupt(() => update(() => prior)),
@@ -778,9 +825,8 @@ const make = (apiKey: string) =>
     Effect.gen(function* () {
       const cfg = getConfig(yield* SubscriptionRef.get(stateRef));
       if (!cfg) return null;
-      return (
-        cfg.triggerOptions.find((t) => t.placementName === placementName) ??
-        null
+      return Option.getOrNull(
+        Arr.findFirst(cfg.triggerOptions, (t) => t.placementName === placementName),
       );
     });
 
@@ -788,8 +834,8 @@ const make = (apiKey: string) =>
     Effect.gen(function* () {
       const cfg = getConfig(yield* SubscriptionRef.get(stateRef));
       if (!cfg) return null;
-      return (
-        cfg.paywallResponses.find((p) => p.identifier === identifier) ?? null
+      return Option.getOrNull(
+        Arr.findFirst(cfg.paywallResponses, (p) => p.identifier === identifier),
       );
     });
 
@@ -806,7 +852,14 @@ const make = (apiKey: string) =>
         yield* SubscriptionRef.set(stateRef, ConfigState.None);
         yield* storage
           .remove(CONFIG_KEY)
-          .pipe(Effect.catchAll(() => Effect.void));
+          .pipe(
+            Effect.tapError((e) =>
+              Effect.logDebug("ConfigService: failed to remove config from storage on reset", {
+                error: String(e),
+              }),
+            ),
+            Effect.catchAll(() => Effect.void),
+          );
       }),
     );
 
@@ -846,12 +899,8 @@ export class ConfigService extends Context.Tag("@superwall/ConfigService")<
 export const configServiceLayer = (
   apiKey: string,
   upstream: Layer.Layer<NetworkService | StorageService>,
-): Layer.Layer<ConfigService | NetworkService | StorageService, never, never> =>
+) =>
   Layer.provideMerge(
     Layer.effect(ConfigService, make(apiKey)),
     upstream,
-  ) as Layer.Layer<
-    ConfigService | NetworkService | StorageService,
-    never,
-    never
-  >;
+  );

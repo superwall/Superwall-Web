@@ -2,7 +2,7 @@
 // CustomCallbacks via TS module augmentation, and that the augmented shape
 // flows through the type system end-to-end.
 
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import type {
   CustomCallbacks,
   PlacementParams,
@@ -23,7 +23,7 @@ declare module "./types.ts" {
   }
 }
 
-test("UserAttributes augmentation flows through", () => {
+it("UserAttributes augmentation flows through", () => {
   const u: UserAttributes = { email: "a@b.co", plan: "pro" };
   expect(u.email).toBe("a@b.co");
   // @ts-expect-error — "premium" is not in the augmented union
@@ -31,12 +31,12 @@ test("UserAttributes augmentation flows through", () => {
   expect(_bad).toBeTruthy();
 });
 
-test("PlacementParams augmentation flows through", () => {
+it("PlacementParams augmentation flows through", () => {
   const p: PlacementParams = { screen: "home" };
   expect(p.screen).toBe("home");
 });
 
-test("CustomCallbacks augmentation produces a typed handler-map shape", () => {
+it("CustomCallbacks augmentation produces a typed handler-map shape", () => {
   type Handler = NonNullable<CustomCallbacks["submitEmail"]["output"]>;
   const result: Handler = { ok: true };
   expect(result.ok).toBe(true);

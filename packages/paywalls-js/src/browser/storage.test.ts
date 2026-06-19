@@ -1,4 +1,4 @@
-import { test, expect, beforeEach } from "bun:test";
+import { it, expect, beforeEach } from "@effect/vitest";
 import { STORAGE_KEYS } from "../types.ts";
 import { readCookie, writeCookie, deleteCookie } from "./cookies.ts";
 import { createBrowserStorage } from "./storage.ts";
@@ -20,14 +20,14 @@ const clearAll = () => {
 
 beforeEach(clearAll);
 
-test("set writes to localStorage AND mirrors mirrored keys to cookies", () => {
+it("set writes to localStorage AND mirrors mirrored keys to cookies", () => {
   const adapter = createBrowserStorage();
   adapter.set(STORAGE_KEYS.aliasId, "$SuperwallAlias:abc");
   expect(localStorage.getItem(STORAGE_KEYS.aliasId)).toBe("$SuperwallAlias:abc");
   expect(readCookie("_sw_alias_id")).toBe("$SuperwallAlias:abc");
 });
 
-test("set on non-mirrored keys writes only to localStorage (no cookie)", () => {
+it("set on non-mirrored keys writes only to localStorage (no cookie)", () => {
   const adapter = createBrowserStorage();
   adapter.set(STORAGE_KEYS.firstSeenAt, "2026-01-01T00:00:00.000Z");
   expect(localStorage.getItem(STORAGE_KEYS.firstSeenAt)).toBe(
@@ -38,7 +38,7 @@ test("set on non-mirrored keys writes only to localStorage (no cookie)", () => {
   expect(readCookie("superwall.firstSeenAt")).toBeNull();
 });
 
-test("get prefers localStorage when both stores have a value", () => {
+it("get prefers localStorage when both stores have a value", () => {
   const adapter = createBrowserStorage();
   // Seed the cookie first.
   writeCookie("_sw_alias_id", "$SuperwallAlias:from_cookie");
@@ -47,14 +47,14 @@ test("get prefers localStorage when both stores have a value", () => {
   expect(adapter.get(STORAGE_KEYS.aliasId)).toBe("$SuperwallAlias:from_local");
 });
 
-test("get falls back to cookie when localStorage is empty (SSR-hydration case)", () => {
+it("get falls back to cookie when localStorage is empty (SSR-hydration case)", () => {
   const adapter = createBrowserStorage();
   // Pre-existing SSR cookie, no localStorage entry.
   writeCookie("_sw_alias_id", "$SuperwallAlias:ssr_seed");
   expect(adapter.get(STORAGE_KEYS.aliasId)).toBe("$SuperwallAlias:ssr_seed");
 });
 
-test("remove deletes from both localStorage and cookie for mirrored keys", () => {
+it("remove deletes from both localStorage and cookie for mirrored keys", () => {
   const adapter = createBrowserStorage();
   adapter.set(STORAGE_KEYS.appUserId, "u_42");
   expect(adapter.get(STORAGE_KEYS.appUserId)).toBe("u_42");
@@ -64,7 +64,7 @@ test("remove deletes from both localStorage and cookie for mirrored keys", () =>
   expect(adapter.get(STORAGE_KEYS.appUserId)).toBeNull();
 });
 
-test("clear removes only Superwall keys from localStorage and all mirrored cookies", () => {
+it("clear removes only Superwall keys from localStorage and all mirrored cookies", () => {
   // Host app data that must NOT be touched.
   localStorage.setItem("host_app_token", "secret");
 
@@ -87,7 +87,7 @@ test("clear removes only Superwall keys from localStorage and all mirrored cooki
   expect(localStorage.getItem("host_app_token")).toBe("secret");
 });
 
-test("custom localStorage override is honored (e.g. encrypted wrapper)", () => {
+it("custom localStorage override is honored (e.g. encrypted wrapper)", () => {
   // Build a Map-backed Storage shim and verify the adapter writes to it.
   const m = new Map<string, string>();
   const shim: Storage = {

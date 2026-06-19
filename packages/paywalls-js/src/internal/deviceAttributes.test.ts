@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { it, expect } from "@effect/vitest";
 import {
   buildDeviceAttributes,
   SDK_VERSION,
@@ -23,7 +23,7 @@ const baseInput = (
   ...overrides,
 });
 
-test("buildDeviceAttributes: emits the canonical platform header", () => {
+it("buildDeviceAttributes: emits the canonical platform header", () => {
   const out = buildDeviceAttributes(baseInput());
   expect(out.platform).toBe("Web");
   expect(out.platform_wrapper).toBe("Web");
@@ -34,7 +34,7 @@ test("buildDeviceAttributes: emits the canonical platform header", () => {
   expect(out.aliases).toEqual(["$SuperwallAlias:abc"]);
 });
 
-test("buildDeviceAttributes: padded versions are zero-padded for CEL string compare", () => {
+it("buildDeviceAttributes: padded versions are zero-padded for CEL string compare", () => {
   const out = buildDeviceAttributes(baseInput({ appVersion: "1.10.2" }));
   expect(out.appVersionPadded).toBe("0001.0010.0002");
   expect(out.sdkVersion).toBe(SDK_VERSION);
@@ -42,7 +42,7 @@ test("buildDeviceAttributes: padded versions are zero-padded for CEL string comp
   expect((out.sdkVersionPadded as string).split(".")).toHaveLength(3);
 });
 
-test("buildDeviceAttributes: subscription state + entitlements flow through", () => {
+it("buildDeviceAttributes: subscription state + entitlements flow through", () => {
   const out = buildDeviceAttributes(
     baseInput({
       subscriptionStatus: "ACTIVE",
@@ -62,7 +62,7 @@ test("buildDeviceAttributes: subscription state + entitlements flow through", ()
   expect(out.activeProducts).toEqual(["pro_yearly"]);
 });
 
-test("buildDeviceAttributes: appInstallDate ISO + days/minutes since install", () => {
+it("buildDeviceAttributes: appInstallDate ISO + days/minutes since install", () => {
   const installMs = Date.now() - 3 * 86_400_000; // 3 days ago
   const out = buildDeviceAttributes(baseInput({ firstSeenAtMs: installMs }));
   expect(out.appInstallDate).toBe(new Date(installMs).toISOString());
@@ -70,7 +70,7 @@ test("buildDeviceAttributes: appInstallDate ISO + days/minutes since install", (
   expect(out.minutesSinceInstall).toBeGreaterThan(3 * 24 * 60 - 5);
 });
 
-test("buildDeviceAttributes: capabilities + capabilities_config are constants", () => {
+it("buildDeviceAttributes: capabilities + capabilities_config are constants", () => {
   const out = buildDeviceAttributes(baseInput());
   expect(out.capabilities).toEqual([
     "paywall_event_receiver",
@@ -85,7 +85,7 @@ test("buildDeviceAttributes: capabilities + capabilities_config are constants", 
   ]);
 });
 
-test("buildDeviceAttributes: cross-platform compat defaults are stable", () => {
+it("buildDeviceAttributes: cross-platform compat defaults are stable", () => {
   // CEL audience filters from iOS/Android may reference these — they
   // always serialize as documented compat defaults so filters don't break.
   const out = buildDeviceAttributes(baseInput());
@@ -95,7 +95,7 @@ test("buildDeviceAttributes: cross-platform compat defaults are stable", () => {
   expect(out.kotlinVersion).toBe("");
 });
 
-test("buildDeviceAttributes: isSandbox stringified per Android wire shape", () => {
+it("buildDeviceAttributes: isSandbox stringified per Android wire shape", () => {
   expect(buildDeviceAttributes(baseInput({ isSandbox: true })).isSandbox).toBe(
     "true",
   );

@@ -8,13 +8,15 @@ import type {
   PlacementParams,
   Product,
 } from "./types.ts";
-import type { SuperwallEventMap } from "./events.ts";
+import type { AllSuperwallEvents } from "./events.ts";
 import type { Readable } from "./signal.ts";
 
-/** Forward an event from inside the presenter into the SDK's event bus. */
-export type SuperwallEventEmit = <K extends keyof SuperwallEventMap>(
+/** Forward an event from inside the presenter into the SDK's event bus.
+ *  Covers both wire-bound (SuperwallEventMap) and local-only events
+ *  (LocalSuperwallEventMap, e.g. paywallWillOpenURL, paywallWillOpenDeepLink). */
+export type SuperwallEventEmit = <K extends keyof AllSuperwallEvents>(
   name: K,
-  detail: SuperwallEventMap[K],
+  detail: AllSuperwallEvents[K],
 ) => void;
 
 export interface PresentationContext {
