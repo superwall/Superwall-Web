@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "//version": "Single source of truth for all publishable @superwall/* packages. Bump with `bun run version:set <semver>`, which stamps it into every package before publish. `workspace:*` deps resolve to this version at publish time.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "workspaces": [
     "packages/*",
     "example/*"
