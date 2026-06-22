@@ -1651,8 +1651,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }),
           ...(hostOrigin && { hostOrigin }),
           ...(cancelUrl && { cancelUrl }),
-          // TEMPORARY: hardcoded to the PR-preview worker.
-          apiBase: "https://superwall-web-paywall-app-pr-3123.superstaging.workers.dev",
+          apiBase: `https://${hosts.base}`,
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: "web-sdk" as const,

@@ -46,6 +46,36 @@ function GoPro() {
 }
 ```
 
+### Feature block
+
+Pass a `feature` callback to run code when the user is entitled to access the
+feature — i.e. already subscribed, or after a successful purchase/restore.
+Mirrors the feature block in Superwall's native SDKs.
+
+```tsx
+function GoPro() {
+  const { register, state } = usePlacement();
+
+  return (
+    <button
+      onClick={() =>
+        register({
+          placement: "campaign_trigger",
+          feature: () => router.push("/pro-content"),
+        })
+      }
+    >
+      Go Pro {state.type === "presented" && "(open)"}
+    </button>
+  );
+}
+```
+
+`feature()` fires when:
+- The user is already subscribed — paywall is skipped and the feature runs immediately
+- The placement has no audience match / holdout — feature runs without showing a paywall
+- The user completes a purchase or restore through the paywall
+
 ## Subscription status & user
 
 ```tsx
