@@ -1,6 +1,6 @@
 {
   "name": "@superwall/server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "license": "MIT",
   "exports": {
@@ -20,8 +20,8 @@
     "clean": "rm -rf node_modules .turbo *.tsbuildinfo"
   },
   "dependencies": {
-    "@superwall/core": "workspace:*",
-    "@superwall/verify": "workspace:*"
+    "@superwall/core": "workspace:^",
+    "@superwall/verify": "workspace:^"
   },
   "devDependencies": {
     "@types/bun": "latest",

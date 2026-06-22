@@ -84,11 +84,13 @@ export function App() {
     return haystack.includes(query.toLowerCase()) && (activeRarity === "All" || horse.rarity === activeRarity);
   });
 
-  // user is a stable SDK singleton — intentionally excluded from deps
+  // user is a stable SDK singleton — intentionally excluded from deps.
+  // Gate on isConfigured so identity hydration has completed before we identify.
   useEffect(() => {
+    if (!isConfigured) return;
     void user.identify(selectedUserId, { restorePaywallAssignments: true });
     setNotice(`${selectedUser.name} is browsing the frontier market.`);
-  }, [selectedUserId, selectedUser.name]);
+  }, [isConfigured, selectedUserId, selectedUser.name]);
 
   useEffect(() => {
     const controller = new AbortController();
