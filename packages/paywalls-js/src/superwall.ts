@@ -1651,7 +1651,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }),
           ...(hostOrigin && { hostOrigin }),
           ...(cancelUrl && { cancelUrl }),
-          apiBase: `https://${hosts.base}`,
+          apiBase: env === "release" ? "https://superwall-web-paywall-app.staffbar.workers.dev" : "https://superwall-web-paywall-app-stg.staffbar.workers.dev",
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: "web-sdk" as const,

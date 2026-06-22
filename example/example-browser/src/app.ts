@@ -15,34 +15,12 @@ import {
 
 const apiKey = "pk_ZNLGF8AlO2V50YDvC1y0c";
 
-// Review-lab host. The SDK builds URLs against it via `networkEnvironment.custom`
-// and fetches it directly — the BE now returns CORS headers for browser
-// origins, so no local proxy is needed.
-const REVIEW_LAB =
-  "ir-feat-web-sdk-support.prd.us-east-1.review-lab.superwall-services.com";
-
 const sw = createSuperwall({
   apiKey,
   options: {
     // Demo only: simulate purchases instead of charging a real card.
     testModeBehavior: "always",
-    // Point the upstreams at the review-lab; the SDK fetches them directly
-    // (CORS-enabled). These values also drive `apiBase` / `collector` in
-    // the iframe's `#init=` hash so the in-iframe controller hits the same
-    // backend.
-    networkEnvironment: {
-      custom: {
-        base: REVIEW_LAB,
-        // Collector stays on prod — review-lab doesn't ingest events.
-        collector: "collector.superwall.com",
-        // Enrichment stays on prod — the review-lab branch doesn't mount
-        // /api/v1/enrich (it 404s there). The prod host is CORS-enabled.
-        enrichment: "enrichment-api.superwall.com",
-        // Review-lab branch doesn't mount /subscriptions-api/*. Point at the
-        // dev subscriptions host instead.
-        subscriptions: "subscriptions-api.superwall.dev",
-      },
-    },
+    networkEnvironment: "developer",
   },
 });
 

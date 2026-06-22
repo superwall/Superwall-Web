@@ -11,7 +11,6 @@ import { SuperwallProvider } from "@superwall/paywalls-react";
 import { App } from "./App";
 
 const apiKey = "pk_ZNLGF8AlO2V50YDvC1y0c";
-const reviewLab = "ir-feat-web-sdk-support.prd.us-east-1.review-lab.superwall-services.com";
 
 const elem = document.getElementById("root")!;
 const app = (
@@ -20,14 +19,7 @@ const app = (
       apiKey={apiKey}
       options={{
         testModeBehavior: "always",
-        networkEnvironment: {
-          custom: {
-            base: reviewLab,
-            collector: "collector.superwall.com",
-            enrichment: "enrichment-api.superwall.com",
-            subscriptions: "subscriptions-api.superwall.dev",
-          },
-        },
+        networkEnvironment: "developer",
       }}
     >
       <App />
