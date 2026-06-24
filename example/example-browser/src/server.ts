@@ -35,6 +35,7 @@ Bun.serve({
         try {
           const result = await verifyEntitlements(body.token, {
             publicApiKey: SUPERWALL_API_KEY,
+            jwksUrl: "https://superwall.dev/.well-known/entitlements/jwks.json",
           });
           return json({
             verified: true,

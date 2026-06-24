@@ -196,11 +196,14 @@
       <section class="panel">
         <h2>Actions</h2>
         <div class="actions">
-          <button data-act="identify" class="primary">Identify as test_user_42</button>
+          <input id="identify-input" type="text" placeholder="User ID" value="test_user_42" style="padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: inherit; font-size: 13px;" />
+          <button data-act="identify" class="primary">Identify</button>
           <button data-act="signOut">Sign out</button>
           <button data-act="subActive">Set subscription ACTIVE</button>
           <button data-act="subInactive">Set subscription INACTIVE</button>
-          <button data-act="register" class="primary">Register home placement</button>
+          <button data-act="registerHome" class="primary">Home</button>
+          <button data-act="register" class="primary">Pro (video_creation)</button>
+          <button data-act="registerAiChat" class="primary">Super Pro (ai_chat)</button>
           <button data-act="dismiss">Dismiss</button>
           <button data-act="reset">Reset</button>
           <button data-act="verifyToken">Verify entitlements token (server)</button>
