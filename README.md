@@ -220,19 +220,6 @@ const decision = await sw.placements.getPresentationResult("checkout");
 
 ---
 
-## Architecture
-
-Two distinct surfaces, separated by an `Effect.runPromise` firewall:
-
-- **Public API: vanilla TS.** Promises, `EventTarget`, plain error classes (`NoPresenterRegisteredError`, `PaywallAlreadyPresentedError`, `NetworkError`, …), a minimal `Readable<T>` signal type. **No Effect types ever leak past the public surface.**
-- **Internals: Effect.** `Effect.Service` + `Layer` + `SubscriptionRef` + `Schema.TaggedError` + `ManagedRuntime`. The `effect-best-practices` skill at [`.claude/skills/`](./.claude/skills) is the reference.
-- **Translation:** internal tagged errors are caught at every `Effect.runPromise` boundary and rethrown as the documented public class (`StorageGetError → StorageError`, `IdentityNotHydratedError → NotConfiguredError`, etc.).
-
-Why: idiomatic Effect inside (clean services, layered DI, structured concurrency, retry policies) without forcing consumers to learn Effect or pay a public-API churn cost when we upgrade `effect`.
-
-Full architecture spec: [`API.md`](./API.md), §0 + §0.1.
-
----
 
 ## Development
 
@@ -254,8 +241,6 @@ Superwall-Web/
   package.json                            # workspace root, Bun + Turbo
   turbo.json
   tsconfig.base.json                      # strict TS + Effect language service plugin
-  API.md                                  # full design spec
-  MISSING.md                              # what's not in v0 alpha
   packages/
     paywalls-js/                          # headless core + /browser subpath
       src/                                # public modules
