@@ -1,8 +1,11 @@
 {
   "name": "@superwall/paywalls-js",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": [
     "./src/browser/auto.ts"
   ],
