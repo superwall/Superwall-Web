@@ -25,21 +25,7 @@ interface CollectionEntry {
   acquiredAt: string;
 }
 
-const REVIEW_LAB = process.env.SW_REVIEW_LAB_HOST;
 const SUPERWALL_API_KEY = process.env.SUPERWALL_API_KEY ?? "pk_ZNLGF8AlO2V50YDvC1y0c";
-const PROXY_HOSTS: Record<string, string> = REVIEW_LAB
-  ? {
-      api: `https://${REVIEW_LAB}`,
-      collector: "https://collector.superwall.com",
-      enrichment: `https://${REVIEW_LAB}`,
-      subscriptions: `https://${REVIEW_LAB}`,
-    }
-  : {
-      api: "https://api.superwall.me",
-      collector: "https://collector.superwall.com",
-      enrichment: "https://enrichment-api.superwall.com",
-      subscriptions: "https://subscriptions-api.superwall.com",
-    };
 
 const horses: Horse[] = [
   {
@@ -136,33 +122,6 @@ const json = (body: unknown, init?: ResponseInit) =>
     },
   });
 
-const proxy = async (req: Request, target: string, rest: string): Promise<Response> => {
-  const url = new URL(req.url);
-  const upstream = `${target}${rest}${url.search}`;
-  const headers = new Headers(req.headers);
-  headers.delete("host");
-  headers.delete("origin");
-  headers.delete("referer");
-  const response = await fetch(upstream, {
-    method: req.method,
-    headers,
-    ...(req.method !== "GET" && req.method !== "HEAD" && { body: await req.arrayBuffer() }),
-    redirect: "manual",
-  });
-  const responseHeaders = new Headers(response.headers);
-  responseHeaders.delete("content-encoding");
-  responseHeaders.delete("content-length");
-  responseHeaders.delete("transfer-encoding");
-  responseHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate");
-  responseHeaders.set("Access-Control-Allow-Origin", "*");
-  responseHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  responseHeaders.set("Access-Control-Allow-Headers", "*");
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: responseHeaders,
-  });
-};
 
 const requireSubscription = async (req: Request): Promise<Response | null> => {
   const userId = req.headers.get("x-demo-user");
@@ -257,27 +216,7 @@ const server = serve({
   },
   port,
 
-  async fetch(req) {
-    const url = new URL(req.url);
-    const match = url.pathname.match(/^\/proxy\/([^/]+)(\/.*)?$/);
-    if (match && match[1] && PROXY_HOSTS[match[1]]) {
-      if (req.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-          },
-        });
-      }
-      const target = PROXY_HOSTS[match[1]];
-      if (!target) return new Response("Unknown proxy target", { status: 404 });
-      return proxy(req, target, match[2] ?? "");
-    }
-    if (req.method === "GET" || req.method === "HEAD") {
-      return index;
-    }
+  fetch() {
     return new Response("Not found", { status: 404 });
   },
 });

@@ -290,5 +290,81 @@ it.effect("target on the bus is the same instance the consumer added listeners t
   }).pipe(Effect.provide(stack));
 });
 
+// ---------------------------------------------------------------------------
+// publishCustom
+// ---------------------------------------------------------------------------
+
+it.effect("publishCustom dispatches CustomEvent with caller's event name as the type", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch } = mockFetch();
+  const stack = buildStack(fetch, target);
+
+  const seen: Array<Record<string, unknown>> = [];
+  (target as EventTarget).addEventListener("button_clicked", (e) =>
+    seen.push((e as CustomEvent).detail),
+  );
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publishCustom("button_clicked", { button: "buy_now" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({ button: "buy_now" });
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("publishCustom POSTs to collector with event_name = caller's event name", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, calls } = mockFetch();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publishCustom("purchase_intent", { product: "pro_yearly", price: 99 });
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0]!.body!);
+    expect(body.events[0].event_name).toBe("purchase_intent");
+    expect(body.events[0].parameters.product).toBe("pro_yearly");
+    expect(body.events[0].parameters.price).toBe(99);
+    expect(body.events[0].event_id).toMatch(/^[0-9a-f-]+$/);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("publishCustom fires delegate.onEvent with the caller's event name", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch } = mockFetch();
+  const stack = buildStack(fetch, target);
+
+  const seen: Array<[string, unknown]> = [];
+  const delegate: SuperwallDelegate = {
+    onEvent: ((name: string, detail: unknown) => {
+      seen.push([name, detail]);
+    }) as NonNullable<SuperwallDelegate["onEvent"]>,
+  };
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.setDelegate(delegate);
+    yield* bus.publishCustom("form_submit", { form: "signup" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]![0]).toBe("form_submit");
+    expect((seen[0]![1] as Record<string, unknown>).form).toBe("signup");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("publishCustom absorbs collector failures without throwing", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch } = mockFetch(() => new Response("nope", { status: 500 }));
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publishCustom("some_event", {});
+  }).pipe(Effect.provide(stack));
+});
+
 // Suppress unused-import warning when the test file shrinks
 void Layer;

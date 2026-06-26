@@ -16,7 +16,7 @@ import {
   MalformedTokenError,
   VerifyError,
 } from "./errors.ts";
-import { DEFAULT_JWKS_URL, getKeyResolver } from "./keys.ts";
+import { getKeyResolver, jwksUrlForEnv } from "./keys.ts";
 import type {
   Entitlement,
   VerifiedEntitlements,
@@ -59,7 +59,7 @@ export async function verifyEntitlements(
     throw new MalformedTokenError("Token must be a non-empty string.");
   }
 
-  const resolver = getKeyResolver(options.jwksUrl ?? DEFAULT_JWKS_URL);
+  const resolver = getKeyResolver(jwksUrlForEnv(options.env));
 
   let payload: JWTPayload;
   try {

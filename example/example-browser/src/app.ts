@@ -20,7 +20,7 @@ const sw = createSuperwall({
   options: {
     // Demo only: simulate purchases instead of charging a real card.
     testModeBehavior: "always",
-    networkEnvironment: "developer",
+    networkEnvironment: "release",
   },
 });
 
@@ -210,7 +210,7 @@ const registerWithStyle = async (
   presentationStyle: PaywallPresentationStyle,
 ): Promise<void> => {
   const result = await sw.register({
-    placement: "home",
+    placement: "video_creation",
     overrides: { presentationStyle },
     feature: () => log("feature ran!"),
   });
@@ -223,7 +223,9 @@ const registerWithStyle = async (
 
 const handlers: Record<string, () => Promise<void> | void> = {
   identify: async () => {
-    await sw.user.identify("test_user_42");
+    const input = document.getElementById("identify-input") as HTMLInputElement | null;
+    const userId = input?.value.trim() || "test_user_42";
+    await sw.user.identify(userId);
     log("identified");
   },
   signOut: async () => {
@@ -246,9 +248,17 @@ const handlers: Record<string, () => Promise<void> | void> = {
   subInactive: () => {
     sw.purchases.setSubscriptionStatus({ status: "INACTIVE" });
   },
+  registerHome: async () => {
+    const result = await sw.register({ placement: "home" });
+    setLastResult(
+      result.type === "error"
+        ? { type: "error", error: result.error.name + ": " + result.error.message }
+        : result,
+    );
+  },
   register: async () => {
     const result = await sw.register({
-      placement: "home",
+      placement: "video_creation",
       // Real feature gate — unhides the "pro feature unlocked" panel.
       // For gated paywalls this runs only after a successful purchase /
       // when the user is already entitled. For non-gated paywalls it
@@ -259,6 +269,20 @@ const handlers: Record<string, () => Promise<void> | void> = {
         if (panel) panel.hidden = false;
         const out = document.getElementById("pro-output");
         if (out) out.textContent = "Pro features unlocked at " + new Date().toLocaleTimeString();
+      },
+    });
+    setLastResult(
+      result.type === "error"
+        ? { type: "error", error: result.error.name + ": " + result.error.message }
+        : result,
+    );
+  },
+
+  registerAiChat: async () => {
+    const result = await sw.register({
+      placement: "ai_chat",
+      feature: () => {
+        log("ai_chat feature ran! super pro unlocked");
       },
     });
     setLastResult(

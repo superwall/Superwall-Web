@@ -103,6 +103,14 @@ export const entitlements = {
   ) => requireDefault().entitlements.byProductIds(...args),
 } as const;
 
+export const track = (
+  ...args: Parameters<Superwall["track"]>
+): void => requireDefault().track(...args);
+
+export const page = (
+  ...args: Parameters<Superwall["page"]>
+): void => requireDefault().page(...args);
+
 export const events = {
   addEventListener: ((...args: Parameters<Superwall["events"]["addEventListener"]>) =>
     requireDefault().events.addEventListener(

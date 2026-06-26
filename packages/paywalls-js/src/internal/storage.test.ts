@@ -197,5 +197,6 @@ it("STORAGE_KEYS contract is the documented set (snapshot)", () => {
     latestRedemption: "superwall.latestRedemption",
     subscriptionStatus: "superwall.subscriptionStatus",
     surveyAssignmentKey: "superwall.surveyAssignmentKey",
+    attribution: "superwall.attribution",
   });
 });

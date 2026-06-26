@@ -16,7 +16,7 @@ const RC_HOSTS: EnvironmentHosts = {
 
 const DEV_HOSTS: EnvironmentHosts = {
   base: "api.superwall.dev",
-  collector: "collector.superwall.dev",
+  collector: "collector.superwall.com",
   enrichment: "enrichment-api.superwall.dev",
   subscriptions: "subscriptions-api.superwall.dev",
 };
