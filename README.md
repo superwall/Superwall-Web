@@ -277,13 +277,3 @@ Superwall-Web/
 The `effect-language-service` TS plugin is wired into `tsconfig.base.json`. In VS Code: `F1 → "TypeScript: Select TypeScript Version" → "Use Workspace Version"` to get Effect-specific diagnostics.
 
 ---
-
-## Wire compatibility
-
-The web SDK shares config + collector + enrichment endpoints with iOS / Android / Flutter. Event names on the wire are taken **verbatim** from Android's `SuperwallEvent.kt` `rawName` (mixed `snake_case` + `camelSnake_suffix` per Android's convention) and reproduced exactly in `SuperwallEventMap` so dashboards, audience filters, and CEL expressions match cross-platform. See [`API.md`](./API.md) §11 for the full wire protocol.
-
----
-
-## License
-
-MIT
