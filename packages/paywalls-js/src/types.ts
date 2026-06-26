@@ -537,6 +537,10 @@ export const STORAGE_KEYS = {
   /** Last shown survey's `assignmentKey`. Dedupes survey presentation —
    *  the SDK never re-shows for the same key once it's persisted. */
   surveyAssignmentKey: "superwall.surveyAssignmentKey",
+  /** First-touch attribution: JSON-encoded `AttributionAttributes`. UTM
+   *  params + ad click IDs + referrer / landing page. Written once on
+   *  first configure(); never overwritten (first-touch semantics). */
+  attribution: "superwall.attribution",
 } as const;
 
 export type StorageKeyName = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

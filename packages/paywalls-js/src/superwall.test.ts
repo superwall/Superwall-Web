@@ -1270,7 +1270,9 @@ it("configure POSTs enrichment with current user attributes + merges response in
     user: Record<string, unknown>;
     device: Record<string, unknown>;
   };
-  expect(body.user).toEqual({ email: "a@b.co" });
+  // Attribution fields (landing_page etc.) may be present from the test env's
+  // location — use toMatchObject so the assertion stays stable across envs.
+  expect(body.user).toMatchObject({ email: "a@b.co" });
   // Spot-check a few canonical device-attribute fields. Full coverage of
   // every key is in `internal/deviceAttributes.test.ts`.
   expect(body.device.platform).toBe("Web");

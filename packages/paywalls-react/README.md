@@ -76,6 +76,27 @@ function GoPro() {
 - The placement has no audience match / holdout — feature runs without showing a paywall
 - The user completes a purchase or restore through the paywall
 
+## SuperwallPaywall component
+
+Declarative alternative to `usePlacement`. Calls `register()` on mount and
+renders `children` when the user is entitled — i.e. the feature block fires.
+
+```tsx
+import { SuperwallPaywall } from "@superwall/paywalls-react";
+
+function App() {
+  return (
+    <SuperwallPaywall placement="campaign_trigger">
+      <ProContent />
+    </SuperwallPaywall>
+  );
+}
+```
+
+Children are hidden until the user is entitled. Optional handler props
+(`onPresent`, `onDismiss`, `onSkip`, `onError`) work the same as in
+`usePlacement` if you need lifecycle callbacks alongside.
+
 ## Subscription status & user
 
 ```tsx

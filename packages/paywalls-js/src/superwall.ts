@@ -102,6 +102,12 @@ import {
   buildDeviceAttributes,
   type DeviceAttributesInput,
 } from "./internal/deviceAttributes.ts";
+import {
+  attributionToRecord,
+  collectCurrentAttribution,
+  mergeFirstTouch,
+  type AttributionAttributes,
+} from "./internal/attributionAttributes.ts";
 import { createMemoryStorage, StorageService } from "./internal/storage.ts";
 // Safe to import statically — DOM access is `typeof`-guarded, no top-level use.
 import { createBrowserStorage } from "./browser/storage.ts";
@@ -273,6 +279,21 @@ export interface Superwall {
    * Pass `null` to clear the override and revert to system.
    */
   setInterfaceStyle(style: "light" | "dark" | null): void;
+
+  /**
+   * Track a custom analytics event. Mirrors the Segment `track()` API — the
+   * event name is sent as-is to the collector and dispatched on `sw.events`
+   * so listeners can subscribe by name directly.
+   */
+  track(event: string, properties?: Record<string, JsonValue>): void;
+
+  /**
+   * Track a page or screen view. Automatically captures `url`, `path`,
+   * `referrer`, `title`, and `search` from the browser; merge extra data
+   * via `properties`. Call on every SPA route change to drive page-level
+   * audience rules.
+   */
+  page(name?: string, properties?: Record<string, JsonValue>): void;
 
   reset(): Promise<void>;
   /**
@@ -639,6 +660,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   /** ms-since-epoch of the last successful restore. */
   const lastRestoreAtSig = createSignal<number | null>(null);
 
+  // Internal analytics collection gate. Name TBD — hardcoded until the
+  // public opt-out API is finalized. When true, track/page/attribution
+  // collection are all suppressed.
+  const _isOptedOut = false;
+
   // configure() — runs once, drives sw.ready
 
   const seed: IdentitySeed | undefined = opts.identity
@@ -770,6 +796,35 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     yield* hydrateCounters();
     yield* hydrateSubscriptionStatus();
+
+    // Attribution collection: UTM params + ad click IDs + referrer/landing page.
+    // Persisted with first-touch semantics — stored values always win so the
+    // original acquisition source is preserved across sessions. Skipped when
+    // the internal opt-out flag is set.
+    if (!_isOptedOut) {
+      yield* Effect.gen(function* () {
+        const storedRaw = yield* storage.get(
+          asStorageKey(STORAGE_KEYS.attribution),
+        );
+        const stored: AttributionAttributes = storedRaw
+          ? (JSON.parse(storedRaw) as AttributionAttributes)
+          : {};
+        const current = collectCurrentAttribution();
+        const merged = mergeFirstTouch(stored, current);
+        yield* storage
+          .set(asStorageKey(STORAGE_KEYS.attribution), JSON.stringify(merged))
+          .pipe(Effect.catchAll(() => Effect.void));
+        const attrs = attributionToRecord(merged);
+        if (Object.keys(attrs).length > 0) {
+          attrsSig.update((prev) => ({ ...attrs, ...prev }) as UserAttributes);
+        }
+      }).pipe(
+        Effect.tapError((e) =>
+          Effect.logDebug("Attribution collection failed", { error: String(e) }),
+        ),
+        Effect.catchAll(() => Effect.void),
+      );
+    }
 
     // Auto-context for every wire-emitted event. Merged under caller params
     // so explicit keys always win. `$presentation_id` is empty between
@@ -2478,6 +2533,52 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       try {
         activePresenter?.dismiss(reason);
       } catch {}
+    },
+
+    track: (event, properties = {}) => {
+      if (_isOptedOut) return;
+      runFireAndForget(
+        "superwallCore",
+        `track(${event}): publishCustom failed`,
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          yield* bus.publishCustom(event, properties);
+        }),
+      );
+    },
+
+    page: (name, properties = {}) => {
+      if (_isOptedOut) return;
+      const pageCtx: Record<string, JsonValue> = {};
+      try {
+        if (typeof location !== "undefined") {
+          pageCtx.url = location.href;
+          pageCtx.path = location.pathname;
+          pageCtx.search = location.search;
+        }
+      } catch {}
+      try {
+        if (typeof document !== "undefined") {
+          pageCtx.referrer = document.referrer;
+          pageCtx.title = document.title;
+        }
+      } catch {}
+      runFireAndForget(
+        "superwallCore",
+        "page(): page_view publish failed",
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          yield* bus.publish("page_view", {
+            ...(name !== undefined && { name }),
+            url: (pageCtx.url as string) ?? "",
+            path: (pageCtx.path as string) ?? "",
+            referrer: (pageCtx.referrer as string) ?? "",
+            title: (pageCtx.title as string) ?? "",
+            search: (pageCtx.search as string) ?? "",
+            properties,
+          });
+        }),
+      );
     },
 
     refreshConfiguration: () =>

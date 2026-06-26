@@ -103,3 +103,9 @@ it("buildDeviceAttributes: isSandbox stringified per Android wire shape", () => 
     buildDeviceAttributes(baseInput({ isSandbox: false })).isSandbox,
   ).toBe("false");
 });
+
+it("buildDeviceAttributes: userAgentData is null when navigator.userAgentData is unavailable (SSR / Firefox / Safari)", () => {
+  // Bun test env has no navigator.userAgentData — verifies the SSR-safe fallback.
+  const out = buildDeviceAttributes(baseInput());
+  expect(out.userAgentData).toBeNull();
+});

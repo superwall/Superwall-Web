@@ -137,6 +137,19 @@ export interface SuperwallEventMap {
     paywall_info: PaywallInfo;
   };
 
+  // analytics
+  /** SPA / full-page navigation event. Auto-populated with page context;
+   *  caller may supply additional `properties`. */
+  page_view: {
+    name?: string;
+    url: string;
+    path: string;
+    referrer: string;
+    title: string;
+    search: string;
+    properties: Record<string, JsonValue>;
+  };
+
   // enrichment
   enrichment_start: {};
   enrichment_complete: {

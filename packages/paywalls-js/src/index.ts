@@ -47,5 +47,7 @@ export {
   purchases,
   entitlements,
   events,
+  track,
+  page,
   getDefaultSuperwall,
 } from "./default.ts";

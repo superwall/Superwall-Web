@@ -26,6 +26,11 @@ export {
   type PaywallPresentationHandlerHooks,
 } from "./hooks.ts";
 
+export {
+  SuperwallPaywall,
+  type SuperwallPaywallProps,
+} from "./SuperwallPaywall.tsx";
+
 // Re-export everything public from paywalls-js so React consumers don't
 // need to depend on both packages directly. Tree-shakeable per ESM rules.
 export * from "@superwall/paywalls-js";

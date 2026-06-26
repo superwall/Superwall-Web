@@ -190,7 +190,11 @@ export const buildDeviceAttributes = (
   const n = safeNavigator() as
     | (Navigator & {
         deviceMemory?: number;
-        userAgentData?: { platform?: string };
+        userAgentData?: {
+          brands?: Array<{ brand: string; version: string }>;
+          mobile?: boolean;
+          platform?: string;
+        };
       })
     | undefined;
   const s = safeScreen();
@@ -277,6 +281,13 @@ export const buildDeviceAttributes = (
 
     // Web-specific
     userAgent: n?.userAgent ?? "",
+    userAgentData: n?.userAgentData
+      ? {
+          brands: n.userAgentData.brands ?? null,
+          mobile: n.userAgentData.mobile ?? null,
+          platform: n.userAgentData.platform ?? null,
+        }
+      : null,
     viewportWidth: w?.innerWidth ?? 0,
     viewportHeight: w?.innerHeight ?? 0,
     screenWidth: s?.width ?? 0,

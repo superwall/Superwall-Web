@@ -27,6 +27,15 @@ export interface EventBusImpl {
     opts?: { wireEmit?: boolean },
   ): Effect.Effect<void>;
 
+  /** Fire a custom user-defined event. Dispatches on the EventTarget with
+   *  `event` as the type, calls delegate.onEvent, and POSTs to the collector
+   *  with `event_name = event` so the wire sees the caller's event name
+   *  directly rather than a "track" envelope. */
+  publishCustom(
+    event: string,
+    properties: Record<string, JsonValue>,
+  ): Effect.Effect<void>;
+
   /** Replace the active delegate (or detach with `null`). */
   setDelegate(delegate: SuperwallDelegate | null): Effect.Effect<void>;
 
@@ -103,6 +112,49 @@ const make = (target: SuperwallEventTarget) =>
           .pipe(Effect.catchAll(() => Effect.void));
       }).pipe(Effect.withSpan("EventBus.publish", { attributes: { name } }));
 
+    const publishCustom = (
+      event: string,
+      properties: Record<string, JsonValue>,
+    ): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        // Dispatch with the caller's event name so sw.events listeners can
+        // subscribe to specific event names directly.
+        target.dispatchEvent(new CustomEvent(event, { detail: properties }));
+
+        yield* computed
+          .record(event)
+          .pipe(Effect.catchAll(() => Effect.void));
+
+        const delegate = yield* Ref.get(delegateRef);
+        if (delegate?.onEvent) {
+          try {
+            (delegate.onEvent as (n: string, d: unknown) => void)(
+              event,
+              properties,
+            );
+          } catch {}
+        }
+
+        const provider = yield* Ref.get(contextProviderRef);
+        let context: Record<string, JsonValue> = {};
+        if (provider) {
+          try {
+            context = provider();
+          } catch {}
+        }
+        const envelope = {
+          event_id: newEventId(),
+          event_name: event,
+          parameters: { ...context, ...properties },
+          created_at: new Date().toISOString(),
+        };
+        yield* network
+          .postEvents([envelope])
+          .pipe(Effect.catchAll(() => Effect.void));
+      }).pipe(
+        Effect.withSpan("EventBus.publishCustom", { attributes: { event } }),
+      );
+
     const setDelegate = (
       delegate: SuperwallDelegate | null,
     ): Effect.Effect<void> =>
@@ -136,6 +188,7 @@ const make = (target: SuperwallEventTarget) =>
     return {
       target,
       publish,
+      publishCustom,
       setDelegate,
       withDelegate,
       setContextProvider,
