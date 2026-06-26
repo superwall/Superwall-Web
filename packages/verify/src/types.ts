@@ -36,9 +36,10 @@ export interface VerifyOptions {
    *  This is the ONLY app identifier customers have — do NOT ask them for the
    *  internal numeric applicationId, which they don't know. */
   publicApiKey: string;
-  /** Override the JWKS URL used for the remote fallback. Defaults to the
-   *  production well-known URL. */
-  jwksUrl?: string;
+  /** Target environment. `"prod"` (default) uses the production JWKS;
+   *  `"dev"` uses the staging endpoint. Pass `{ custom: url }` to point at
+   *  your own JWKS endpoint (testing, self-hosted). */
+  env?: "prod" | "dev" | { custom: string };
   /** Clock tolerance in seconds applied to `exp`/`iat`. Default `0`. */
   clockToleranceSec?: number;
 }

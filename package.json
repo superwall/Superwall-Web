@@ -19,7 +19,8 @@
     "publish:all": "bun run build && bun run scripts/publish.ts",
     "publish:all:dry": "bun run build && bun run scripts/publish.ts --access public --dry-run",
     "example": "bun --filter @superwall/example-browser dev",
-    "example:start": "bun --filter @superwall/example-browser start"
+    "example:start": "bun --filter @superwall/example-browser start",
+    "example:react": "bun --filter @superwall/example-react dev"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.9.0",

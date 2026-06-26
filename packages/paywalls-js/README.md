@@ -12,12 +12,8 @@ bun add @superwall/paywalls-js   # or npm / pnpm / yarn
 
 ```ts
 import { createSuperwall } from "@superwall/paywalls-js";
-import { createBrowserStorage } from "@superwall/paywalls-js/browser";
 
-const sw = createSuperwall({
-  apiKey: "pk_your_public_key",
-  storage: createBrowserStorage(), // persists identity + status across reloads
-});
+const sw = createSuperwall({ apiKey: "pk_your_public_key" });
 
 await sw.ready;
 
@@ -34,7 +30,7 @@ a treatment variant. Checkout is handled for you inside the paywall.
 ```ts
 createSuperwall({
   apiKey: "pk_...",                  // required — your public API key
-  storage,                           // optional — see @superwall/paywalls-js/browser
+  storage,                           // optional — defaults to localStorage in browser
   delegate,                          // optional — lifecycle callbacks (below)
   identity: { appUserId, aliasId },  // optional — seed identity
   options: {

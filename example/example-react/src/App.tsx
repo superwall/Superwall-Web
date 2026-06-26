@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { BadgeCheck, Crown, Plus, Search, Sparkles, UserRound } from "lucide-react";
-import { usePlacement, useSignal, useSuperwall, useUser } from "@superwall/paywalls-react";
+import { BadgeCheck, Crown, Plus, Search, Sparkles, UserRound, BarChart3, ArrowLeft } from "lucide-react";
+import { SuperwallPaywall, usePlacement, useSignal, useSuperwall, useUser } from "@superwall/paywalls-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import "./index.css";
 
 interface Horse {
@@ -30,11 +29,6 @@ interface CollectionResponse {
   collection: CollectionEntry[];
 }
 
-const USERS = [
-  { id: "rider_ava", name: "Ava Reed", role: "Territory rancher" },
-  { id: "rider_miles", name: "Miles Chen", role: "Trail boss" },
-  { id: "rider_noor", name: "Noor Patel", role: "Frontier breeder" },
-] as const;
 
 const rarityStyles: Record<Horse["rarity"], string> = {
   Common: "border-stone-200 bg-stone-50 text-stone-700",
@@ -60,14 +54,19 @@ export function App() {
   const [horses, setHorses] = useState<Horse[]>([]);
   const [horsesLoading, setHorsesLoading] = useState(true);
   const [collection, setCollection] = useState<CollectionEntry[]>([]);
-  const [selectedUserId, setSelectedUserId] = useState<string>(USERS[0].id);
   const [query, setQuery] = useState("");
   const [activeRarity, setActiveRarity] = useState<Horse["rarity"] | "All">("All");
   const [pendingHorseId, setPendingHorseId] = useState<string | null>(null);
   const [notice, setNotice] = useState("The saloon catalog is open to every rider. Claiming a horse card takes a Pro pass.");
+  const [page, setPage] = useState<"signin" | "home" | "pro-analytics">("signin");
 
-  const selectedUser = USERS.find((item) => item.id === selectedUserId) ?? USERS[0];
   const hasSubscription = subscriptionStatus.status === "ACTIVE";
+
+  // Restore session — if SDK has a persisted identity skip straight to home.
+  useEffect(() => {
+    if (!isConfigured) return;
+    if (user.isLoggedIn) setPage("home");
+  }, [isConfigured]);
   const collectionIds = useMemo(() => new Set(collection.map((item) => item.id)), [collection]);
   const collectionValue = useMemo(
     () =>
@@ -84,13 +83,6 @@ export function App() {
     return haystack.includes(query.toLowerCase()) && (activeRarity === "All" || horse.rarity === activeRarity);
   });
 
-  // user is a stable SDK singleton — intentionally excluded from deps.
-  // Gate on isConfigured so identity hydration has completed before we identify.
-  useEffect(() => {
-    if (!isConfigured) return;
-    void user.identify(selectedUserId, { restorePaywallAssignments: true });
-    setNotice(`${selectedUser.name} is browsing the frontier market.`);
-  }, [isConfigured, selectedUserId, selectedUser.name]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -109,7 +101,7 @@ export function App() {
   useEffect(() => {
     const controller = new AbortController();
     fetch("/api/collection", {
-      headers: { "x-demo-user": selectedUserId },
+      headers: { "x-demo-user": user.id ?? "" },
       signal: controller.signal,
     })
       .then((res) => res.json() as Promise<CollectionResponse>)
@@ -119,7 +111,7 @@ export function App() {
         setCollection([]);
       });
     return () => controller.abort();
-  }, [selectedUserId]);
+  }, [user.id]);
 
   const showPaywall = async (reason: string) => {
     setNotice(reason);
@@ -160,7 +152,7 @@ export function App() {
             method: "POST",
             headers: {
               "content-type": "application/json",
-              "x-demo-user": selectedUserId,
+              "x-demo-user": user.id ?? "",
             },
             body: JSON.stringify({ horseId: horse.id }),
           });
@@ -173,7 +165,7 @@ export function App() {
 
           const data = (await response.json()) as CollectionResponse;
           setCollection(data.collection);
-          claimMessage = `${horse.name} was claimed for ${selectedUser.name}'s ranch book.`;
+          claimMessage = `${horse.name} was claimed for ${user.id ?? "your"} ranch book.`;
           claimed = true;
         },
       });
@@ -195,6 +187,21 @@ export function App() {
     }
   };
 
+  if (page === "signin") {
+    return (
+      <SignInPage
+        onSignIn={async (userId) => {
+          await user.identify(userId, { restorePaywallAssignments: true });
+          setPage("home");
+        }}
+      />
+    );
+  }
+
+  if (page === "pro-analytics") {
+    return <ProAnalyticsPage onBack={() => setPage("home")} />;
+  }
+
   return (
     <main className="min-h-screen bg-[#f1dfbf] text-[#24170f]">
       <section className="border-b-2 border-[#7a3f1a] bg-[#fff7e8] shadow-[0_2px_0_rgba(80,37,14,0.12)]">
@@ -208,18 +215,10 @@ export function App() {
               <h1 className="mt-2 text-3xl font-bold tracking-normal sm:text-4xl">Dusty Spur Horse Ledger</h1>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Select value={selectedUserId} onValueChange={setSelectedUserId}>
-                <SelectTrigger className="h-10 w-[160px] border-[#b87a41] bg-white">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {USERS.map((item) => (
-                    <SelectItem key={item.id} value={item.id}>
-                      {item.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Button variant="outline" onClick={() => setPage("pro-analytics")}>
+                <BarChart3 />
+                Pro Analytics
+              </Button>
               <Button variant={hasSubscription ? "secondary" : "default"} onClick={buyProPass}>
                 {hasSubscription ? <BadgeCheck /> : <Crown />}
                 {hasSubscription ? "Pro Pass Active" : "Buy Pro Pass"}
@@ -289,11 +288,26 @@ export function App() {
         <aside className="space-y-5">
           <Card className="rounded-lg">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <UserRound className="size-5" />
-                {selectedUser.name}
-              </CardTitle>
-              <CardDescription>{selectedUser.role}</CardDescription>
+              <div className="flex items-start justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <UserRound className="size-5" />
+                    {user.isLoggedIn ? user.id : "Guest"}
+                  </CardTitle>
+                  <CardDescription>{hasSubscription ? "Pro Pass" : "Free Rider"}</CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    await user.signOut();
+                    await sw.reset();
+                    setPage("signin");
+                  }}
+                >
+                  Sign out
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="rounded-md border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700">{notice}</div>
@@ -403,6 +417,108 @@ function StatusItem({ label, value }: { label: string; value: string }) {
       <div className="text-[11px] font-medium uppercase tracking-normal text-stone-500">{label}</div>
       <div className="mt-1 truncate text-sm font-semibold text-stone-900">{value}</div>
     </div>
+  );
+}
+
+function SignInPage({ onSignIn }: { onSignIn: (userId: string) => Promise<void> }) {
+  const [userId, setUserId] = useState("rider_ava");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userId.trim()) return;
+    setLoading(true);
+    await onSignIn(userId.trim());
+    setLoading(false);
+  };
+
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-[#f1dfbf] text-[#24170f]">
+      <Card className="w-full max-w-sm rounded-lg">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-xl">
+            <UserRound className="size-5" />
+            Sign in to Dusty Spur
+          </CardTitle>
+          <CardDescription>Enter any user ID to identify with Superwall.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4">
+            <input
+              type="text"
+              value={userId}
+              onChange={(e) => setUserId(e.target.value)}
+              placeholder="User ID"
+              className="w-full rounded-md border border-[#b87a41] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#7a3f1a]"
+            />
+            <Button type="submit" className="w-full" disabled={loading || !userId.trim()}>
+              {loading ? "Signing in…" : "Sign in"}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </main>
+  );
+}
+
+function ProAnalyticsPage({ onBack }: { onBack: () => void }) {
+  return (
+    <main className="min-h-screen bg-[#f1dfbf] text-[#24170f]">
+      <section className="border-b-2 border-[#7a3f1a] bg-[#fff7e8] shadow-[0_2px_0_rgba(80,37,14,0.12)]">
+        <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-5 sm:px-6 lg:px-8">
+          <Button variant="outline" size="sm" onClick={onBack}>
+            <ArrowLeft className="size-4" />
+            Back
+          </Button>
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-[#8a3d12]">
+              <BarChart3 className="size-4" />
+              Pro Analytics
+            </div>
+            <h1 className="mt-1 text-2xl font-bold">Frontier Insights</h1>
+          </div>
+        </div>
+      </section>
+
+      <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8" style={{ height: "700px" }}>
+        <SuperwallPaywall
+          placement="home"
+          inline
+          onDismiss={(_info, result) => { if (result.type === "declined") onBack(); }}
+          loading={
+            <div className="flex h-full min-h-[500px] flex-col items-center justify-center rounded-lg border-2 border-dashed border-[#7a3f1a] bg-[#fff7e8] p-16 text-center">
+              <Crown className="mb-4 size-10 text-[#8a3d12]" />
+              <div className="text-lg font-semibold">Pro Analytics is locked</div>
+              <div className="mt-1 text-sm text-stone-500">Purchase a Pro Pass to unlock frontier insights.</div>
+            </div>
+          }
+        >
+          <div className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-3">
+              {[
+                { label: "Revenue this month", value: "$12,480" },
+                { label: "Active riders", value: "1,042" },
+                { label: "Horses claimed", value: "3,871" },
+              ].map(({ label, value }) => (
+                <div key={label} className="rounded-lg border-2 border-[#7a3f1a] bg-[#fff7e8] px-6 py-5">
+                  <div className="text-xs font-medium uppercase tracking-wide text-[#8a3d12]">{label}</div>
+                  <div className="mt-2 text-3xl font-bold">{value}</div>
+                </div>
+              ))}
+            </div>
+            <div className="rounded-lg border-2 border-[#7a3f1a] bg-[#fff7e8] p-6">
+              <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-[#8a3d12]">
+                <Sparkles className="size-4" />
+                AI-powered trail forecasts
+              </div>
+              <p className="text-sm text-stone-600">
+                Your herd is trending toward Epic rarity acquisitions. Legendary supply is projected to tighten by 18% next quarter.
+              </p>
+            </div>
+          </div>
+        </SuperwallPaywall>
+      </div>
+    </main>
   );
 }
 

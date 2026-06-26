@@ -5,7 +5,7 @@
  * It is included in `src/index.html`.
  */
 
-import { StrictMode } from "react";
+import { } from "react";
 import { createRoot } from "react-dom/client";
 import { SuperwallProvider } from "@superwall/paywalls-react";
 import { App } from "./App";
@@ -14,17 +14,15 @@ const apiKey = "pk_ZNLGF8AlO2V50YDvC1y0c";
 
 const elem = document.getElementById("root")!;
 const app = (
-  <StrictMode>
-    <SuperwallProvider
+  <SuperwallProvider
       apiKey={apiKey}
       options={{
         testModeBehavior: "always",
-        networkEnvironment: "developer",
+        networkEnvironment: "release",
       }}
     >
       <App />
     </SuperwallProvider>
-  </StrictMode>
 );
 
 if (import.meta.hot) {

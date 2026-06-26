@@ -1,8 +1,6 @@
 # Superwall Web SDK
 
-TypeScript SDK for **Superwall** in the browser, on the server, and inside React. Wire-compatible with the iOS / Android / Flutter SDKs (same config, collector, and enrichment endpoints) but designed for modern web — factory-created instances, reactive signals, `EventTarget`, module augmentation for typed user/placement params, React 19 Suspense.
-
-> **Status: 0.0.1-alpha.** The headless core, browser presenter, React bindings, and a runnable example all ship. Real config-driven placement evaluation (audience rules, experiments) is **deferred** — see [`MISSING.md`](./MISSING.md). The full design spec lives in [`API.md`](./API.md).
+TypeScript SDK for **Superwall** in the browser, on the server, and inside React. 
 
 ---
 
@@ -10,8 +8,8 @@ TypeScript SDK for **Superwall** in the browser, on the server, and inside React
 
 | Package | What | Runs in |
 |---|---|---|
-| [`@superwall/paywalls-js`](./packages/paywalls-js) | Headless core: factory, signals, `EventTarget`, identity, network, presenter contract. **No DOM refs at module load.** | Node, Bun, edge, workers, SSR, browser |
-| [`@superwall/paywalls-js/browser`](./packages/paywalls-js/src/browser) | `createBrowserPresenter` (iframe overlay + postMessage v1) + `createBrowserStorage` (localStorage + cookie mirror). | Browser only |
+| [`@superwall/paywalls-js`](./packages/paywalls-js) | Headless core: **No DOM refs at module load.** | Node, Bun, edge, workers, SSR, browser |
+| [`@superwall/paywalls-js/browser`](./packages/paywalls-js/src/browser) | `createBrowserPresenter` `createBrowserStorage` | Browser only |
 | [`@superwall/paywalls-react`](./packages/paywalls-react) | `<SuperwallProvider>`, `useSuperwall`, `useSignal`, `useUser`, `usePlacement`, `useSuperwallEvent`, `useDelegate`. React 19. | Browser (SSR-safe imports) |
 | [`@superwall/example-browser`](./example/example-browser) | Runnable Bun + vanilla TS demo. | Browser |
 
@@ -39,20 +37,11 @@ bun install        # from the workspace root
 
 ```ts
 import { createSuperwall } from "@superwall/paywalls-js";
-import { createBrowserPresenter, createBrowserStorage } from "@superwall/paywalls-js/browser";
 
-const sw = createSuperwall({
-  apiKey: "pk_web_…",
-  presenter: createBrowserPresenter({ presentation: "modal" }),
-  storage: createBrowserStorage(),
-  options: {
-    testModeBehavior: "automatic",      // shows window.confirm for purchases when active
-    networkEnvironment: "release",
-  },
-});
+const sw = createSuperwall({ apiKey: "pk_web_…" });
 
 // Optional — block until config + identity hydration land. Most methods
-// internally `await sw.ready` so you don't need to.
+// internally await sw.ready so you don't need to.
 await sw.ready;
 
 await sw.user.identify("user_42");
@@ -64,7 +53,7 @@ sw.events.addEventListener("subscriptionStatus_didChange", () => {
 }, { signal: ac.signal });
 
 // Show a paywall (or skip if entitled)
-const result = await sw.placements.register({
+const result = await sw.register({
   placement: "checkout",
   feature: () => unlock(),                 // runs on entitled / purchased / non-gated skip
 });
@@ -77,12 +66,12 @@ if (result.type === "presented" && result.result.type === "purchased") {
 ### Tree-shakeable singleton (Expo-style)
 
 ```ts
-import { createSuperwall, user, placements, events } from "@superwall/paywalls-js";
+import { createSuperwall, user, register, events } from "@superwall/paywalls-js";
 
 createSuperwall({ apiKey: "pk_web_…" });   // first call registers the default
 
 await user.identify("user_42");
-const r = await placements.register({ placement: "checkout" });
+const r = await register({ placement: "checkout" });
 events.addEventListener("paywall_close", (e) => console.log(e.detail));
 ```
 
@@ -94,14 +83,10 @@ If you only `import { user }`, the rest is dead code → ESM bundlers drop it.
 
 ```tsx
 import { SuperwallProvider, useUser, usePlacement } from "@superwall/paywalls-react";
-import { createBrowserPresenter } from "@superwall/paywalls-js/browser";
 
 function App() {
   return (
-    <SuperwallProvider
-      apiKey="pk_web_…"
-      presenter={createBrowserPresenter({ presentation: "modal" })}
-    >
+    <SuperwallProvider apiKey="pk_web_…">
       <Home />
     </SuperwallProvider>
   );
@@ -158,29 +143,6 @@ flip `sw.subscriptionStatus` to `ACTIVE` automatically (via the default
 purchase controller). You don't run checkout or set status yourself — just
 read `sw.subscriptionStatus` / gate on entitlements.
 
-**Manual checkout (custom billing / non-Stripe paywalls).** If your paywall
-emits a bare `purchase` message instead of running Stripe, the SDK emits
-`transaction_start` and does nothing else — it does **not** run checkout or
-dismiss the paywall. Run your own checkout and report the result; dismiss
-yourself if you want the paywall closed:
-
-```ts
-sw.events.addEventListener("transaction_start", async (e) => {
-  const product = e.detail.product;
-  const ok = await myBilling.checkout(product.id);
-  if (ok) {
-    sw.purchases.setSubscriptionStatus({
-      status: "ACTIVE",
-      entitlements: [{ id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: [product.id] }],
-    });
-    sw.dismiss(); // setSubscriptionStatus does NOT auto-dismiss
-  }
-});
-```
-
-**Full control — custom `PurchaseController`.** Pass `purchaseController` to
-`createSuperwall` to own `purchase` + `restorePurchases` end-to-end.
-
 ### Custom user / placement types
 
 Module augmentation closes the shape — no generics on call sites:
@@ -217,23 +179,8 @@ const myPresenter: PaywallPresenter = {
   dismiss() { /* tear down */ },
 };
 
-const sw = createSuperwall({ apiKey, presenter: myPresenter });
-```
-
-### Test mode
-
-```ts
-const sw = createSuperwall({
-  apiKey,
-  presenter: createBrowserPresenter({
-    testMode: true,
-    onTestPurchase: async (product) => {
-      // Replace window.confirm with your own modal in tests / Storybook.
-      return userClickedYes ? "purchased" : "declined";
-    },
-  }),
-  options: { testModeBehavior: "always" },
-});
+// Pass per-call via register(), not at createSuperwall time:
+await sw.register({ placement: "checkout", presenter: myPresenter });
 ```
 
 ### Global delegate (analytics / logging firehose)
@@ -321,9 +268,9 @@ Superwall-Web/
 
 ### Tests
 
-`bun test` (no Jest, no vitest — Bun has a built-in runner). Browser-package tests use `@happy-dom/global-registrator` registered via `bunfig.toml` preload. React tests use `@testing-library/react`.
+`paywalls-js` uses vitest (`bun run test` calls `vitest run`). Browser-package tests use `@happy-dom/global-registrator` registered via `bunfig.toml` preload. React tests use `@testing-library/react`.
 
-165 tests across the workspace.
+326 tests across the workspace.
 
 ### Effect language service
 

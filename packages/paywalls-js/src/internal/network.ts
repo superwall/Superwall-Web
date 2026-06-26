@@ -180,13 +180,16 @@ const make = (config: NetworkConfig) =>
         const headers = yield* buildHeaders();
 
         const response = yield* Effect.tryPromise({
-          // `cache: "no-store"` bypasses the browser HTTP cache. The
-          // static_config endpoint sets long-lived cache headers, but we
-          // already do our own cache layer on top (storage-backed, scoped
-          // by api key) — the browser cache just serves stale config and
-          // breaks `register()` when placements change.
+          // In non-release environments bypass the browser HTTP cache so
+          // config changes are picked up immediately during development.
+          // In release the endpoint's own Cache-Control headers apply and
+          // our storage-backed layer handles staleness detection.
           try: async () =>
-            requireFetch()(url, { method: "GET", headers, cache: "no-store" }),
+            requireFetch()(url, {
+              method: "GET",
+              headers,
+              ...(isSandbox(config.environment) && { cache: "no-store" }),
+            }),
           catch: (cause) =>
             new NetworkRequestError({
               method: "GET",

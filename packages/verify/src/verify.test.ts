@@ -325,7 +325,7 @@ describe("verifyEntitlements — remote JWKS fallback", () => {
 
     const result = await verifyEntitlements(token, {
       publicApiKey: PK,
-      jwksUrl,
+      env: { custom: jwksUrl },
     });
     expect(result.entitlements[0]?.identifier).toBe("pro");
   });

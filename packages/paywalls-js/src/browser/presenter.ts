@@ -28,6 +28,13 @@ export interface BrowserPresenterOptions {
   closeOnBackdrop?: boolean;
   /** z-index for the overlay container. Default: 2147483000. */
   zIndex?: number;
+  /**
+   * When true, the overlay uses `position: absolute` and fills the container
+   * element instead of covering the full viewport. The container must have
+   * `position: relative` (or any non-static position) for this to work.
+   * Default: false.
+   */
+  inline?: boolean;
   /** When the SDK is in test mode (`options.testModeBehavior`, threaded via
    *  `ctx.testMode`), purchase clicks are intercepted with a confirm()
    *  shim instead of real checkout. Supply this to replace the confirm()
@@ -145,7 +152,7 @@ export const createBrowserPresenter = (
 };
 
 interface ActivePresentation {
-  readonly overlay: HTMLDivElement;
+  readonly overlay: HTMLDivElement | null;
   readonly iframe: HTMLIFrameElement;
   readonly paywallOrigin: string;
   readonly messageListener: (e: MessageEvent) => void;
@@ -437,17 +444,19 @@ const mount = (
   const closeOnBackdrop = options.closeOnBackdrop ?? true;
   const zIndex = options.zIndex ?? DEFAULT_Z_INDEX;
 
-  const overlay = document.createElement("div");
-  overlay.dataset["swPresenter"] = "overlay";
-  Object.assign(overlay.style, {
-    position: "fixed",
-    inset: "0",
-    zIndex: String(zIndex),
-    display: "flex",
-    alignItems: spec.overlayAlignItems,
-    justifyContent: spec.overlayJustifyContent,
-    background: spec.overlayBackground,
-  });
+  const overlay = options.inline ? null : document.createElement("div");
+  if (overlay) {
+    overlay.dataset["swPresenter"] = "overlay";
+    Object.assign(overlay.style, {
+      position: "fixed",
+      inset: "0",
+      zIndex: String(zIndex),
+      display: "flex",
+      alignItems: spec.overlayAlignItems,
+      justifyContent: spec.overlayJustifyContent,
+      background: spec.overlayBackground,
+    });
+  }
 
   const iframe = document.createElement("iframe");
   iframe.dataset["swPresenter"] = "iframe";
@@ -474,10 +483,10 @@ const mount = (
   Object.assign(iframe.style, {
     border: "0",
     background: "transparent",
-    width: spec.iframeWidth,
-    height: spec.iframeHeight,
-    borderRadius: spec.iframeBorderRadius,
-    boxShadow: spec.iframeBoxShadow,
+    width: options.inline ? "100%" : spec.iframeWidth,
+    height: options.inline ? "100%" : spec.iframeHeight,
+    borderRadius: options.inline ? "0" : spec.iframeBorderRadius,
+    boxShadow: options.inline ? "none" : spec.iframeBoxShadow,
     display: "block",
     transform: initialTransform,
     opacity: initialOpacity,
@@ -486,10 +495,14 @@ const mount = (
         ? "none"
         : `transform ${ENTER_DURATION_MS}ms ease-out, opacity ${ENTER_DURATION_MS}ms ease-out`,
   });
-  overlay.appendChild(iframe);
 
   const container = resolveContainer(options);
-  container.appendChild(overlay);
+  if (overlay) {
+    overlay.appendChild(iframe);
+    container.appendChild(overlay);
+  } else {
+    container.appendChild(iframe);
+  }
 
   // Animate to identity on next frame so the browser actually transitions
   // from the initial transform/opacity to the rest state.
@@ -513,7 +526,7 @@ const mount = (
     tearDown(a);
   };
 
-  if (spec.overlayBackground !== "transparent" && closeOnBackdrop) {
+  if (overlay && spec.overlayBackground !== "transparent" && closeOnBackdrop) {
     // Dismiss when the click lands on the backdrop itself OR anywhere
     // outside the iframe card. `e.target === overlay` alone is too strict
     // when the overlay holds extra wrapper elements (close button, etc.);
@@ -595,7 +608,7 @@ const tearDown = (a: ActivePresentation) => {
     console.warn("[Superwall] tearDown cleanup failed:", e);
   }
   try {
-    a.overlay.remove();
+    (a.overlay ?? a.iframe).remove();
   } catch (e) {
     console.warn("[Superwall] tearDown cleanup failed:", e);
   }

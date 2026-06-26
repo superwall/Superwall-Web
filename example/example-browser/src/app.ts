@@ -20,7 +20,7 @@ const sw = createSuperwall({
   options: {
     // Demo only: simulate purchases instead of charging a real card.
     testModeBehavior: "always",
-    networkEnvironment: "developer",
+    networkEnvironment: "release",
   },
 });
 

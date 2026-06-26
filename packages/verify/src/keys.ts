@@ -16,6 +16,17 @@ export { BUNDLED_JWKS };
 export const DEFAULT_JWKS_URL =
   "https://superwall.com/.well-known/entitlements/jwks.json";
 
+const DEV_JWKS_URL =
+  "https://superwall.dev/.well-known/entitlements/jwks.json";
+
+export const jwksUrlForEnv = (
+  env?: "prod" | "dev" | { custom: string },
+): string => {
+  if (typeof env === "object") return env.custom;
+  if (env === "dev") return DEV_JWKS_URL;
+  return DEFAULT_JWKS_URL;
+};
+
 // One resolver per JWKS URL, reused across `verifyEntitlements` calls so jose's
 // in-memory JWKS cache actually persists between requests.
 const resolverCache = new Map<string, JWTVerifyGetKey>();
