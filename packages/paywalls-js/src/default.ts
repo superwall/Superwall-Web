@@ -75,6 +75,14 @@ export const register = async (
   ...args: Parameters<Superwall["register"]>
 ): ReturnType<Superwall["register"]> => requireDefault().register(...args);
 
+/** Fire-and-forget analytics event tracking on the default instance. Thin
+ *  alias over `register` with no paywall handler/feature — events are
+ *  queryable via Superwall's Query API. See `Superwall.trackPlacement`. */
+export const trackPlacement = async (
+  ...args: Parameters<Superwall["trackPlacement"]>
+): ReturnType<Superwall["trackPlacement"]> =>
+  requireDefault().trackPlacement(...args);
+
 export const placements = {
   getPresentationResult: async (
     ...args: Parameters<Superwall["placements"]["getPresentationResult"]>

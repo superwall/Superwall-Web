@@ -251,6 +251,28 @@ export interface Superwall {
    *  iOS / Android. Skipped reasons (no audience match, holdout, already
    *  entitled, etc.) surface in the return value without throwing. */
   register(args: RegisterPlacementArgs): Promise<RegisterPlacementResult>;
+  /**
+   * Fire-and-forget analytics event tracking. A thin alias over
+   * `register` that takes only the placement/event name and optional
+   * `params` — no paywall `handler` or `feature` callback. Use it to send
+   * arbitrary analytics events (uncapped, free) that are queryable via
+   * Superwall's Query API, positioning Superwall as an agent-first
+   * alternative to Mixpanel/Amplitude/PostHog.
+   *
+   * Functionally identical to `register({ placement, params })`: it still
+   * runs the full trigger pipeline (so analytics events double as audience
+   * triggers), but it omits paywall handling — there is no callback to wire
+   * up. Resolves with the same `RegisterPlacementResult` as `register` for
+   * callers that want it; can be safely ignored otherwise.
+   *
+   * NOTE: distinct from `track(event, properties)`, which is the
+   * Segment-style custom-event API that publishes straight to `sw.events`.
+   * This method goes through the placement-register pipeline instead.
+   */
+  trackPlacement(
+    placement: string,
+    params?: PlacementParams,
+  ): Promise<RegisterPlacementResult>;
   readonly purchases: PurchasesNamespace;
   readonly entitlements: EntitlementsNamespace;
 
@@ -2429,6 +2451,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     user,
     placements,
     register,
+    trackPlacement: (placement, params) =>
+      register({ placement, ...(params !== undefined && { params }) }),
     purchases,
     entitlements,
 

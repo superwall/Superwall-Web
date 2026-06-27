@@ -44,6 +44,7 @@ export {
   user,
   placements,
   register,
+  trackPlacement,
   purchases,
   entitlements,
   events,
