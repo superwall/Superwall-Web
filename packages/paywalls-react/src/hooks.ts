@@ -180,11 +180,6 @@ export const usePlacement = (
           },
         },
       });
-      // For cases where the SDK returned a non-presented result without
-      // firing handler callbacks (e.g. `entitled`), reflect that in state.
-      if (r.type === "entitled") {
-        setState({ type: "idle" });
-      }
       return r;
     },
     [sw],

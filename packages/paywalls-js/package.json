@@ -7,27 +7,37 @@
     "access": "public"
   },
   "sideEffects": [
-    "./src/browser/auto.ts"
+    "./dist/browser/auto.js"
   ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "@superwall/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./browser": {
-      "types": "./src/browser/index.ts",
-      "default": "./src/browser/index.ts"
+      "@superwall/source": "./src/browser/index.ts",
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js",
+      "default": "./dist/browser/index.js"
     },
     "./browser/auto": {
-      "types": "./src/browser/auto.ts",
-      "default": "./src/browser/auto.ts"
+      "@superwall/source": "./src/browser/auto.ts",
+      "types": "./dist/browser/auto.d.ts",
+      "import": "./dist/browser/auto.js",
+      "default": "./dist/browser/auto.js"
     }
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "echo 'no-op for v0; consumers import .ts directly via Bun/Vite/Next ESM'",
-    "clean": "rm -rf node_modules .turbo *.tsbuildinfo"
+    "build": "bun run ../../scripts/build-package.ts",
+    "clean": "rm -rf dist node_modules .turbo *.tsbuildinfo"
   },
   "dependencies": {
     "@superwall/core": "workspace:^",

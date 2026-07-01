@@ -412,7 +412,7 @@ test("useSignal: unstable signal identity per render doesn't trigger infinite re
       get value() {
         return sw.user.id.value;
       },
-      subscribe: (run: () => void) => sw.user.id.subscribe(run),
+      subscribe: (run: (value: string) => void) => sw.user.id.subscribe(run),
     };
     const id = useSignal(wrappedSignal);
     return <span data-testid="id">{id}</span>;

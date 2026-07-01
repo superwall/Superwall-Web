@@ -60,7 +60,7 @@ export function SuperwallPaywall({
     let cancelled = false;
     sw.register({
       placement,
-      params,
+      ...(params && { params }),
       feature: () => { if (!cancelled) setUnlocked(true); },
       ...(presenter && { presenter }),
       handler: {

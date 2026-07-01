@@ -341,7 +341,7 @@ describe("verifyEntitlements — remote JWKS fallback", () => {
 
     const err = await verifyEntitlements(token, {
       publicApiKey: PK,
-      jwksUrl,
+      env: { custom: jwksUrl },
     }).catch((e) => e);
     expect(err).toBeInstanceOf(KeyUnavailableError);
     expect((err as VerifyError).code).toBe("KEY_UNAVAILABLE");
@@ -365,7 +365,7 @@ describe("verifyEntitlements — remote JWKS fallback", () => {
 
     const err = await verifyEntitlements(token, {
       publicApiKey: PK,
-      jwksUrl,
+      env: { custom: jwksUrl },
     }).catch((e) => e);
     expect(err).toBeInstanceOf(KeyUnavailableError);
   });

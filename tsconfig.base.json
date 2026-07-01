@@ -5,6 +5,10 @@
     "module": "Preserve",
     "moduleDetection": "force",
     "moduleResolution": "bundler",
+    // Resolve workspace @superwall/* deps to their .ts source in-repo (editor
+    // go-to-def, typecheck, declaration emit) via the matching `exports`
+    // condition. Published consumers lack this condition and get dist/ instead.
+    "customConditions": ["@superwall/source"],
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,

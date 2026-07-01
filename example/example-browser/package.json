@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot src/server.ts",
-    "start": "bun src/server.ts"
+    "dev": "bun --conditions=@superwall/source --hot src/server.ts",
+    "start": "bun --conditions=@superwall/source src/server.ts"
   },
   "dependencies": {
     "@superwall/paywalls-js": "workspace:*",
