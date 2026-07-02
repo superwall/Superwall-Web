@@ -62,6 +62,25 @@ const deriveInterfaceStyle = (): "Light" | "Dark" => {
   }
 };
 
+const DEFAULT_ROOT_FONT_PX = 16;
+
+/** Effective root font size ÷ the 16px browser default — best-available proxy for
+ *  the browser/OS text-size (accessibility) setting; returns 1 on SSR / failure. */
+const deriveFontScale = (): number => {
+  const w = safeWindow();
+  const doc = typeof document === "undefined" ? undefined : document;
+  if (!w || !doc?.documentElement || typeof w.getComputedStyle !== "function") {
+    return 1;
+  }
+  try {
+    const px = parseFloat(w.getComputedStyle(doc.documentElement).fontSize);
+    if (!Number.isFinite(px) || px <= 0) return 1;
+    return px / DEFAULT_ROOT_FONT_PX;
+  } catch {
+    return 1;
+  }
+};
+
 const deriveDeviceLocale = (): string => safeNavigator()?.language ?? "en-US";
 
 const derivePreferredLocale = (): string => {
@@ -293,6 +312,7 @@ export const buildDeviceAttributes = (
     screenWidth: s?.width ?? 0,
     screenHeight: s?.height ?? 0,
     devicePixelRatio: w?.devicePixelRatio ?? 1,
+    fontScale: deriveFontScale(),
     connectionType: deriveConnectionType(),
     hardwareConcurrency: n?.hardwareConcurrency ?? null,
     deviceMemory: n?.deviceMemory ?? null,
