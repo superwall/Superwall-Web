@@ -104,10 +104,10 @@ it("buildDeviceAttributes: isSandbox stringified per Android wire shape", () => 
   ).toBe("false");
 });
 
-it("buildDeviceAttributes: fontScale defaults to 1 when no root font size is resolvable (SSR)", () => {
+it("buildDeviceAttributes: fontSize defaults to 16 when no root font size is resolvable (SSR)", () => {
   // Test env has no document/getComputedStyle — verifies the SSR-safe fallback.
   const out = buildDeviceAttributes(baseInput());
-  expect(out.fontScale).toBe(1);
+  expect(out.fontSize).toBe(16);
 });
 
 it("buildDeviceAttributes: userAgentData is null when navigator.userAgentData is unavailable (SSR / Firefox / Safari)", () => {
