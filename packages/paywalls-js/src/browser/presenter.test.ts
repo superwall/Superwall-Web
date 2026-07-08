@@ -800,6 +800,42 @@ it("redeemDiscount posts a redeem_discount accept64 message once the iframe is r
   await presentation;
 });
 
+it("redeemDiscount fires onPosted synchronously when the iframe is already ready", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo(), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  markReady(iframe);
+  await flushMessages();
+
+  let posted = 0;
+  presenter.redeemDiscount!("SUMMER20", () => posted++);
+  expect(posted).toBe(1);
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("redeemDiscount defers onPosted until flush when queued pre-ready", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo(), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+
+  let posted = 0;
+  presenter.redeemDiscount!("EARLY10", () => posted++);
+  // Not ready yet — onPosted must NOT have fired.
+  expect(posted).toBe(0);
+
+  markReady(iframe);
+  await flushMessages();
+  // Flushed → onPosted fires exactly once.
+  expect(posted).toBe(1);
+
+  presenter.dismiss();
+  await presentation;
+});
+
 it("redeemDiscount issued before ready is queued and flushed on the template request", async () => {
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(stubInfo(), newCtx());

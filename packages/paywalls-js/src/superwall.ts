@@ -1881,12 +1881,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           currentAbort = null;
           activePresenter = null;
           activePaywallSig.set(null);
-          // A dangling redeem can't get a result once the paywall is gone.
+          // A dangling redeem can't get a result once the paywall is gone —
+          // settle it as dismissed (not "superseded": nothing replaced it).
           if (pendingDiscountRedeem) {
             settlePendingDiscount({
               code: pendingDiscountRedeem.code,
               valid: false,
-              reason: "superseded",
+              reason: "paywall_dismissed",
             });
           }
           pendingCloseReason = null;
@@ -2168,20 +2169,23 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   /** The single in-flight `redeemDiscount()` awaiting a matching result. Only
    *  one slot: a newer redeem supersedes the older (the paywall discards the
    *  stale request via its own generation counter, so the old promise would
-   *  otherwise hang). Keyed by trimmed code for result matching. */
-  let pendingDiscountRedeem:
-    | {
-        code: string;
-        resolve: (r: DiscountRedemptionResult) => void;
-        timer: ReturnType<typeof setTimeout>;
-      }
-    | null = null;
+   *  otherwise hang). Keyed by trimmed code for result matching. `timer` is
+   *  null until the presenter reports the code was actually posted to the
+   *  iframe — a pre-ready redeem stays queued in the presenter, and arming the
+   *  timeout at enqueue time would let a slow load time out a code that then
+   *  applies late. */
+  interface PendingDiscount {
+    code: string;
+    resolve: (r: DiscountRedemptionResult) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+  }
+  let pendingDiscountRedeem: PendingDiscount | null = null;
 
   const settlePendingDiscount = (result: DiscountRedemptionResult): void => {
     const pending = pendingDiscountRedeem;
     if (!pending) return;
     pendingDiscountRedeem = null;
-    clearTimeout(pending.timer);
+    if (pending.timer !== null) clearTimeout(pending.timer);
     pending.resolve(result);
   };
 
@@ -2224,13 +2228,22 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     }
     const presenter = activePresenter;
     return new Promise<DiscountRedemptionResult>((resolve) => {
-      const timer = setTimeout(() => {
-        if (pendingDiscountRedeem?.code === trimmed) {
-          settlePendingDiscount({ code: trimmed, valid: false, reason: "timeout" });
-        }
-      }, DISCOUNT_REDEEM_TIMEOUT_MS);
-      pendingDiscountRedeem = { code: trimmed, resolve, timer };
-      presenter.redeemDiscount!(trimmed);
+      const entry: PendingDiscount = { code: trimmed, resolve, timer: null };
+      pendingDiscountRedeem = entry;
+      // Arm the timeout only once the presenter actually posts the code to the
+      // iframe (immediately if ready, or on flush for a pre-ready redeem). This
+      // closes the race where a slow iframe load times out a still-queued code
+      // that then applies late. Guard on identity so a stale onPosted (from a
+      // superseded/cleared redeem) can't arm a timer for the wrong entry.
+      const armTimeout = () => {
+        if (pendingDiscountRedeem !== entry) return;
+        entry.timer = setTimeout(() => {
+          if (pendingDiscountRedeem === entry) {
+            settlePendingDiscount({ code: trimmed, valid: false, reason: "timeout" });
+          }
+        }, DISCOUNT_REDEEM_TIMEOUT_MS);
+      };
+      presenter.redeemDiscount!(trimmed, armTimeout);
     });
   };
 

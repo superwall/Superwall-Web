@@ -249,11 +249,13 @@ export type RedemptionResult =
       code: string;
     };
 
-/** Why a Stripe promotion-code redemption was rejected. The first five come
- *  from the paywall runtime's validation of the code against the checkout
- *  backend; `timeout` and `superseded` are synthesized by the SDK (no paywall
- *  response arrived within the redeem window, or a newer redeem replaced this
- *  one). */
+/** Known reasons a Stripe promotion-code redemption did not apply. The first
+ *  five come from the paywall runtime's validation of the code against the
+ *  checkout backend; `timeout`, `superseded`, and `paywall_dismissed` are
+ *  synthesized by the SDK (no paywall response arrived within the redeem
+ *  window, a newer redeem replaced this one, or the paywall went away before a
+ *  result arrived). Not exhaustive — the paywall runtime may add reasons the
+ *  SDK forwards verbatim (see {@link DiscountRedemptionResult.reason}). */
 export type DiscountRedemptionReason =
   | "code_not_found"
   | "code_invalid"
@@ -261,7 +263,8 @@ export type DiscountRedemptionReason =
   | "no_applicable_products"
   | "error"
   | "timeout"
-  | "superseded";
+  | "superseded"
+  | "paywall_dismissed";
 
 /** Result of applying a Stripe promotion code to the presented paywall.
  *  Mirrors the paywall runtime's `discount_redemption_result` message. Returned
@@ -273,8 +276,11 @@ export interface DiscountRedemptionResult {
   /** The trimmed code the result refers to. */
   code: string;
   valid: boolean;
-  /** Present only when `valid` is false. */
-  reason?: DiscountRedemptionReason;
+  /** Present only when `valid` is false. Typed as an open union so a
+   *  future paywall-runtime reason the SDK doesn't yet know about still
+   *  type-checks — match on {@link DiscountRedemptionReason} for the known
+   *  values and treat anything else as an opaque string. */
+  reason?: DiscountRedemptionReason | (string & {});
   /** Number of Stripe products re-priced. Present only when `valid` is true. */
   appliedProductCount?: number;
 }

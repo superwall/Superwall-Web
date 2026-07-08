@@ -103,11 +103,13 @@ sw.events.addEventListener("discount_redemption_result", (e) => {
   re-prices the paywall's Stripe products, and forwards the code to every
   subsequent Stripe **web** checkout session. Resolves with the result, or after
   ~10s with `{ valid: false, reason: "timeout" }`. A second call supersedes an
-  in-flight one (`reason: "superseded"`). Rejects with a `DiscountError` on an
-  empty code (use `clearDiscount()`), when no paywall is presented, or when a
-  custom presenter has no message channel. Invalid `reason`s from the paywall:
+  in-flight one (`reason: "superseded"`); dismissing the paywall settles a
+  pending redeem as `reason: "paywall_dismissed"`. Rejects with a `DiscountError`
+  on an empty code (use `clearDiscount()`), when no paywall is presented, or when
+  a custom presenter has no message channel. Invalid `reason`s from the paywall:
   `code_not_found`, `code_invalid`, `no_valid_products`,
-  `no_applicable_products`, `error`.
+  `no_applicable_products`, `error` (the `reason` field is an open string union,
+  so future paywall-runtime reasons pass through unchanged).
 - **`clearDiscount()`** removes an applied discount (restores prices, re-enables
   Apple Pay). Fire-and-forget — the paywall doesn't acknowledge the clear.
 

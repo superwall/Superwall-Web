@@ -319,5 +319,11 @@ export interface SuperwallDelegate {
 export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEventMap>([
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
+  // Local-only by design: discount redemption attempts are recorded
+  // server-side by the checkout backend (POST /checkout/discount), and the SDK
+  // only observes results while a paywall is presented — wire-emitting here
+  // would double-count. Mirrors the `post_checkout_complete` precedent where
+  // the BE owns analytics. Consumers can still observe it on `sw.events` /
+  // the `onDiscountRedemptionResult` delegate.
   "discount_redemption_result",
 ]);

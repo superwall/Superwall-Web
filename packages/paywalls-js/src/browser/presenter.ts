@@ -100,6 +100,7 @@ export const createBrowserPresenter = (
 
   const redeemDiscount: NonNullable<PaywallPresenter["redeemDiscount"]> = (
     code,
+    onPosted,
   ) => {
     const a = active;
     // The SDK guards on presentation state before calling; no active paywall
@@ -108,9 +109,11 @@ export const createBrowserPresenter = (
     if (!a.ready) {
       // Iframe hasn't asked for templates yet — queue and flush on ready.
       a.pendingDiscountCode = code;
+      a.pendingDiscountOnPosted = onPosted ?? null;
       return;
     }
     postRedeemDiscount(a, code);
+    onPosted?.();
   };
 
   /** Warm a paywall by firing a hidden iframe. The iframe is removed once
@@ -183,6 +186,9 @@ interface ActivePresentation {
    *  templates. `null` = nothing queued; `""` = a queued clear. Only the most
    *  recent matters (the paywall replaces an applied code atomically). */
   pendingDiscountCode: string | null;
+  /** `onPosted` callback paired with `pendingDiscountCode`, fired when the
+   *  queued code is actually written to the iframe on flush. */
+  pendingDiscountOnPosted: (() => void) | null;
 }
 
 const resolveContainer = (
@@ -611,6 +617,7 @@ const mount = (
     ctx,
     ready: false,
     pendingDiscountCode: null,
+    pendingDiscountOnPosted: null,
   };
   slot.a = a;
   return a;
@@ -734,8 +741,11 @@ const handleInbound = (
         active.ready = true;
         if (active.pendingDiscountCode !== null) {
           const pending = active.pendingDiscountCode;
+          const onPosted = active.pendingDiscountOnPosted;
           active.pendingDiscountCode = null;
+          active.pendingDiscountOnPosted = null;
           postRedeemDiscount(active, pending);
+          onPosted?.();
         }
         break;
       }
@@ -937,10 +947,9 @@ const handleInbound = (
           const apc = evt["appliedProductCount"];
           if (typeof apc === "number") detail.appliedProductCount = apc;
         } else {
+          // `reason` is an open union — forward any paywall value verbatim.
           const reason = readString(evt, "reason");
-          if (reason !== null) {
-            detail.reason = reason as NonNullable<DiscountRedemptionResult["reason"]>;
-          }
+          if (reason !== null) detail.reason = reason;
         }
         ctx.emit("discount_redemption_result", detail);
         break;

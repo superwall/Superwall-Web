@@ -200,8 +200,13 @@ export interface PaywallPresenter {
    *  presenter is responsible for queuing a redeem issued before the paywall
    *  signals it's ready and flushing it once ready. No-op for presenters
    *  without a live message channel (custom renderers, overrides); the SDK
-   *  rejects `redeemDiscount()` when this is absent. */
-  redeemDiscount?(code: string): void;
+   *  rejects `redeemDiscount()` when this is absent.
+   *
+   *  `onPosted` (if given) MUST be called at the moment the code is actually
+   *  written to the iframe — immediately when already ready, or on flush when
+   *  a pre-ready redeem was queued. The SDK arms its redeem timeout from this
+   *  callback so a slow iframe load doesn't time out a still-queued code. */
+  redeemDiscount?(code: string, onPosted?: () => void): void;
 
   /** Optional: warm a paywall before it's needed. */
   preload?(info: PaywallInfo): Promise<void>;

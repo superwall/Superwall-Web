@@ -2342,3 +2342,300 @@ it("configure: cached config makes sw.ready resolve before a hanging fetch — r
   await sw.dispose();
 });
 
+
+// ---------------------------------------------------------------------------
+// Stripe discount (promotion code) redemption — public API via sw.activePaywall
+// ---------------------------------------------------------------------------
+
+import { vi } from "vitest";
+import { DiscountError } from "./errors.ts";
+import type { DiscountRedemptionResult } from "./types.ts";
+
+/** Presenter that stays "presented" until dismissed, captures the ctx so the
+ *  test can push results back, and records redeemDiscount codes. `postMode`
+ *  controls when the presenter reports the code posted (fires `onPosted`):
+ *  "immediate" (ready paywall) or "manual" (simulates a pre-ready queue —
+ *  call `flush()` to post + arm the SDK timeout). */
+const controllablePresenter = (postMode: "immediate" | "manual" = "immediate") => {
+  let ctxRef: PresentationContext | null = null;
+  const redeemCodes: string[] = [];
+  let resolvePresent: ((r: PaywallResult) => void) | null = null;
+  let queuedOnPosted: (() => void) | null = null;
+  const presenter: PaywallPresenter = {
+    present: (_info, ctx) => {
+      ctxRef = ctx;
+      return new Promise<PaywallResult>((res) => {
+        resolvePresent = res;
+      });
+    },
+    dismiss: () => resolvePresent?.({ type: "declined" }),
+    redeemDiscount: (code, onPosted) => {
+      redeemCodes.push(code);
+      if (postMode === "immediate") onPosted?.();
+      else queuedOnPosted = onPosted ?? null;
+    },
+  };
+  return {
+    presenter,
+    redeemCodes,
+    /** Simulate the pre-ready queue flushing (posts + arms the SDK timeout). */
+    flush: () => {
+      const cb = queuedOnPosted;
+      queuedOnPosted = null;
+      cb?.();
+    },
+    emitResult: (detail: DiscountRedemptionResult) =>
+      ctxRef?.emit("discount_redemption_result", detail),
+    dismiss: () => resolvePresent?.({ type: "declined" }),
+  };
+};
+
+/** Poll a nullable read until it yields a value (register reaches present()
+ *  after several runtime round-trips — more than a single microtask). */
+const pollValue = async <T>(read: () => T | null, tries = 100): Promise<T> => {
+  for (let i = 0; i < tries; i++) {
+    const v = read();
+    if (v !== null && v !== undefined) return v;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error("pollValue timed out");
+};
+
+/** Present a paywall and return the active handle + rig. Caller must dismiss. */
+const presentWithDiscounts = async (
+  postMode: "immediate" | "manual" = "immediate",
+) => {
+  const rig = controllablePresenter(postMode);
+  const sw = makeWithPaywall({ presenter: rig.presenter });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  const paywall = await pollValue(() => sw.activePaywall.value);
+  return { sw, reg, rig, paywall };
+};
+
+it("activePaywall is null before present, a handle while presented, null after dismiss", async () => {
+  const rig = controllablePresenter();
+  const sw = makeWithPaywall({ presenter: rig.presenter });
+  await sw.ready;
+  expect(sw.activePaywall.value).toBeNull();
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() => sw.activePaywall.value);
+  expect(sw.activePaywall.value).not.toBeNull();
+  rig.dismiss();
+  await reg;
+  expect(sw.activePaywall.value).toBeNull();
+  await sw.dispose();
+});
+
+it("redeemDiscount posts the code and resolves on a matching result", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const promise = paywall!.redeemDiscount("SUMMER20");
+  expect(rig.redeemCodes).toEqual(["SUMMER20"]);
+  rig.emitResult({ code: "SUMMER20", valid: true, appliedProductCount: 2 });
+  await expect(promise).resolves.toEqual({
+    code: "SUMMER20",
+    valid: true,
+    appliedProductCount: 2,
+  });
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("redeemDiscount trims the code before posting + matching", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const promise = paywall!.redeemDiscount("  SAVE10  ");
+  expect(rig.redeemCodes).toEqual(["SAVE10"]);
+  rig.emitResult({ code: "SAVE10", valid: false, reason: "code_not_found" });
+  await expect(promise).resolves.toEqual({
+    code: "SAVE10",
+    valid: false,
+    reason: "code_not_found",
+  });
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("a non-matching result does NOT settle a pending redeem (matched by code)", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const promise = paywall!.redeemDiscount("WANT");
+  let settled = false;
+  void promise.then(() => { settled = true; });
+  // An unrelated result (e.g. in-paywall button for a different code) arrives.
+  rig.emitResult({ code: "OTHER", valid: true, appliedProductCount: 1 });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(settled).toBe(false);
+  // The matching result settles it.
+  rig.emitResult({ code: "WANT", valid: true, appliedProductCount: 1 });
+  await expect(promise).resolves.toMatchObject({ code: "WANT", valid: true });
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("redeemDiscount times out (gap #1: paywall posts no result) as { valid:false, reason:'timeout' }", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  vi.useFakeTimers();
+  try {
+    const promise = paywall!.redeemDiscount("NORESULT");
+    vi.advanceTimersByTime(10_000);
+    await expect(promise).resolves.toEqual({
+      code: "NORESULT",
+      valid: false,
+      reason: "timeout",
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("a queued (pre-ready) redeem does NOT start its timeout until the code is actually posted", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts("manual");
+  vi.useFakeTimers();
+  try {
+    let settled = false;
+    const promise = paywall!.redeemDiscount("SLOWLOAD");
+    void promise.then(() => { settled = true; });
+    // Still queued in the presenter — advancing past the window must NOT time out.
+    vi.advanceTimersByTime(20_000);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    // Iframe becomes ready → presenter posts → SDK arms the timeout NOW.
+    rig.flush();
+    vi.advanceTimersByTime(10_000);
+    await expect(promise).resolves.toEqual({
+      code: "SLOWLOAD",
+      valid: false,
+      reason: "timeout",
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("a second redeemDiscount supersedes the first (older settles, not hangs)", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const first = paywall!.redeemDiscount("A");
+  const second = paywall!.redeemDiscount("B");
+  await expect(first).resolves.toEqual({
+    code: "A",
+    valid: false,
+    reason: "superseded",
+  });
+  rig.emitResult({ code: "B", valid: true, appliedProductCount: 1 });
+  await expect(second).resolves.toEqual({
+    code: "B",
+    valid: true,
+    appliedProductCount: 1,
+  });
+  expect(rig.redeemCodes).toEqual(["A", "B"]);
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("clearDiscount posts an empty code, returns void, and settles a pending redeem", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const pending = paywall!.redeemDiscount("SUMMER20");
+  expect(paywall!.clearDiscount()).toBeUndefined();
+  expect(rig.redeemCodes).toEqual(["SUMMER20", ""]);
+  await expect(pending).resolves.toEqual({
+    code: "SUMMER20",
+    valid: false,
+    reason: "superseded",
+  });
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("dismissal settles a pending redeem as { reason: 'paywall_dismissed' }", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const pending = paywall!.redeemDiscount("INFLIGHT");
+  rig.dismiss();
+  await expect(pending).resolves.toEqual({
+    code: "INFLIGHT",
+    valid: false,
+    reason: "paywall_dismissed",
+  });
+  await reg;
+  await sw.dispose();
+});
+
+it("redeemDiscount rejects an empty/whitespace code with DiscountError(empty_code)", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  await expect(paywall!.redeemDiscount("   ")).rejects.toBeInstanceOf(DiscountError);
+  await expect(paywall!.redeemDiscount("   ")).rejects.toMatchObject({ reason: "empty_code" });
+  expect(rig.redeemCodes).toEqual([]);
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("a stale handle rejects with DiscountError(no_paywall_presented) after dismissal", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  rig.dismiss();
+  await reg;
+  // Handle captured while presented; paywall is now gone.
+  await expect(paywall!.redeemDiscount("SUMMER20")).rejects.toMatchObject({
+    reason: "no_paywall_presented",
+  });
+  await sw.dispose();
+});
+
+it("redeemDiscount rejects with DiscountError(unsupported_presenter) when the presenter has no channel", async () => {
+  // A custom presenter without a redeemDiscount method (e.g. an override).
+  const slot: { resolve: ((r: PaywallResult) => void) | null } = { resolve: null };
+  const presenter: PaywallPresenter = {
+    present: (_info, _ctx) => new Promise<PaywallResult>((res) => { slot.resolve = res; }),
+    dismiss: () => slot.resolve?.({ type: "declined" }),
+  };
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  const paywall = await pollValue(() => sw.activePaywall.value);
+  await expect(paywall!.redeemDiscount("SUMMER20")).rejects.toMatchObject({
+    reason: "unsupported_presenter",
+  });
+  slot.resolve?.({ type: "declined" });
+  await reg;
+  await sw.dispose();
+});
+
+it("discount_redemption_result fires as a public event for paywall-initiated redemptions", async () => {
+  const { sw, reg, rig } = await presentWithDiscounts();
+  const seen: DiscountRedemptionResult[] = [];
+  sw.events.addEventListener("discount_redemption_result", (e) => seen.push(e.detail));
+  // No SDK-initiated redeem is pending — this is an in-paywall button result.
+  rig.emitResult({ code: "BUTTON50", valid: true, appliedProductCount: 3 });
+  await pollValue(() => (seen.length > 0 ? seen : null));
+  expect(seen).toEqual([{ code: "BUTTON50", valid: true, appliedProductCount: 3 }]);
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("discount_redemption_result bridges to the delegate", async () => {
+  const rig = controllablePresenter();
+  const seen: DiscountRedemptionResult[] = [];
+  const delegate: SuperwallDelegate = {
+    onDiscountRedemptionResult: (r) => seen.push(r),
+  };
+  const sw = makeWithPaywall({ presenter: rig.presenter, delegate });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() => sw.activePaywall.value);
+  rig.emitResult({ code: "DLG", valid: false, reason: "code_invalid" });
+  await pollValue(() => (seen.length > 0 ? seen : null));
+  expect(seen).toEqual([{ code: "DLG", valid: false, reason: "code_invalid" }]);
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
