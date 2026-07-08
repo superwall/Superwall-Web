@@ -6,6 +6,7 @@ import { Array as Arr, Effect, Layer, ManagedRuntime, Match, Option, Stream } fr
 import { _clearDefault, _registerDefault } from "./default.ts";
 import { SDK_VERSION } from "./version.ts";
 import {
+  DiscountError,
   NoPresenterRegisteredError,
   NotConfiguredError,
   PaywallAlreadyPresentedError,
@@ -30,6 +31,7 @@ import {
   STORAGE_KEYS,
   type ConfigurationStatus,
   type ConfirmedAssignment,
+  type DiscountRedemptionResult,
   type Entitlement,
   type RedemptionResult,
   type Experiment,
@@ -236,6 +238,42 @@ export interface EntitlementsNamespace {
   byProductIds(ids: string[]): Entitlement[];
 }
 
+/** Handle to the paywall currently on screen. Obtained via `sw.activePaywall`
+ *  (a `Readable`; `null` when nothing is presented, so a null check is the
+ *  natural "is a paywall up?" guard). Carries the presented paywall's `info`
+ *  plus Stripe promotion-code controls. */
+export interface ActivePaywall {
+  /** The presented paywall's info, captured at present time. */
+  readonly info: PaywallInfo;
+  /**
+   * Apply a Stripe promotion code to the presented paywall. Validates the code
+   * against the checkout backend, re-prices the paywall's Stripe products, and
+   * forwards the code to every subsequently created Stripe **web** checkout
+   * session (cached/prefetched sessions are rebuilt automatically).
+   *
+   * Resolves when the paywall replies with a matching result, or after ~10s
+   * with `{ valid: false, reason: "timeout" }` (the paywall does not reply when
+   * it has no Stripe products loaded). Issuing a second `redeemDiscount` while
+   * one is in flight supersedes the older call, which settles with
+   * `{ valid: false, reason: "superseded" }` rather than hanging.
+   *
+   * Rejects with a `DiscountError` for an empty code (use `clearDiscount()`),
+   * when no paywall is presented, or when the active presenter has no message
+   * channel (only the default browser paywall supports discounts).
+   *
+   * Scope: Stripe web checkout only — native/StoreKit purchases are never
+   * affected, and Apple Pay is automatically bypassed while a discount is
+   * applied. The discount does NOT survive dismissal: re-call after each
+   * presentation.
+   */
+  redeemDiscount(code: string): Promise<DiscountRedemptionResult>;
+  /** Remove an applied discount (restores prices, re-enables Apple Pay).
+   *  Fire-and-forget: the paywall sends no acknowledgment for the clear path,
+   *  so this returns immediately and settles any in-flight `redeemDiscount()`
+   *  as superseded. */
+  clearDiscount(): void;
+}
+
 export interface Superwall {
   readonly apiKey: string;
   readonly ready: Promise<void>;
@@ -263,6 +301,10 @@ export interface Superwall {
   readonly entitlementsToken: Readable<string | null>;
   readonly latestPaywallInfo: Readable<PaywallInfo | null>;
   readonly isPaywallPresented: Readable<boolean>;
+  /** The paywall currently on screen, or `null` when none is presented.
+   *  Reactive — subscribe to observe present/dismiss. Carries the paywall's
+   *  `info` plus Stripe discount controls (`redeemDiscount` / `clearDiscount`). */
+  readonly activePaywall: Readable<ActivePaywall | null>;
 
   readonly events: SuperwallEventTarget;
 
@@ -651,6 +693,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const lastPaywallViewAtSig = createSignal<number | null>(null);
   const latestPaywallSig = createSignal<PaywallInfo | null>(null);
   const presentedSig = createSignal<boolean>(false);
+  const activePaywallSig = createSignal<ActivePaywall | null>(null);
   const configuredSig = createSignal<boolean>(false);
   const statusSig = createSignal<ConfigurationStatus>("pending");
   const logLevelSig = createSignal<LogLevel>(opts.options?.logging?.level ?? "warn");
@@ -757,6 +800,34 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             logViaRuntime(
               "paywallEvents",
               "delegate.onPaywallWillOpenDeepLink threw",
+              cause,
+            ),
+        ),
+      );
+    });
+
+    // Discount redemption results: resolve a matching in-flight
+    // redeemDiscount() AND bridge to the delegate. Fires for SDK-initiated
+    // redemptions and for in-paywall "Redeem Discount" button redemptions —
+    // only results whose code matches the pending SDK call settle it; the
+    // rest are informational.
+    target.addEventListener("discount_redemption_result", (e) => {
+      const result = e.detail;
+      if (
+        pendingDiscountRedeem &&
+        result.code.trim() === pendingDiscountRedeem.code
+      ) {
+        settlePendingDiscount(result);
+      }
+      runFireAndForget(
+        "paywallEvents",
+        "discount_redemption_result bridge effect failed",
+        bus.withDelegate(
+          (d) => d.onDiscountRedemptionResult?.(result),
+          (cause) =>
+            logViaRuntime(
+              "paywallEvents",
+              "delegate.onDiscountRedemptionResult threw",
               cause,
             ),
         ),
@@ -1769,6 +1840,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
         // Track the active presenter so sw.dismiss() can force-close it.
         activePresenter = presenter;
+        // Publish the active-paywall handle (null while nothing is presented).
+        // Discount controls delegate to the shared impls, which re-check
+        // presentation state so a stale handle can't act after dismissal.
+        activePaywallSig.set({
+          info,
+          redeemDiscount: (code) => redeemDiscountViaPaywall(code),
+          clearDiscount: () => clearDiscountViaPaywall(),
+        });
         let result: PaywallResult;
         try {
           result = await presenter.present(info, ctx);
@@ -1801,6 +1880,16 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         } finally {
           currentAbort = null;
           activePresenter = null;
+          activePaywallSig.set(null);
+          // A dangling redeem can't get a result once the paywall is gone —
+          // settle it as dismissed (not "superseded": nothing replaced it).
+          if (pendingDiscountRedeem) {
+            settlePendingDiscount({
+              code: pendingDiscountRedeem.code,
+              valid: false,
+              reason: "paywall_dismissed",
+            });
+          }
           pendingCloseReason = null;
         }
 
@@ -2068,6 +2157,107 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   ): (() => void) => {
     paywallPurchaseEventHandlers.add(handler);
     return () => paywallPurchaseEventHandlers.delete(handler);
+  };
+
+  // ---- Stripe discount (promotion code) redemption ---------------------
+  // How long a `redeemDiscount()` waits for the paywall's
+  // `discount_redemption_result` before resolving as `timeout`. The paywall's
+  // backend call has its own retry/backoff inside this budget. A timeout also
+  // covers the paywall-side gap where a paywall with no Stripe products loaded
+  // warns and returns WITHOUT posting a result.
+  const DISCOUNT_REDEEM_TIMEOUT_MS = 10_000;
+  /** The single in-flight `redeemDiscount()` awaiting a matching result. Only
+   *  one slot: a newer redeem supersedes the older (the paywall discards the
+   *  stale request via its own generation counter, so the old promise would
+   *  otherwise hang). Keyed by trimmed code for result matching. `timer` is
+   *  null until the presenter reports the code was actually posted to the
+   *  iframe — a pre-ready redeem stays queued in the presenter, and arming the
+   *  timeout at enqueue time would let a slow load time out a code that then
+   *  applies late. */
+  interface PendingDiscount {
+    code: string;
+    resolve: (r: DiscountRedemptionResult) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+  }
+  let pendingDiscountRedeem: PendingDiscount | null = null;
+
+  const settlePendingDiscount = (result: DiscountRedemptionResult): void => {
+    const pending = pendingDiscountRedeem;
+    if (!pending) return;
+    pendingDiscountRedeem = null;
+    if (pending.timer !== null) clearTimeout(pending.timer);
+    pending.resolve(result);
+  };
+
+  const redeemDiscountViaPaywall = (
+    code: string,
+  ): Promise<DiscountRedemptionResult> => {
+    const trimmed = code.trim();
+    if (trimmed === "") {
+      return Promise.reject(
+        new DiscountError(
+          "empty_code",
+          "redeemDiscount() requires a non-empty code; call clearDiscount() to remove an applied discount.",
+        ),
+      );
+    }
+    if (!presentedSig.value || !activePresenter) {
+      return Promise.reject(
+        new DiscountError(
+          "no_paywall_presented",
+          "No paywall is presented; redeemDiscount() requires an active paywall.",
+        ),
+      );
+    }
+    if (!activePresenter.redeemDiscount) {
+      return Promise.reject(
+        new DiscountError(
+          "unsupported_presenter",
+          "The active presenter does not support discounts (only the default browser paywall does).",
+        ),
+      );
+    }
+    // Supersede any in-flight redeem so its promise settles instead of hanging
+    // (the paywall will discard that stale request's result).
+    if (pendingDiscountRedeem) {
+      settlePendingDiscount({
+        code: pendingDiscountRedeem.code,
+        valid: false,
+        reason: "superseded",
+      });
+    }
+    const presenter = activePresenter;
+    return new Promise<DiscountRedemptionResult>((resolve) => {
+      const entry: PendingDiscount = { code: trimmed, resolve, timer: null };
+      pendingDiscountRedeem = entry;
+      // Arm the timeout only once the presenter actually posts the code to the
+      // iframe (immediately if ready, or on flush for a pre-ready redeem). This
+      // closes the race where a slow iframe load times out a still-queued code
+      // that then applies late. Guard on identity so a stale onPosted (from a
+      // superseded/cleared redeem) can't arm a timer for the wrong entry.
+      const armTimeout = () => {
+        if (pendingDiscountRedeem !== entry) return;
+        entry.timer = setTimeout(() => {
+          if (pendingDiscountRedeem === entry) {
+            settlePendingDiscount({ code: trimmed, valid: false, reason: "timeout" });
+          }
+        }, DISCOUNT_REDEEM_TIMEOUT_MS);
+      };
+      presenter.redeemDiscount!(trimmed, armTimeout);
+    });
+  };
+
+  const clearDiscountViaPaywall = (): void => {
+    // Fire-and-forget: the paywall sends NO ack for the clear path, so we never
+    // await one. Settle any in-flight redeem — its result won't arrive now.
+    if (pendingDiscountRedeem) {
+      settlePendingDiscount({
+        code: pendingDiscountRedeem.code,
+        valid: false,
+        reason: "superseded",
+      });
+    }
+    activePresenter?.redeemDiscount?.("");
   };
 
   // Build the PurchaseController. Default = automatic (handles standard
@@ -2437,6 +2627,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     entitlementsToken: asReadable(entitlementsTokenSig),
     latestPaywallInfo: asReadable(latestPaywallSig),
     isPaywallPresented: asReadable(presentedSig),
+    activePaywall: asReadable(activePaywallSig),
 
     events: target,
 

@@ -17,6 +17,7 @@ export {
 } from "./events.ts";
 export {
   createSuperwall,
+  type ActivePaywall,
   type CreateSuperwallOptions,
   type Superwall,
   type UserNamespace,

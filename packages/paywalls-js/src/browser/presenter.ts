@@ -2,6 +2,7 @@
 // Mounts an iframe overlay and bridges the v1 postMessage contract (API.md §7.2).
 
 import type {
+  DiscountRedemptionResult,
   PaywallInfo,
   PaywallPresentationStyle,
   PaywallResult,
@@ -97,6 +98,24 @@ export const createBrowserPresenter = (
     a.resolve({ type: "declined" });
   };
 
+  const redeemDiscount: NonNullable<PaywallPresenter["redeemDiscount"]> = (
+    code,
+    onPosted,
+  ) => {
+    const a = active;
+    // The SDK guards on presentation state before calling; no active paywall
+    // here means the presentation was torn down mid-call — drop it.
+    if (a === null) return;
+    if (!a.ready) {
+      // Iframe hasn't asked for templates yet — queue and flush on ready.
+      a.pendingDiscountCode = code;
+      a.pendingDiscountOnPosted = onPosted ?? null;
+      return;
+    }
+    postRedeemDiscount(a, code);
+    onPosted?.();
+  };
+
   /** Warm a paywall by firing a hidden iframe. The iframe is removed once
    *  the URL has loaded — bytes stay in the browser HTTP cache so the next
    *  `present(info)` for the same URL avoids the network round-trip.
@@ -148,7 +167,7 @@ export const createBrowserPresenter = (
       }
     });
 
-  return { present, dismiss, preload };
+  return { present, dismiss, redeemDiscount, preload };
 };
 
 interface ActivePresentation {
@@ -159,6 +178,17 @@ interface ActivePresentation {
   readonly keydownListener: (e: KeyboardEvent) => void;
   readonly resolve: (r: PaywallResult) => void;
   readonly ctx: PresentationContext;
+  /** Set once the iframe has requested its templates (`ping` /
+   *  `template_params_and_user_attributes`) — i.e. it's mounted and ready to
+   *  accept host commands like `redeem_discount`. */
+  ready: boolean;
+  /** Discount code requested before `ready`, flushed once the iframe asks for
+   *  templates. `null` = nothing queued; `""` = a queued clear. Only the most
+   *  recent matters (the paywall replaces an applied code atomically). */
+  pendingDiscountCode: string | null;
+  /** `onPosted` callback paired with `pendingDiscountCode`, fired when the
+   *  queued code is actually written to the iframe on flush. */
+  pendingDiscountOnPosted: (() => void) | null;
 }
 
 const resolveContainer = (
@@ -585,6 +615,9 @@ const mount = (
     keydownListener: onKeydown,
     resolve,
     ctx,
+    ready: false,
+    pendingDiscountCode: null,
+    pendingDiscountOnPosted: null,
   };
   slot.a = a;
   return a;
@@ -703,6 +736,17 @@ const handleInbound = (
       case "ping":
       case "template_params_and_user_attributes": {
         sendTemplates(info, ctx, active);
+        // The iframe is now mounted + ready for host commands. Flush any
+        // discount redeem queued before this point (latest wins).
+        active.ready = true;
+        if (active.pendingDiscountCode !== null) {
+          const pending = active.pendingDiscountCode;
+          const onPosted = active.pendingDiscountOnPosted;
+          active.pendingDiscountCode = null;
+          active.pendingDiscountOnPosted = null;
+          postRedeemDiscount(active, pending);
+          onPosted?.();
+        }
         break;
       }
       case "close": {
@@ -891,6 +935,25 @@ const handleInbound = (
         ctx.emit("paywallWillOpenDeepLink", { url: link });
         break;
       }
+      // Result of a `redeem_discount` command — from the SDK OR an in-paywall
+      // "Redeem Discount" button. Surfaced as a public informational event; the
+      // SDK matches it to a pending `redeemDiscount()` by code. The clear path
+      // (empty code) is NOT acknowledged, so no result arrives for it.
+      case "discount_redemption_result": {
+        const code = readString(evt, "code") ?? "";
+        const valid = evt["valid"] === true;
+        const detail: DiscountRedemptionResult = { code, valid };
+        if (valid) {
+          const apc = evt["appliedProductCount"];
+          if (typeof apc === "number") detail.appliedProductCount = apc;
+        } else {
+          // `reason` is an open union — forward any paywall value verbatim.
+          const reason = readString(evt, "reason");
+          if (reason !== null) detail.reason = reason;
+        }
+        ctx.emit("discount_redemption_result", detail);
+        break;
+      }
       case "custom_placement": {
         // paywall_info is the ACTIVE paywall, captured at present() time.
         const placementName =
@@ -1025,6 +1088,13 @@ const sendTemplates = (
       { event_name: "page_styles", pageStyles: [] },
     ]);
   }
+};
+
+/** Push a `redeem_discount` command to the iframe over the accept64 channel —
+ *  same envelope `template_variables` uses. An empty `code` clears an applied
+ *  discount. */
+const postRedeemDiscount = (a: ActivePresentation, code: string): void => {
+  postAccept64(a, [{ event_name: "redeem_discount", code }]);
 };
 
 const postAccept64 = (a: ActivePresentation, payload: unknown): void => {
