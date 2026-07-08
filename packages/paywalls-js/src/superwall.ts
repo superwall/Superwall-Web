@@ -807,31 +807,35 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     });
 
     // Discount redemption results: resolve a matching in-flight
-    // redeemDiscount() AND bridge to the delegate. Fires for SDK-initiated
-    // redemptions and for in-paywall "Redeem Discount" button redemptions —
-    // only results whose code matches the pending SDK call settle it; the
-    // rest are informational.
-    target.addEventListener("discount_redemption_result", (e) => {
-      const result = e.detail;
+    // redeemDiscount(). The paywall's `discount_redemption_result` postMessage
+    // is split into `discount_redeem_complete` / `discount_redeem_fail` public
+    // events by the presenter; both fire for SDK-initiated redemptions AND
+    // in-paywall "Redeem Discount" button redemptions. We reconstruct the
+    // result and settle the pending call only when the code matches — the rest
+    // are informational (observers use the events / `onEvent` firehose).
+    const settleMatchingDiscount = (result: DiscountRedemptionResult) => {
       if (
         pendingDiscountRedeem &&
         result.code.trim() === pendingDiscountRedeem.code
       ) {
         settlePendingDiscount(result);
       }
-      runFireAndForget(
-        "paywallEvents",
-        "discount_redemption_result bridge effect failed",
-        bus.withDelegate(
-          (d) => d.onDiscountRedemptionResult?.(result),
-          (cause) =>
-            logViaRuntime(
-              "paywallEvents",
-              "delegate.onDiscountRedemptionResult threw",
-              cause,
-            ),
-        ),
-      );
+    };
+    target.addEventListener("discount_redeem_complete", (e) => {
+      settleMatchingDiscount({
+        code: e.detail.code,
+        valid: true,
+        ...(e.detail.appliedProductCount !== undefined && {
+          appliedProductCount: e.detail.appliedProductCount,
+        }),
+      });
+    });
+    target.addEventListener("discount_redeem_fail", (e) => {
+      settleMatchingDiscount({
+        code: e.detail.code,
+        valid: false,
+        ...(e.detail.reason !== undefined && { reason: e.detail.reason }),
+      });
     });
 
     let prevCustomerInfo = customerSig.value;

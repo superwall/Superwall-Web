@@ -94,10 +94,20 @@ if (paywall) {
 
 // React to results — including in-paywall "Redeem Discount" button redemptions:
 sw.activePaywall.subscribe((p) => { /* present / dismiss */ });
-sw.events.addEventListener("discount_redemption_result", (e) => {
-  console.log(e.detail);                         // { code, valid, reason?, appliedProductCount? }
+sw.events.addEventListener("discount_redeem_complete", (e) => {
+  console.log(e.detail);                         // { code, appliedProductCount?, paywall_info }
+});
+sw.events.addEventListener("discount_redeem_fail", (e) => {
+  console.log(e.detail);                         // { code, reason?, paywall_info }
 });
 ```
+
+Redemptions surface as the wire-bound `discount_redeem_complete` /
+`discount_redeem_fail` events (mirroring `transaction_complete` /
+`transaction_fail`) — they POST to the collector for analytics, hit the
+`onEvent` delegate firehose, and carry `$presentation_id` auto-context so you
+can correlate a redemption to its paywall session. They fire for SDK-initiated
+redeems **and** in-paywall button redemptions, including failed attempts.
 
 - **`redeemDiscount(code)`** validates the code against the checkout backend,
   re-prices the paywall's Stripe products, and forwards the code to every
@@ -156,9 +166,6 @@ const delegate = {
   onPaywallWillOpenURL(url) {},
   onPaywallWillOpenDeepLink(url) {},          // you route it into your app
 
-  // discounts (Stripe promotion codes)
-  onDiscountRedemptionResult(result) {},      // fires for SDK + in-paywall redemptions
-
   // misc
   onCustomPaywallAction(name) {},
   onLog(level, scope, message, info, error) {},
@@ -170,7 +177,8 @@ Or subscribe to the typed event bus directly:
 ```ts
 sw.events.addEventListener("transaction_complete", (e) => { ... });
 // paywall_open, paywall_close, transaction_start/complete/abandon/fail,
-// subscription_start, trigger_fire, restore_*, discount_redemption_result, …
+// subscription_start, trigger_fire, restore_*,
+// discount_redeem_complete/fail, …
 ```
 
 ## License

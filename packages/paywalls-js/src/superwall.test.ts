@@ -201,58 +201,58 @@ const make = (override: Partial<Parameters<typeof createSuperwall>[0]> = {}): Su
  *  with a "checkout" placement → "pw_default" paywall. Used by tests that
  *  rely on register() actually presenting (formerly via the now-deleted
  *  stub fallback). */
+/** Minimal real static_config with a "checkout" placement → "pw_default"
+ *  paywall. Shared by makeWithPaywall + tests that need a recording fetch. */
+const CHECKOUT_STATIC_CONFIG = {
+  build_id: "test_build",
+  trigger_options: [
+    {
+      event_name: "checkout",
+      rules: [
+        {
+          experiment_id: "exp_checkout",
+          experiment_group_id: "grp_test",
+          expression_cel: "",
+          variants: [
+            {
+              variant_id: "var_default",
+              variant_type: "TREATMENT",
+              percentage: 100,
+              paywall_identifier: "pw_default",
+            },
+          ],
+        },
+      ],
+    },
+  ],
+  paywall_responses: [
+    {
+      identifier: "pw_default",
+      name: "Default",
+      url: "https://paywalls.superwall.test/pw_default",
+    },
+  ],
+  products: [
+    {
+      sw_composite_product_id: "pro_yearly",
+      store_product: {
+        store: "STRIPE",
+        product_identifier: "pro_yearly",
+      },
+      entitlements: [{ identifier: "pro", type: "SERVICE_LEVEL" }],
+    },
+  ],
+  toggles: [],
+  localization: { locales: [{ locale: "en-US" }] },
+};
+
 const makeWithPaywall = (
   override: Partial<Parameters<typeof createSuperwall>[0]> = {},
 ): Superwall => {
   const fakeFetch = ((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("/api/v1/static_config")) {
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            build_id: "test_build",
-            trigger_options: [
-              {
-                event_name: "checkout",
-                rules: [
-                  {
-                    experiment_id: "exp_checkout",
-                    experiment_group_id: "grp_test",
-                    expression_cel: "",
-                    variants: [
-                      {
-                        variant_id: "var_default",
-                        variant_type: "TREATMENT",
-                        percentage: 100,
-                        paywall_identifier: "pw_default",
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-            paywall_responses: [
-              {
-                identifier: "pw_default",
-                name: "Default",
-                url: "https://paywalls.superwall.test/pw_default",
-              },
-            ],
-            products: [
-              {
-                sw_composite_product_id: "pro_yearly",
-                store_product: {
-                  store: "STRIPE",
-                  product_identifier: "pro_yearly",
-                },
-                entitlements: [{ identifier: "pro", type: "SERVICE_LEVEL" }],
-              },
-            ],
-            toggles: [],
-            localization: { locales: [{ locale: "en-US" }] },
-          }),
-        ),
-      );
+      return Promise.resolve(new Response(JSON.stringify(CHECKOUT_STATIC_CONFIG)));
     }
     if (url.includes("/api/v1/enrich")) {
       return Promise.resolve(
@@ -2358,12 +2358,14 @@ import type { DiscountRedemptionResult } from "./types.ts";
  *  call `flush()` to post + arm the SDK timeout). */
 const controllablePresenter = (postMode: "immediate" | "manual" = "immediate") => {
   let ctxRef: PresentationContext | null = null;
+  let infoRef: PaywallInfo | null = null;
   const redeemCodes: string[] = [];
   let resolvePresent: ((r: PaywallResult) => void) | null = null;
   let queuedOnPosted: (() => void) | null = null;
   const presenter: PaywallPresenter = {
-    present: (_info, ctx) => {
+    present: (info, ctx) => {
       ctxRef = ctx;
+      infoRef = info;
       return new Promise<PaywallResult>((res) => {
         resolvePresent = res;
       });
@@ -2384,8 +2386,25 @@ const controllablePresenter = (postMode: "immediate" | "manual" = "immediate") =
       queuedOnPosted = null;
       cb?.();
     },
-    emitResult: (detail: DiscountRedemptionResult) =>
-      ctxRef?.emit("discount_redemption_result", detail),
+    /** Simulate the paywall posting a result — the presenter splits it into
+     *  the public discount_redeem_complete / discount_redeem_fail events. */
+    emitResult: (detail: DiscountRedemptionResult) => {
+      if (detail.valid) {
+        ctxRef?.emit("discount_redeem_complete", {
+          code: detail.code,
+          paywall_info: infoRef!,
+          ...(detail.appliedProductCount !== undefined && {
+            appliedProductCount: detail.appliedProductCount,
+          }),
+        });
+      } else {
+        ctxRef?.emit("discount_redeem_fail", {
+          code: detail.code,
+          paywall_info: infoRef!,
+          ...(detail.reason !== undefined && { reason: detail.reason }),
+        });
+      }
+    },
     dismiss: () => resolvePresent?.({ type: "declined" }),
   };
 };
@@ -2609,32 +2628,80 @@ it("redeemDiscount rejects with DiscountError(unsupported_presenter) when the pr
   await sw.dispose();
 });
 
-it("discount_redemption_result fires as a public event for paywall-initiated redemptions", async () => {
-  const { sw, reg, rig } = await presentWithDiscounts();
-  const seen: DiscountRedemptionResult[] = [];
-  sw.events.addEventListener("discount_redemption_result", (e) => seen.push(e.detail));
+it("discount_redeem_complete fires as a public event for paywall-initiated redemptions", async () => {
+  const { sw, reg, rig, paywall } = await presentWithDiscounts();
+  const seen: Array<Record<string, unknown>> = [];
+  sw.events.addEventListener("discount_redeem_complete", (e) => seen.push(e.detail));
   // No SDK-initiated redeem is pending — this is an in-paywall button result.
   rig.emitResult({ code: "BUTTON50", valid: true, appliedProductCount: 3 });
   await pollValue(() => (seen.length > 0 ? seen : null));
-  expect(seen).toEqual([{ code: "BUTTON50", valid: true, appliedProductCount: 3 }]);
+  expect(seen).toEqual([
+    { code: "BUTTON50", appliedProductCount: 3, paywall_info: paywall!.info },
+  ]);
   rig.dismiss();
   await reg;
   await sw.dispose();
 });
 
-it("discount_redemption_result bridges to the delegate", async () => {
+it("discount_redeem_fail reaches the onEvent firehose (wire-bound analytics)", async () => {
   const rig = controllablePresenter();
-  const seen: DiscountRedemptionResult[] = [];
+  const seen: Array<[string, Record<string, unknown>]> = [];
   const delegate: SuperwallDelegate = {
-    onDiscountRedemptionResult: (r) => seen.push(r),
+    onEvent: (name, detail) => seen.push([name, detail as Record<string, unknown>]),
   };
   const sw = makeWithPaywall({ presenter: rig.presenter, delegate });
   await sw.ready;
   const reg = sw.register({ placement: "checkout" });
   await pollValue(() => sw.activePaywall.value);
   rig.emitResult({ code: "DLG", valid: false, reason: "code_invalid" });
-  await pollValue(() => (seen.length > 0 ? seen : null));
-  expect(seen).toEqual([{ code: "DLG", valid: false, reason: "code_invalid" }]);
+  await pollValue(() =>
+    seen.find(([n]) => n === "discount_redeem_fail") ? seen : null,
+  );
+  const fail = seen.find(([n]) => n === "discount_redeem_fail");
+  expect(fail![1]).toMatchObject({ code: "DLG", reason: "code_invalid" });
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("discount_redeem_complete / _fail POST to the collector with correlation context", async () => {
+  const posted: Array<{ event_name: string; parameters: Record<string, unknown> }> = [];
+  const recordingFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(JSON.stringify(CHECKOUT_STATIC_CONFIG)));
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(new Response(JSON.stringify({ user: {}, device: {} })));
+    }
+    if (url.includes("/api/v1/events") && init?.body) {
+      const parsed = JSON.parse(init.body as string) as { events: typeof posted };
+      posted.push(...parsed.events);
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  const rig = controllablePresenter();
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: recordingFetch,
+    storage: newAdapter(),
+    presenter: rig.presenter,
+  });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() => sw.activePaywall.value);
+  rig.emitResult({ code: "GOOD", valid: true, appliedProductCount: 1 });
+  rig.emitResult({ code: "BAD", valid: false, reason: "code_not_found" });
+  await pollValue(() =>
+    posted.some((e) => e.event_name === "discount_redeem_fail") ? posted : null,
+  );
+  const complete = posted.find((e) => e.event_name === "discount_redeem_complete");
+  const fail = posted.find((e) => e.event_name === "discount_redeem_fail");
+  expect(complete?.parameters).toMatchObject({ code: "GOOD", appliedProductCount: 1 });
+  expect(fail?.parameters).toMatchObject({ code: "BAD", reason: "code_not_found" });
+  // Auto-context threads the presentation id so analytics can correlate the
+  // redemption to the paywall session.
+  expect(complete?.parameters).toHaveProperty("$presentation_id");
   rig.dismiss();
   await reg;
   await sw.dispose();

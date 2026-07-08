@@ -893,11 +893,12 @@ it("clearDiscount (empty code) posts a redeem_discount with an empty code", asyn
   await presentation;
 });
 
-it("discount_redemption_result (valid) is forwarded via ctx.emit", async () => {
+it("discount_redemption_result (valid) emits discount_redeem_complete with paywall_info", async () => {
   const emitted: Array<[string, Record<string, unknown>]> = [];
+  const info = stubInfo("pw_disc");
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
-    stubInfo(),
+    info,
     newCtx({ emit: (name, detail) => emitted.push([name, detail as Record<string, unknown>]) }),
   );
   await tick();
@@ -913,23 +914,26 @@ it("discount_redemption_result (valid) is forwarded via ctx.emit", async () => {
   ]);
   await flushMessages();
 
-  const result = emitted.find(([n]) => n === "discount_redemption_result");
+  const result = emitted.find(([n]) => n === "discount_redeem_complete");
   expect(result).toBeDefined();
   expect(result![1]).toEqual({
     code: "SUMMER20",
-    valid: true,
     appliedProductCount: 2,
+    paywall_info: info,
   });
+  // No fail event on success.
+  expect(emitted.map(([n]) => n)).not.toContain("discount_redeem_fail");
 
   presenter.dismiss();
   await presentation;
 });
 
-it("discount_redemption_result (invalid) forwards code + reason, drops appliedProductCount", async () => {
+it("discount_redemption_result (invalid) emits discount_redeem_fail with code + reason", async () => {
   const emitted: Array<[string, Record<string, unknown>]> = [];
+  const info = stubInfo("pw_disc");
   const presenter = createBrowserPresenter();
   const presentation = presenter.present(
-    stubInfo(),
+    info,
     newCtx({ emit: (name, detail) => emitted.push([name, detail as Record<string, unknown>]) }),
   );
   await tick();
@@ -941,16 +945,18 @@ it("discount_redemption_result (invalid) forwards code + reason, drops appliedPr
       code: "NOPE",
       valid: false,
       reason: "code_not_found",
+      appliedProductCount: 5, // must be ignored on the fail path
     },
   ]);
   await flushMessages();
 
-  const result = emitted.find(([n]) => n === "discount_redemption_result");
+  const result = emitted.find(([n]) => n === "discount_redeem_fail");
   expect(result![1]).toEqual({
     code: "NOPE",
-    valid: false,
     reason: "code_not_found",
+    paywall_info: info,
   });
+  expect(emitted.map(([n]) => n)).not.toContain("discount_redeem_complete");
 
   presenter.dismiss();
   await presentation;
