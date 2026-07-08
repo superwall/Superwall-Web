@@ -16,7 +16,8 @@ export type SuperwallErrorCode =
   | "CONFIG_FETCH"
   | "PRESENTER"
   | "STORAGE"
-  | "PAYWALL_NOT_AVAILABLE";
+  | "PAYWALL_NOT_AVAILABLE"
+  | "DISCOUNT";
 
 export class SuperwallError extends Error {
   // Typed as string on the base so subclass literal tags remain assignable here.
@@ -136,6 +137,22 @@ export class PaywallNotAvailableError extends SuperwallError {
       "PAYWALL_NOT_AVAILABLE",
     );
     this.placement = placement;
+    this.reason = reason;
+  }
+}
+
+/** Thrown by `ActivePaywall.redeemDiscount(...)` for a bad call: an empty code
+ *  (`clearDiscount()` is the way to remove a discount), no paywall presented,
+ *  or an active presenter that doesn't support discounts (only the default
+ *  browser paywall does). A `timeout` / `superseded` outcome is NOT an error —
+ *  it resolves as `{ valid: false, reason }`. */
+export class DiscountError extends SuperwallError {
+  override readonly _tag = "DiscountError" as const;
+  override readonly name = "DiscountError";
+  readonly reason: "empty_code" | "no_paywall_presented" | "unsupported_presenter";
+
+  constructor(reason: DiscountError["reason"], message: string) {
+    super(message, "DISCOUNT");
     this.reason = reason;
   }
 }

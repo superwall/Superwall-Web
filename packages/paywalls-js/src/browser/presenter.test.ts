@@ -746,6 +746,180 @@ it("closeOnBackdrop=false does NOT dismiss on backdrop click", async () => {
   await presentation;
 });
 
+// ---------------------------------------------------------------------------
+// Stripe discount (promotion code) bridge
+// ---------------------------------------------------------------------------
+
+/** Decode the accept64 payloads posted to the iframe into flat event arrays.
+ *  Mirrors `base64UrlOfJson` inverse (URL-safe alphabet, no padding). */
+const decodeAccept64 = (payload: string): Array<Record<string, unknown>> => {
+  const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+  const json = new TextDecoder().decode(
+    Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)),
+  );
+  return JSON.parse(json);
+};
+
+/** Capture accept64 messages the presenter posts into the iframe. happy-dom's
+ *  contentWindow.postMessage is a no-op recorder here. */
+const captureOutbound = (iframe: HTMLIFrameElement): Array<Record<string, unknown>[]> => {
+  const captured: Array<Record<string, unknown>[]> = [];
+  const cw = iframe.contentWindow as unknown as { postMessage: (m: unknown) => void };
+  cw.postMessage = (message: unknown) => {
+    const m = message as { channel?: string; payload?: string };
+    if (m?.channel === "paywall.accept64" && typeof m.payload === "string") {
+      captured.push(decodeAccept64(m.payload));
+    }
+  };
+  return captured;
+};
+
+/** Drive the iframe to "ready" by simulating its template request. */
+const markReady = (iframe: HTMLIFrameElement) =>
+  dispatchFromPaywall(iframe, [
+    { event_name: "template_params_and_user_attributes" },
+  ]);
+
+it("redeemDiscount posts a redeem_discount accept64 message once the iframe is ready", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo(), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  markReady(iframe);
+  await flushMessages();
+
+  const captured = captureOutbound(iframe);
+  presenter.redeemDiscount!("SUMMER20");
+
+  const redeem = captured
+    .flat()
+    .find((e) => e.event_name === "redeem_discount");
+  expect(redeem).toEqual({ event_name: "redeem_discount", code: "SUMMER20" });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("redeemDiscount issued before ready is queued and flushed on the template request", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo(), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const captured = captureOutbound(iframe);
+
+  // Not ready yet — should NOT post immediately.
+  presenter.redeemDiscount!("EARLY10");
+  expect(captured.flat().find((e) => e.event_name === "redeem_discount")).toBeUndefined();
+
+  // Iframe requests templates → ready → queued code flushes.
+  markReady(iframe);
+  await flushMessages();
+  const redeem = captured.flat().find((e) => e.event_name === "redeem_discount");
+  expect(redeem).toEqual({ event_name: "redeem_discount", code: "EARLY10" });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("only the most recent pre-ready redeem is flushed (latest wins)", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo(), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const captured = captureOutbound(iframe);
+
+  presenter.redeemDiscount!("A");
+  presenter.redeemDiscount!("B");
+  markReady(iframe);
+  await flushMessages();
+
+  const redeems = captured.flat().filter((e) => e.event_name === "redeem_discount");
+  expect(redeems).toEqual([{ event_name: "redeem_discount", code: "B" }]);
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("clearDiscount (empty code) posts a redeem_discount with an empty code", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo(), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  markReady(iframe);
+  await flushMessages();
+  const captured = captureOutbound(iframe);
+
+  presenter.redeemDiscount!("");
+  const redeem = captured.flat().find((e) => e.event_name === "redeem_discount");
+  expect(redeem).toEqual({ event_name: "redeem_discount", code: "" });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("discount_redemption_result (valid) is forwarded via ctx.emit", async () => {
+  const emitted: Array<[string, Record<string, unknown>]> = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo(),
+    newCtx({ emit: (name, detail) => emitted.push([name, detail as Record<string, unknown>]) }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+
+  dispatchFromPaywall(iframe, [
+    {
+      event_name: "discount_redemption_result",
+      code: "SUMMER20",
+      valid: true,
+      appliedProductCount: 2,
+    },
+  ]);
+  await flushMessages();
+
+  const result = emitted.find(([n]) => n === "discount_redemption_result");
+  expect(result).toBeDefined();
+  expect(result![1]).toEqual({
+    code: "SUMMER20",
+    valid: true,
+    appliedProductCount: 2,
+  });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("discount_redemption_result (invalid) forwards code + reason, drops appliedProductCount", async () => {
+  const emitted: Array<[string, Record<string, unknown>]> = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo(),
+    newCtx({ emit: (name, detail) => emitted.push([name, detail as Record<string, unknown>]) }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+
+  dispatchFromPaywall(iframe, [
+    {
+      event_name: "discount_redemption_result",
+      code: "NOPE",
+      valid: false,
+      reason: "code_not_found",
+    },
+  ]);
+  await flushMessages();
+
+  const result = emitted.find(([n]) => n === "discount_redemption_result");
+  expect(result![1]).toEqual({
+    code: "NOPE",
+    valid: false,
+    reason: "code_not_found",
+  });
+
+  presenter.dismiss();
+  await presentation;
+});
+
 it("preload(): mounts a hidden iframe and removes it after load", async () => {
   const presenter = createBrowserPresenter();
   const info = {

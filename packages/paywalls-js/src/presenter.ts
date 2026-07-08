@@ -193,6 +193,16 @@ export interface PaywallPresenter {
   /** Force-dismiss the active paywall; the in-flight `present` should resolve. */
   dismiss(reason?: string): void;
 
+  /** Optional: forward a Stripe promotion-code redeem to the presented paywall
+   *  over the message bridge. An empty string clears a previously applied
+   *  discount. Fire-and-forget — the paywall replies asynchronously with a
+   *  `discount_redemption_result` message (surfaced through `ctx.emit`). The
+   *  presenter is responsible for queuing a redeem issued before the paywall
+   *  signals it's ready and flushing it once ready. No-op for presenters
+   *  without a live message channel (custom renderers, overrides); the SDK
+   *  rejects `redeemDiscount()` when this is absent. */
+  redeemDiscount?(code: string): void;
+
   /** Optional: warm a paywall before it's needed. */
   preload?(info: PaywallInfo): Promise<void>;
 }

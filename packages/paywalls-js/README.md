@@ -74,6 +74,58 @@ if (sw.subscriptionStatus.value.status === "ACTIVE") showPro();
 > server resources with [`@superwall/server`](https://www.npmjs.com/package/@superwall/server)
 > or [`@superwall/verify`](https://www.npmjs.com/package/@superwall/verify).
 
+## Discounts (Stripe promotion codes)
+
+While a paywall is presented, `sw.activePaywall` is a reactive handle
+(`null` when nothing is up) that lets the host page apply a Stripe promotion
+code programmatically — e.g. from a `?promo=SUMMER20` URL param or your own
+redemption UI. (Paywall designers can also build fully in-paywall redemption
+with a text input + a "Redeem Discount" action, which needs no SDK code.)
+
+```ts
+const paywall = sw.activePaywall.value;         // null when no paywall is presented
+if (paywall) {
+  const result = await paywall.redeemDiscount("SUMMER20");
+  // { code, valid, reason?, appliedProductCount? }
+  if (result.valid) showDiscountApplied(result.appliedProductCount);
+
+  paywall.clearDiscount();                       // remove it (fire-and-forget)
+}
+
+// React to results — including in-paywall "Redeem Discount" button redemptions:
+sw.activePaywall.subscribe((p) => { /* present / dismiss */ });
+sw.events.addEventListener("discount_redemption_result", (e) => {
+  console.log(e.detail);                         // { code, valid, reason?, appliedProductCount? }
+});
+```
+
+- **`redeemDiscount(code)`** validates the code against the checkout backend,
+  re-prices the paywall's Stripe products, and forwards the code to every
+  subsequent Stripe **web** checkout session. Resolves with the result, or after
+  ~10s with `{ valid: false, reason: "timeout" }`. A second call supersedes an
+  in-flight one (`reason: "superseded"`). Rejects with a `DiscountError` on an
+  empty code (use `clearDiscount()`), when no paywall is presented, or when a
+  custom presenter has no message channel. Invalid `reason`s from the paywall:
+  `code_not_found`, `code_invalid`, `no_valid_products`,
+  `no_applicable_products`, `error`.
+- **`clearDiscount()`** removes an applied discount (restores prices, re-enables
+  Apple Pay). Fire-and-forget — the paywall doesn't acknowledge the clear.
+
+**Scope:** Stripe web checkout only — native/StoreKit purchases are never
+affected, and Apple Pay is automatically bypassed while a discount is applied
+(the deferred Apple Pay quote flow can't carry a promotion code). The discount
+does **not** survive dismissal — re-call `redeemDiscount(...)` after each
+presentation (subscribe to `sw.activePaywall` or the `paywall_open` event).
+
+For paywall designers, discount state is exposed to templates as
+`products.{ref}.discountedPrice`, `originalPrice`, `hasDiscount`,
+`discountDuration` (`"forever" | "once" | "repeating"`),
+`discountDurationInMonths`, `discountPercentOff`, plus paywall-level
+`state.hasAppliedDiscount` / `state.appliedDiscountCode`. Note `price`/`rawPrice`
+are only rewritten for `forever` coupons — `once`/`repeating` keep the recurring
+price and expose `discountedPrice` separately so templates don't overstate the
+discount.
+
 ## Identity
 
 ```ts
@@ -102,6 +154,9 @@ const delegate = {
   onPaywallWillOpenURL(url) {},
   onPaywallWillOpenDeepLink(url) {},          // you route it into your app
 
+  // discounts (Stripe promotion codes)
+  onDiscountRedemptionResult(result) {},      // fires for SDK + in-paywall redemptions
+
   // misc
   onCustomPaywallAction(name) {},
   onLog(level, scope, message, info, error) {},
@@ -113,7 +168,7 @@ Or subscribe to the typed event bus directly:
 ```ts
 sw.events.addEventListener("transaction_complete", (e) => { ... });
 // paywall_open, paywall_close, transaction_start/complete/abandon/fail,
-// subscription_start, trigger_fire, restore_*, …
+// subscription_start, trigger_fire, restore_*, discount_redemption_result, …
 ```
 
 ## License

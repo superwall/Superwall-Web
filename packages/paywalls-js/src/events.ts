@@ -4,6 +4,7 @@
 import type {
   ConfirmedAssignment,
   CustomerInfo,
+  DiscountRedemptionResult,
   IntegrationAttribute,
   JsonValue,
   PaywallCloseReason,
@@ -185,6 +186,11 @@ export interface LocalSuperwallEventMap {
   /** Paywall asked to follow a deep link. Bridged to
    *  `SuperwallDelegate.onPaywallWillOpenDeepLink`. */
   paywallWillOpenDeepLink: { url: string };
+  /** Result of a Stripe promotion-code redemption in the presented paywall.
+   *  Fires for SDK-initiated `redeemDiscount(...)` calls AND for in-paywall
+   *  "Redeem Discount" button redemptions. Informational — never POSTed to the
+   *  collector. Bridged to `SuperwallDelegate.onDiscountRedemptionResult`. */
+  discount_redemption_result: DiscountRedemptionResult;
 }
 
 export type AllSuperwallEvents = SuperwallEventMap & LocalSuperwallEventMap;
@@ -286,6 +292,12 @@ export interface SuperwallDelegate {
   onWillRedeemLink?(): void;
   onDidRedeemLink?(result: RedemptionResult): void;
 
+  /** A Stripe promotion code was redeemed (or cleared) in the presented
+   *  paywall — via `ActivePaywall.redeemDiscount(...)` OR an in-paywall
+   *  "Redeem Discount" button. Sibling to the `discount_redemption_result`
+   *  event. */
+  onDiscountRedemptionResult?(result: DiscountRedemptionResult): void;
+
   // logging
   onLog?(
     level: "debug" | "info" | "warn" | "error" | "none",
@@ -307,4 +319,5 @@ export interface SuperwallDelegate {
 export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEventMap>([
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
+  "discount_redemption_result",
 ]);

@@ -21,6 +21,7 @@ export type PaywallOutgoingMessage =
   | StripeCheckoutFailMessage
   | StripeCheckoutAbandonMessage
   | PostCheckoutCompleteMessage
+  | DiscountRedemptionResultMessage
   | OpenUrlMessage
   | OpenUrlExternalMessage
   | OpenDeepLinkMessage
@@ -119,6 +120,23 @@ export interface PostCheckoutCompleteMessage {
   entitlements_token?: string;
 }
 
+/** Result of a `redeem_discount` command, posted by the paywall's discount
+ *  controller after it validates the code against the checkout backend and
+ *  re-prices its Stripe products. Also fires for in-paywall "Redeem Discount"
+ *  button redemptions the SDK didn't initiate — treat those as informational.
+ *  `reason` is present only when `valid` is false; `appliedProductCount` only
+ *  when `valid` is true. The clear path (empty `redeem_discount` code) sends NO
+ *  result. */
+export interface DiscountRedemptionResultMessage {
+  event_name: "discount_redemption_result";
+  code: string;
+  valid: boolean;
+  /** One of: code_not_found | code_invalid | no_valid_products |
+   *  no_applicable_products | error. */
+  reason?: string;
+  appliedProductCount?: number;
+}
+
 export interface OpenUrlMessage {
   event_name: "open_url";
   url: string;
@@ -143,6 +161,18 @@ export interface CustomPlacementMessage {
 
 /** Incoming = host (this SDK) → paywall iframe. Wrapped in a v1 envelope and
  *  base64url-encoded into `paywall.accept64`. See API.md §7.2. */
+
+/** Apply/clear a Stripe promotion code on the presented paywall. Carried as an
+ *  event inside a `paywall.accept64` array (same channel as `template_variables`).
+ *  The paywall trims the code, validates it against the checkout backend, and
+ *  re-prices its Stripe products, then replies with a
+ *  `discount_redemption_result`. An empty/whitespace-only `code` clears a
+ *  previously applied discount (restores prices, re-enables Apple Pay) and is
+ *  NOT acknowledged with a result. */
+export interface RedeemDiscountMessage {
+  event_name: "redeem_discount";
+  code: string;
+}
 
 export interface V1Envelope<T = unknown> {
   version: 1;

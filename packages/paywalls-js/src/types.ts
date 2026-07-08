@@ -249,6 +249,36 @@ export type RedemptionResult =
       code: string;
     };
 
+/** Why a Stripe promotion-code redemption was rejected. The first five come
+ *  from the paywall runtime's validation of the code against the checkout
+ *  backend; `timeout` and `superseded` are synthesized by the SDK (no paywall
+ *  response arrived within the redeem window, or a newer redeem replaced this
+ *  one). */
+export type DiscountRedemptionReason =
+  | "code_not_found"
+  | "code_invalid"
+  | "no_valid_products"
+  | "no_applicable_products"
+  | "error"
+  | "timeout"
+  | "superseded";
+
+/** Result of applying a Stripe promotion code to the presented paywall.
+ *  Mirrors the paywall runtime's `discount_redemption_result` message. Returned
+ *  by `ActivePaywall.redeemDiscount(...)` and surfaced on `sw.events`
+ *  (`discount_redemption_result`) + `SuperwallDelegate.onDiscountRedemptionResult`
+ *  — the event fires for in-paywall "Redeem Discount" button redemptions too,
+ *  not only SDK-initiated ones. */
+export interface DiscountRedemptionResult {
+  /** The trimmed code the result refers to. */
+  code: string;
+  valid: boolean;
+  /** Present only when `valid` is false. */
+  reason?: DiscountRedemptionReason;
+  /** Number of Stripe products re-priced. Present only when `valid` is true. */
+  appliedProductCount?: number;
+}
+
 /** Why a paywall closed. */
 export type PaywallCloseReason =
   | "systemLogic"
