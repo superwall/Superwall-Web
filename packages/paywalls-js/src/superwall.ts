@@ -58,6 +58,7 @@ import {
   type TriggerResult,
   type UserAttributes,
   type CustomerInfo,
+  type Web2AppPostPurchaseTargets,
 } from "./types.ts";
 import { asPresentationId, asStorageKey, type PresentationId } from "./internal/brands.ts";
 import {
@@ -425,9 +426,12 @@ interface InitPayloadInput {
     sdkVersion: string;
     collector: string;
     apiBase: string;
-    clientSurface: "web-sdk";
+    clientSurface: "web-sdk" | "web-app-sdk";
     hostOrigin?: string;
     cancelUrl?: string;
+    /** web-app-sdk only — origin of the app's web paywall subdomain, threaded
+     *  into `#init=` so the controller keys post-checkout redemption on it. */
+    webPaywallBaseUrl?: string;
   };
   aliasId: string | undefined;
   appUserId: string | undefined;
@@ -436,6 +440,50 @@ interface InitPayloadInput {
   userAttributes: Record<string, unknown>;
   deviceAttributes: Record<string, unknown>;
 }
+
+/** Post-purchase host-page navigation for the web-app-sdk (web2app) surface.
+ *  Runs AFTER merchant purchase-event handlers so they observe the result
+ *  first. Priority: `web2app.postPurchase` option > merchant-configured
+ *  redirect from the BE > hosted redeem page.
+ *  Exported for tests. */
+export const navigateAfterWeb2AppPurchase = (
+  targets: Web2AppPostPurchaseTargets,
+  // Structurally `Web2AppOptions["postPurchase"]`, loosened to the
+  // `DeepPartial` shape `PartialSuperwallOptions` delivers (`url` optional).
+  option:
+    | "default"
+    | "none"
+    | { url?: string }
+    | ((targets: Web2AppPostPurchaseTargets) => boolean | void)
+    | undefined,
+): void => {
+  if (option === "none") return;
+  if (typeof option === "function") {
+    let result: boolean | void;
+    try {
+      result = option(targets);
+    } catch (error) {
+      // Merchant handler threw: treat as handled (don't navigate on top of
+      // whatever half-finished state their code left), but surface it.
+      console.warn("[Superwall] web2app.postPurchase handler threw", error);
+      return;
+    }
+    // Contract: `false` = "not handled, do the default"; anything else
+    // (void/true) = handled by the merchant.
+    if (result !== false) return;
+  }
+  const overrideUrl =
+    typeof option === "object" && option !== null ? option.url : undefined;
+  const target = overrideUrl ?? targets.redirectUrl ?? targets.redemptionUrl;
+  if (!target) return;
+  const loc = (globalThis as { location?: { href?: string } }).location;
+  if (!loc) return;
+  try {
+    loc.href = target;
+  } catch (error) {
+    console.warn("[Superwall] post-purchase navigation failed", { target, error });
+  }
+};
 
 const randomUuid = (): string => {
   if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -561,6 +609,9 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
     hostOrigin: bootstrap.hostOrigin ?? "",
     cancelUrl: bootstrap.cancelUrl ?? bootstrap.hostOrigin ?? "",
     apiBase: bootstrap.apiBase,
+    ...(bootstrap.webPaywallBaseUrl && {
+      webPaywallBaseUrl: bootstrap.webPaywallBaseUrl,
+    }),
     // Server-side ProductVariables resolution. SDK ships raw products from
     // static_config + this flag instead of computing variables locally
     // (would need the schema-next decoder + per-locale price logic).
@@ -1731,7 +1782,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         // Identity bootstrap for the iframe URL — lets the paywall SSR loader
         // mint the placement token, and `client_surface=web-sdk` flips the
         // post-checkout redirect to a postMessage.
-        const { idSnap, application } = await runtime.runPromise(
+        const { idSnap, application, appPlatform, web2appConfig } = await runtime.runPromise(
           Effect.gen(function* () {
             const id = yield* IdentityService.current().pipe(
               Effect.catchAll(() => Effect.succeed(null as IdentitySnapshot | null)),
@@ -1743,6 +1794,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             return {
               idSnap: id,
               application: cfg?.application ?? undefined,
+              appPlatform: cfg?.platform ?? undefined,
+              web2appConfig: cfg?.web2appConfig ?? undefined,
             };
           }),
         );
@@ -1771,6 +1824,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           idSnap?.appUserId && idSnap.appUserId !== ""
             ? (idSnap.appUserId as string)
             : undefined;
+        // web2app (STRIPE) apps present on the `web-app-sdk` surface: same
+        // iframe + embedded checkout, but the in-iframe controller never
+        // self-claims entitlements (the purchase is redeemed in the mobile
+        // app) and surfaces post-checkout destinations so the SDK can
+        // navigate the host page.
+        const isWeb2App = appPlatform === "STRIPE";
+        const webPaywallBaseUrl = isWeb2App ? web2appConfig?.domainBaseUrl : undefined;
         const bootstrap = {
           apiKey: opts.apiKey,
           ...(appUserIdRaw && { appUserId: appUserIdRaw }),
@@ -1784,7 +1844,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           apiBase: env === "release" ? "https://superwall-web-paywall-app.staffbar.workers.dev" : "https://superwall-web-paywall-app-stg.staffbar.workers.dev",
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
-          clientSurface: "web-sdk" as const,
+          clientSurface: isWeb2App ? ("web-app-sdk" as const) : ("web-sdk" as const),
+          ...(webPaywallBaseUrl && { webPaywallBaseUrl }),
         };
 
         const initPayload = buildInitPayload({
@@ -1831,6 +1892,22 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             paywallPurchaseEventHandlers.forEach((h) => {
               try { h(ev); } catch {}
             });
+            // web2app: after merchant handlers observed the result, navigate
+            // the host page to the resolved post-purchase destination.
+            if (
+              ev.type === "postCheckout" &&
+              bootstrap.clientSurface === "web-app-sdk"
+            ) {
+              navigateAfterWeb2AppPurchase(
+                {
+                  ...(ev.redirectUrl && { redirectUrl: ev.redirectUrl }),
+                  ...(ev.redemptionUrl && { redemptionUrl: ev.redemptionUrl }),
+                  ...(ev.manageUrl && { manageUrl: ev.manageUrl }),
+                  ...(ev.deepLinks && { deepLinks: ev.deepLinks }),
+                },
+                opts.options?.web2app?.postPurchase,
+              );
+            }
           },
           bootstrap,
           initPayload,

@@ -2705,4 +2705,87 @@ it("discount_redeem_complete / _fail POST to the collector with correlation cont
   rig.dismiss();
   await reg;
   await sw.dispose();
+
+// ── navigateAfterWeb2AppPurchase (web-app-sdk post-purchase host navigation) ──
+
+import { navigateAfterWeb2AppPurchase } from "./superwall.ts";
+
+const withStubbedLocation = (fn: (loc: { href: string }) => void): void => {
+  const loc = { href: "" };
+  vi.stubGlobal("location", loc);
+  try {
+    fn(loc);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+};
+
+const NAV_TARGETS = {
+  redirectUrl: "https://merchant.com/order-complete",
+  redemptionUrl: "https://tenant.superwall.app/redeem?codes=redemption_abc",
+  manageUrl: "https://tenant.superwall.app/manage",
+} as const;
+
+it("navigates to the merchant-configured redirectUrl by default", () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase(NAV_TARGETS, undefined);
+    expect(loc.href).toBe(NAV_TARGETS.redirectUrl);
+  });
+});
+
+it("falls back to the redeem page when no redirectUrl is configured", () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase(
+      { redemptionUrl: NAV_TARGETS.redemptionUrl },
+      "default",
+    );
+    expect(loc.href).toBe(NAV_TARGETS.redemptionUrl);
+  });
+});
+
+it("a {url} option wins over every BE-resolved target", () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase(NAV_TARGETS, { url: "https://custom.com/thanks" });
+    expect(loc.href).toBe("https://custom.com/thanks");
+  });
+});
+
+it('"none" never navigates', () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase(NAV_TARGETS, "none");
+    expect(loc.href).toBe("");
+  });
+});
+
+it("a handler returning non-false is treated as handled (no navigation)", () => {
+  withStubbedLocation((loc) => {
+    const handler = vi.fn(() => undefined);
+    navigateAfterWeb2AppPurchase(NAV_TARGETS, handler);
+    expect(handler).toHaveBeenCalledWith(NAV_TARGETS);
+    expect(loc.href).toBe("");
+  });
+});
+
+it("a handler returning false falls through to the default navigation", () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase(NAV_TARGETS, () => false);
+    expect(loc.href).toBe(NAV_TARGETS.redirectUrl);
+  });
+});
+
+it("a throwing handler is treated as handled and never crashes navigation", () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase(NAV_TARGETS, () => {
+      throw new Error("merchant bug");
+    });
+    expect(loc.href).toBe("");
+  });
+});
+
+it("does nothing when no target resolves", () => {
+  withStubbedLocation((loc) => {
+    navigateAfterWeb2AppPurchase({ manageUrl: NAV_TARGETS.manageUrl }, undefined);
+    // manageUrl is exposed to handlers but is never an automatic destination.
+    expect(loc.href).toBe("");
+  });
 });

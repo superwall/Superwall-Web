@@ -671,6 +671,19 @@ function readTransactionField(
   return key === "productIdentifier" ? asProductIdentifier(v) : asTransactionId(v);
 }
 
+/** Read the web-app-sdk `deep_links` object ({ios?, android?}) if present. */
+const readDeepLinks = (
+  evt: { [k: string]: unknown },
+): { ios?: string; android?: string } | undefined => {
+  const raw = evt["deep_links"];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: { ios?: string; android?: string } = {};
+  if (typeof r["ios"] === "string") out.ios = r["ios"];
+  if (typeof r["android"] === "string") out.android = r["android"];
+  return Object.keys(out).length > 0 ? out : undefined;
+};
+
 /** Read the product identifier from an iframe event, returning a branded type. */
 const readProductId = (evt: { [k: string]: unknown }): ProductIdentifier =>
   asProductIdentifier(
@@ -861,10 +874,16 @@ const handleInbound = (
       // is the real success signal.
       // ---------------------------------------------------------------
       case "post_checkout_complete": {
-        // Terminal success on the web-sdk surface. Per BE contract:
-        //  - `transaction_data` and `redirect_url` are ALWAYS undefined here
-        //    (controller strips them for web-sdk; details live in
+        // Terminal success on the web-sdk / web-app-sdk surfaces. Per BE
+        // contract:
+        //  - On web-sdk (WEBAPP), `transaction_data` and `redirect_url` are
+        //    ALWAYS undefined here (controller strips them; details live in
         //    `/entitlements` instead).
+        //  - On web-app-sdk (web2app), the controller ALSO surfaces the
+        //    post-checkout destinations (`behavior`, `redirect_url`,
+        //    `redemption_url`, `manage_url`, `deep_links`) so the SDK can
+        //    navigate the host page — the purchase is redeemed in the mobile
+        //    app, not claimed as a web entitlement.
         //  - The backend has ALREADY emitted `transaction_complete` server-
         //    side before posting this — do NOT re-emit it locally or
         //    consumers see double events.
@@ -876,11 +895,31 @@ const handleInbound = (
           : (readTransactionField(evt, "productIdentifier") ?? asProductIdentifier(""));
         const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
         const entitlementsToken = readString(evt, "entitlements_token");
+        const rawBehavior = readString(evt, "behavior");
+        const behavior =
+          rawBehavior === "redirect" ||
+          rawBehavior === "redeem" ||
+          rawBehavior === "manage" ||
+          rawBehavior === "paywall"
+            ? rawBehavior
+            : null;
+        const redirectUrl = readString(evt, "redirect_url");
+        const redemptionUrl = readString(evt, "redemption_url");
+        const manageUrl = readString(evt, "manage_url");
+        const deepLinks = readDeepLinks(evt);
         ctx.onPurchaseEvent?.({
           type: "postCheckout",
           productId: String(productId),
           checkoutContextId,
           ...(entitlementsToken !== null && { entitlementsToken }),
+          ...(behavior !== null && { behavior }),
+          ...(redirectUrl !== null && { redirectUrl }),
+          ...(redemptionUrl !== null && { redemptionUrl }),
+          ...(manageUrl !== null && { manageUrl }),
+          ...(deepLinks !== undefined && { deepLinks }),
+          ...(ctx.bootstrap?.clientSurface && {
+            surface: ctx.bootstrap.clientSurface,
+          }),
         });
         cleanup();
         resolve({ type: "purchased", productId: String(productId) });

@@ -144,7 +144,15 @@ export interface PaywallBootstrap {
   /** Full origin of the events collector. Threaded into the same hash. */
   readonly collector: string;
   readonly sdkVersion: string;
-  readonly clientSurface: "web-sdk";
+  /** `web-sdk` for WEBAPP apps; `web-app-sdk` for web2app (STRIPE) apps.
+   *  The latter never self-claims entitlements in-iframe and surfaces the
+   *  post-checkout destinations (redeem / manage / deep links) so the SDK
+   *  can navigate the host page. */
+  readonly clientSurface: "web-sdk" | "web-app-sdk";
+  /** web-app-sdk only — origin of the app's web paywall subdomain
+   *  (`https://<domain>.<host>`). Threaded into the `#init=` hash so the
+   *  in-iframe controller keys post-checkout redemption on the right tenant. */
+  readonly webPaywallBaseUrl?: string;
 }
 
 /** Purchase lifecycle messages emitted by the paywall iframe's
@@ -180,6 +188,16 @@ export type PaywallPurchaseEvent =
       /** Signed entitlements JWT for offline server-side verification
        *  (`@superwall/verify`). Best-effort — absent when the BE didn't sign. */
       entitlementsToken?: string;
+      /** web-app-sdk surface only: post-checkout destinations resolved by the
+       *  BE, for the SDK to navigate the host page with. */
+      behavior?: "redirect" | "redeem" | "manage" | "paywall";
+      redemptionUrl?: string;
+      manageUrl?: string;
+      deepLinks?: { ios?: string; android?: string };
+      /** Which embedded surface produced this event. `web-app-sdk` purchases
+       *  are redeemed in the mobile app — they never become web entitlements,
+       *  so consumers must not flip web subscription status on them. */
+      surface?: "web-sdk" | "web-app-sdk";
     };
 
 export interface PaywallPresenter {

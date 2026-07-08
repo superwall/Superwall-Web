@@ -118,6 +118,16 @@ export interface PostCheckoutCompleteMessage {
    *  unavailable. The steady-state `/entitlements` read also carries it, so a
    *  page that didn't just purchase can still obtain a fresh one. */
   entitlements_token?: string;
+  /** web-app-sdk (web2app) surface only. On that surface the SDK owns
+   *  post-purchase navigation on the host page, so the controller surfaces
+   *  the resolved destinations: `behavior` discriminates, `redemption_url`
+   *  is the redeem page, `manage_url` the subscription-management page, and
+   *  `deep_links` the platform schemes into the mobile app. All absent on
+   *  the web-sdk (WEBAPP) surface. */
+  behavior?: "redirect" | "redeem" | "manage" | "paywall";
+  redemption_url?: string;
+  manage_url?: string;
+  deep_links?: { ios?: string; android?: string };
 }
 
 /** Result of a `redeem_discount` command, posted by the paywall's discount
