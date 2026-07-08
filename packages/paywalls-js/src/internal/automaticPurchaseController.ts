@@ -219,6 +219,11 @@ export const createAutomaticPurchaseController = (
   // Wired at controller construction so it's active from boot.
   deps.subscribe((ev) => {
     if (ev.type === "postCheckout" && ev.productId) {
+      // web-app-sdk (web2app): the purchase is redeemed in the MOBILE app —
+      // it never becomes a web entitlement. Skipping avoids an optimistic
+      // ACTIVE that the authoritative (empty) /entitlements refresh would
+      // flap back to INACTIVE seconds later.
+      if (ev.surface === "web-app-sdk") return;
       applyPostCheckout(ev.productId);
     }
   });

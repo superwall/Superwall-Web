@@ -523,6 +523,39 @@ export interface SuperwallOptions {
   bundleId?: string;
   /** BE/non-browser environments: `location.origin` substitute for `X-URL-Scheme`. */
   urlScheme?: string;
+  /** web2app (STRIPE-platform) apps embedded via the Web SDK. */
+  web2app?: Web2AppOptions;
+}
+
+/** Post-checkout destinations resolved by the backend for a web2app purchase,
+ *  handed to `web2app.postPurchase` handlers. */
+export interface Web2AppPostPurchaseTargets {
+  /** Merchant-configured post-purchase URL from the dashboard
+   *  (`postPurchaseBehavior`), with redemption codes + checkout context
+   *  appended as query params. */
+  redirectUrl?: string;
+  /** Hosted redeem page (`https://<domain>.<host>/redeem?codes=...`). */
+  redemptionUrl?: string;
+  /** Hosted subscription-management page (`https://<domain>.<host>/manage`). */
+  manageUrl?: string;
+  /** Platform deep links into the mobile app (`<scheme>://superwall/redeem?...`). */
+  deepLinks?: { ios?: string; android?: string };
+}
+
+export interface Web2AppOptions {
+  /** What the SDK does with the HOST page after a web2app purchase completes
+   *  in the embedded paywall iframe:
+   *  - `"default"` (or unset): navigate to the merchant-configured redirect
+   *    URL when present, else the hosted redeem page.
+   *  - `"none"`: never navigate; consume the result via purchase events.
+   *  - `{ url }`: always navigate to this URL instead.
+   *  - handler: called with the resolved targets. Return `false` to fall
+   *    through to the default navigation; any other return means handled. */
+  postPurchase?:
+    | "default"
+    | "none"
+    | { url: string }
+    | ((targets: Web2AppPostPurchaseTargets) => boolean | void);
 }
 
 export type PartialSuperwallOptions = DeepPartial<SuperwallOptions>;

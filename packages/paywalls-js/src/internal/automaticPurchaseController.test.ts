@@ -236,3 +236,36 @@ it("onConfigured() ignores ?code= values that don't match the redemption_ prefix
   await controller.onConfigured!();
   expect(stub.redeems).toEqual([]);
 });
+
+it("skips the optimistic ACTIVE flip for web-app-sdk (web2app) purchases", () => {
+  const stub = stubDeps({
+    entitlementsByProduct: { pro_yearly: ["pro"] },
+  });
+  createAutomaticPurchaseController(stub.deps);
+  // web2app purchases are redeemed in the MOBILE app — no web entitlement
+  // exists, so flipping ACTIVE would flap back to INACTIVE on the next
+  // authoritative /entitlements refresh.
+  stub.fire({
+    type: "postCheckout",
+    productId: "pro_yearly",
+    checkoutContextId: "ckctx_test",
+    surface: "web-app-sdk",
+  });
+  expect(stub.setStatuses).toHaveLength(0);
+  expect(stub.refreshes).toBe(0);
+});
+
+it("applies the optimistic ACTIVE flip for web-sdk (WEBAPP) purchases", () => {
+  const stub = stubDeps({
+    entitlementsByProduct: { pro_yearly: ["pro"] },
+  });
+  createAutomaticPurchaseController(stub.deps);
+  stub.fire({
+    type: "postCheckout",
+    productId: "pro_yearly",
+    checkoutContextId: "ckctx_test",
+    surface: "web-sdk",
+  });
+  expect(stub.setStatuses).toHaveLength(1);
+  expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
+});

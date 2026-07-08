@@ -40,6 +40,11 @@ export interface RawConfig {
    *  in test mode (simulated purchases) only when the current user matches one
    *  of these. */
   readonly testModeUserIds: ReadonlyArray<TestModeUserId>;
+  /** The application's own platform (e.g. `"WEBAPP"`, `"STRIPE"`). Picks the
+   *  iframe `client_surface`: STRIPE (web2app) apps present as `web-app-sdk`.
+   *  `web2appConfig` presence alone is ambiguous — the BE resolves the
+   *  project's STRIPE app for any pk, including WEBAPP ones. */
+  readonly platform?: string;
   /** Web-to-app routing config — present when this app has a Superwall
    *  Web Project. Lets the SDK route `register()` to a hosted paywall URL
    *  (e.g. `https://{tenant}.superwall.app/{placement}`) instead of
@@ -63,6 +68,12 @@ export interface RawWeb2AppConfig {
   readonly restoreAccessUrl?: string;
   /** TTL for the cached web entitlements list. */
   readonly entitlementsMaxAgeMs?: number;
+  /** Origin of the web paywall subdomain (`https://<domain>.<host>`).
+   *  Threaded into the iframe `#init=` hash on the `web-app-sdk` surface so
+   *  the in-iframe controller keys post-checkout redemption on the right
+   *  tenant. Falls back to `restoreAccessUrl` minus `/manage` when absent
+   *  (older configs). */
+  readonly domainBaseUrl?: string;
 }
 
 export interface RawTrigger {
@@ -462,6 +473,7 @@ const Web2AppWire = Schema.Struct({
   url_schema: optStr,
   restore_access_url: optStr,
   entitlements_max_age_ms: optNum,
+  domain_base_url: optStr,
 });
 
 const toApplication = (
@@ -480,6 +492,13 @@ const toWeb2App = (
 ): Pick<RawConfig, "web2appConfig"> => {
   const w = decodeOne(Web2AppWire, value);
   if (!w) return {};
+  // Older configs predate `domain_base_url`; derive it from
+  // `restore_access_url` (`https://<domain>.<host>/manage`).
+  const derivedDomainBaseUrl =
+    w.domain_base_url ??
+    (w.restore_access_url?.endsWith("/manage")
+      ? w.restore_access_url.slice(0, -"/manage".length)
+      : undefined);
   const cfg: RawWeb2AppConfig = {
     ...(w.url_schema !== undefined && { urlSchema: w.url_schema }),
     ...(w.restore_access_url !== undefined && {
@@ -487,6 +506,9 @@ const toWeb2App = (
     }),
     ...(w.entitlements_max_age_ms !== undefined && {
       entitlementsMaxAgeMs: w.entitlements_max_age_ms,
+    }),
+    ...(derivedDomainBaseUrl !== undefined && {
+      domainBaseUrl: derivedDomainBaseUrl,
     }),
   };
   return { web2appConfig: cfg };
@@ -540,6 +562,7 @@ export const parseConfig = (input: JsonValue): RawConfig => {
     })),
     locales,
     testModeUserIds: decodeItems(TestModeUserIdSchema, root["test_mode_user_ids"]),
+    ...(typeof root["platform"] === "string" && { platform: root["platform"] }),
     ...toApplication(root["application"]),
     ...toWeb2App(root["web2app_config"]),
     raw: root,

@@ -748,3 +748,33 @@ test("parseConfig clamps presentation_probability to [0,1]", () => {
   expect(surveys[0]!.presentationProbability).toBe(0);
   expect(surveys[1]!.presentationProbability).toBe(1);
 });
+
+test("parseConfig derives web2app domainBaseUrl from restore_access_url when domain_base_url is absent (older configs)", () => {
+  const cfg = parseConfig({
+    build_id: "x",
+    web2app_config: {
+      url_schema: "sw-test-bed",
+      entitlements_max_age_ms: 1000,
+      restore_access_url: "https://tenant.superwall.app/manage",
+    },
+  });
+  expect(cfg.web2appConfig?.domainBaseUrl).toBe("https://tenant.superwall.app");
+});
+
+test("parseConfig prefers explicit domain_base_url over the restore_access_url derivation", () => {
+  const cfg = parseConfig({
+    build_id: "x",
+    web2app_config: {
+      domain_base_url: "https://explicit.superwall.app",
+      restore_access_url: "https://other.superwall.app/manage",
+    },
+  });
+  expect(cfg.web2appConfig?.domainBaseUrl).toBe("https://explicit.superwall.app");
+});
+
+test("parseConfig lifts the top-level platform field", () => {
+  const cfg = parseConfig({ build_id: "x", platform: "STRIPE" });
+  expect(cfg.platform).toBe("STRIPE");
+  const noPlatform = parseConfig({ build_id: "x", platform: null });
+  expect(noPlatform.platform).toBeUndefined();
+});
