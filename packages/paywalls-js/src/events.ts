@@ -4,7 +4,7 @@
 import type {
   ConfirmedAssignment,
   CustomerInfo,
-  DiscountRedemptionResult,
+  DiscountRedemptionReason,
   IntegrationAttribute,
   JsonValue,
   PaywallCloseReason,
@@ -159,6 +159,27 @@ export interface SuperwallEventMap {
   };
   enrichment_fail: {};
 
+  // discounts (Stripe promotion codes)
+  /** A Stripe promotion code was successfully applied to the presented paywall.
+   *  Fires for SDK-initiated `redeemDiscount(...)` calls AND in-paywall "Redeem
+   *  Discount" button redemptions. Wire-bound for analytics; correlate to the
+   *  paywall session via the `$presentation_id` auto-context. */
+  discount_redeem_complete: {
+    code: string;
+    /** Number of Stripe products re-priced. */
+    appliedProductCount?: number;
+    paywall_info: PaywallInfo;
+  };
+  /** A Stripe promotion-code redemption was rejected (invalid/unknown code, no
+   *  applicable products, backend error). Sibling to `discount_redeem_complete`;
+   *  wire-bound for analytics on failed redemption attempts. */
+  discount_redeem_fail: {
+    code: string;
+    /** Why it was rejected. Open union — see {@link DiscountRedemptionReason}. */
+    reason?: DiscountRedemptionReason | (string & {});
+    paywall_info: PaywallInfo;
+  };
+
   // custom
   custom_placement: {
     placementName: string;
@@ -186,11 +207,6 @@ export interface LocalSuperwallEventMap {
   /** Paywall asked to follow a deep link. Bridged to
    *  `SuperwallDelegate.onPaywallWillOpenDeepLink`. */
   paywallWillOpenDeepLink: { url: string };
-  /** Result of a Stripe promotion-code redemption in the presented paywall.
-   *  Fires for SDK-initiated `redeemDiscount(...)` calls AND for in-paywall
-   *  "Redeem Discount" button redemptions. Informational — never POSTed to the
-   *  collector. Bridged to `SuperwallDelegate.onDiscountRedemptionResult`. */
-  discount_redemption_result: DiscountRedemptionResult;
 }
 
 export type AllSuperwallEvents = SuperwallEventMap & LocalSuperwallEventMap;
@@ -292,12 +308,6 @@ export interface SuperwallDelegate {
   onWillRedeemLink?(): void;
   onDidRedeemLink?(result: RedemptionResult): void;
 
-  /** A Stripe promotion code was redeemed (or cleared) in the presented
-   *  paywall — via `ActivePaywall.redeemDiscount(...)` OR an in-paywall
-   *  "Redeem Discount" button. Sibling to the `discount_redemption_result`
-   *  event. */
-  onDiscountRedemptionResult?(result: DiscountRedemptionResult): void;
-
   // logging
   onLog?(
     level: "debug" | "info" | "warn" | "error" | "none",
@@ -319,11 +329,4 @@ export interface SuperwallDelegate {
 export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEventMap>([
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
-  // Local-only by design: discount redemption attempts are recorded
-  // server-side by the checkout backend (POST /checkout/discount), and the SDK
-  // only observes results while a paywall is presented — wire-emitting here
-  // would double-count. Mirrors the `post_checkout_complete` precedent where
-  // the BE owns analytics. Consumers can still observe it on `sw.events` /
-  // the `onDiscountRedemptionResult` delegate.
-  "discount_redemption_result",
 ]);

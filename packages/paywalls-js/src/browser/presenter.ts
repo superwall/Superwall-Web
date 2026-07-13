@@ -2,7 +2,6 @@
 // Mounts an iframe overlay and bridges the v1 postMessage contract (API.md §7.2).
 
 import type {
-  DiscountRedemptionResult,
   PaywallInfo,
   PaywallPresentationStyle,
   PaywallResult,
@@ -936,22 +935,28 @@ const handleInbound = (
         break;
       }
       // Result of a `redeem_discount` command — from the SDK OR an in-paywall
-      // "Redeem Discount" button. Surfaced as a public informational event; the
-      // SDK matches it to a pending `redeemDiscount()` by code. The clear path
-      // (empty code) is NOT acknowledged, so no result arrives for it.
+      // "Redeem Discount" button. Split into the public `discount_redeem_complete`
+      // / `discount_redeem_fail` events; the SDK matches them to a pending
+      // `redeemDiscount()` by code. The clear path (empty code) is NOT
+      // acknowledged, so no result arrives for it.
       case "discount_redemption_result": {
         const code = readString(evt, "code") ?? "";
-        const valid = evt["valid"] === true;
-        const detail: DiscountRedemptionResult = { code, valid };
-        if (valid) {
+        if (evt["valid"] === true) {
           const apc = evt["appliedProductCount"];
-          if (typeof apc === "number") detail.appliedProductCount = apc;
+          ctx.emit("discount_redeem_complete", {
+            code,
+            paywall_info: info,
+            ...(typeof apc === "number" && { appliedProductCount: apc }),
+          });
         } else {
           // `reason` is an open union — forward any paywall value verbatim.
           const reason = readString(evt, "reason");
-          if (reason !== null) detail.reason = reason;
+          ctx.emit("discount_redeem_fail", {
+            code,
+            paywall_info: info,
+            ...(reason !== null && { reason }),
+          });
         }
-        ctx.emit("discount_redemption_result", detail);
         break;
       }
       case "custom_placement": {

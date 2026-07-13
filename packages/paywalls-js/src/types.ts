@@ -266,12 +266,12 @@ export type DiscountRedemptionReason =
   | "superseded"
   | "paywall_dismissed";
 
-/** Result of applying a Stripe promotion code to the presented paywall.
- *  Mirrors the paywall runtime's `discount_redemption_result` message. Returned
- *  by `ActivePaywall.redeemDiscount(...)` and surfaced on `sw.events`
- *  (`discount_redemption_result`) + `SuperwallDelegate.onDiscountRedemptionResult`
- *  — the event fires for in-paywall "Redeem Discount" button redemptions too,
- *  not only SDK-initiated ones. */
+/** Result of applying a Stripe promotion code to the presented paywall,
+ *  returned by `ActivePaywall.redeemDiscount(...)`. Mirrors the paywall
+ *  runtime's `discount_redemption_result` message. Observers instead consume
+ *  the wire-bound `discount_redeem_complete` / `discount_redeem_fail` events on
+ *  `sw.events` (which also fire for in-paywall "Redeem Discount" button
+ *  redemptions, not only SDK-initiated ones). */
 export interface DiscountRedemptionResult {
   /** The trimmed code the result refers to. */
   code: string;
