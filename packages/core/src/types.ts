@@ -76,6 +76,10 @@ export interface CustomEnvironmentHosts {
   collector: string;
   enrichment: string;
   subscriptions: string;
+  /** Host of the web-paywall-app worker (embedded checkout initiate +
+   *  post-checkout resolution for the web-sdk / web-app-sdk iframe
+   *  surfaces). Optional — falls back to the release host. */
+  webPaywallApp?: string;
 }
 
 export type NetworkEnvironment =
@@ -89,4 +93,5 @@ export interface EnvironmentHosts {
   readonly collector: string;
   readonly enrichment: string;
   readonly subscriptions: string;
+  readonly webPaywallApp: string;
 }
