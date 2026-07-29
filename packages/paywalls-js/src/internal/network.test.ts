@@ -60,8 +60,25 @@ const buildStack = (fetchImpl: typeof fetch, configOverride: Partial<NetworkConf
 it("resolveHosts returns the right base/collector/enrichment per env", () => {
   expect(resolveHosts("release").base).toBe("api.superwall.me");
   expect(resolveHosts("release").collector).toBe("collector.superwall.com");
+  expect(resolveHosts("release").webPaywallApp).toBe(
+    "superwall-web-paywall-app.staffbar.workers.dev",
+  );
   expect(resolveHosts("releaseCandidate").base).toBe("api.superwallcanary.com");
+  expect(resolveHosts("releaseCandidate").webPaywallApp).toBe(
+    "superwall-web-paywall-app-stg.staffbar.workers.dev",
+  );
   expect(resolveHosts("developer").base).toBe("api.superwall.dev");
+  const custom = resolveHosts({
+    custom: {
+      base: "api.local",
+      collector: "c.local",
+      enrichment: "e.local",
+      subscriptions: "s.local",
+    },
+  });
+  expect(custom.base).toBe("api.local");
+  // Custom envs fall back to the release paywall-app worker unless re-homed.
+  expect(custom.webPaywallApp).toBe("superwall-web-paywall-app.staffbar.workers.dev");
   expect(
     resolveHosts({
       custom: {
@@ -69,9 +86,10 @@ it("resolveHosts returns the right base/collector/enrichment per env", () => {
         collector: "c.local",
         enrichment: "e.local",
         subscriptions: "s.local",
+        webPaywallApp: "wpa.local",
       },
-    }).base,
-  ).toBe("api.local");
+    }).webPaywallApp,
+  ).toBe("wpa.local");
 });
 
 // ---------------------------------------------------------------------------

@@ -1897,7 +1897,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }),
           ...(hostOrigin && { hostOrigin }),
           ...(cancelUrl && { cancelUrl }),
-          apiBase: `https://${hosts.base}`,
+          apiBase: `https://${hosts.webPaywallApp}`,
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: isWeb2App ? ("web-app-sdk" as const) : ("web-sdk" as const),
