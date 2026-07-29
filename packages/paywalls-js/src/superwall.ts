@@ -1902,6 +1902,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
                 {
                   ...(ev.redirectUrl && { redirectUrl: ev.redirectUrl }),
                   ...(ev.redemptionUrl && { redemptionUrl: ev.redemptionUrl }),
+                  ...(ev.redemptionCodes && { redemptionCodes: ev.redemptionCodes }),
                   ...(ev.manageUrl && { manageUrl: ev.manageUrl }),
                   ...(ev.deepLinks && { deepLinks: ev.deepLinks }),
                 },

@@ -192,6 +192,10 @@ export type PaywallPurchaseEvent =
        *  BE, for the SDK to navigate the host page with. */
       behavior?: "redirect" | "redeem" | "manage" | "paywall";
       redemptionUrl?: string;
+      /** Public (prefixed, `redemption_…`) codes of the successful
+       *  redemptions — what the mobile app redeems. Same values as in
+       *  `redemptionUrl`'s `?codes=` and the deep links. */
+      redemptionCodes?: string[];
       manageUrl?: string;
       deepLinks?: { ios?: string; android?: string };
       /** Which embedded surface produced this event. `web-app-sdk` purchases
