@@ -126,6 +126,10 @@ export interface PostCheckoutCompleteMessage {
    *  the web-sdk (WEBAPP) surface. */
   behavior?: "redirect" | "redeem" | "manage" | "paywall";
   redemption_url?: string;
+  /** Public (prefixed, `redemption_…`) codes of the successful redemptions —
+   *  the same values embedded in `redemption_url`'s `?codes=` and the deep
+   *  links, standalone so hosts can hand them to the merchant directly. */
+  redemption_codes?: string[];
   manage_url?: string;
   deep_links?: { ios?: string; android?: string };
 }

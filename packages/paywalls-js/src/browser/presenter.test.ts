@@ -346,6 +346,110 @@ it("post_checkout_complete resolves purchased + routes via onPurchaseEvent + doe
   expect(pc!.checkoutContextId).toBe("ckctx_42");
 });
 
+it("post_checkout_complete parses the web-app-sdk destination fields into the purchase event", async () => {
+  const purchaseEvents: unknown[] = [];
+  const presenter = createBrowserPresenter();
+  const ctx = newCtx({
+    onPurchaseEvent: (ev) => purchaseEvents.push(ev),
+    bootstrap: {
+      apiKey: "pk_test_123",
+      deviceId: "11111111-1111-1111-1111-111111111111",
+      hostOrigin: "https://merchant.test",
+      apiBase: "https://api.superwall.me",
+      collector: "https://collector.superwall.me",
+      sdkVersion: "1.2.3",
+      clientSurface: "web-app-sdk",
+      webPaywallBaseUrl: "https://tenant.superwall.app",
+    },
+  });
+  const presentation = presenter.present(stubInfo("pw_w2a"), ctx);
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const origin = new URL(iframe.src).origin;
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        event_name: "post_checkout_complete",
+        checkout_context_id: "ckctx_w2a",
+        product_identifier: "pro_yearly",
+        behavior: "redeem",
+        redemption_url: "https://tenant.superwall.app/redeem?codes=redemption_abc",
+        // Non-string entries must be filtered, not crash the parse.
+        redemption_codes: ["redemption_abc", 42, null],
+        manage_url: "https://tenant.superwall.app/manage",
+        deep_links: {
+          ios: "acme://superwall/redeem?code=redemption_abc",
+          bogus: 7,
+        },
+      },
+      origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+
+  const r = await presentation;
+  expect(r.type).toBe("purchased");
+  const pc = purchaseEvents.find(
+    (e) => (e as { type: string }).type === "postCheckout",
+  ) as
+    | undefined
+    | {
+        behavior?: string;
+        redemptionUrl?: string;
+        redemptionCodes?: string[];
+        manageUrl?: string;
+        deepLinks?: { ios?: string; android?: string };
+        surface?: string;
+      };
+  expect(pc).toBeDefined();
+  expect(pc!.behavior).toBe("redeem");
+  expect(pc!.redemptionUrl).toBe(
+    "https://tenant.superwall.app/redeem?codes=redemption_abc",
+  );
+  expect(pc!.redemptionCodes).toEqual(["redemption_abc"]);
+  expect(pc!.manageUrl).toBe("https://tenant.superwall.app/manage");
+  expect(pc!.deepLinks).toEqual({
+    ios: "acme://superwall/redeem?code=redemption_abc",
+  });
+  expect(pc!.surface).toBe("web-app-sdk");
+});
+
+it("post_checkout_complete without web2app fields leaves them absent on the purchase event (web-sdk shape)", async () => {
+  const purchaseEvents: unknown[] = [];
+  const presenter = createBrowserPresenter();
+  const ctx = newCtx({
+    onPurchaseEvent: (ev) => purchaseEvents.push(ev),
+  });
+  const presentation = presenter.present(stubInfo("pw_ws"), ctx);
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const origin = new URL(iframe.src).origin;
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        event_name: "post_checkout_complete",
+        checkout_context_id: "ckctx_ws",
+        product_identifier: "pro_yearly",
+      },
+      origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+
+  await presentation;
+  const pc = purchaseEvents.find(
+    (e) => (e as { type: string }).type === "postCheckout",
+  ) as undefined | Record<string, unknown>;
+  expect(pc).toBeDefined();
+  expect(pc).not.toHaveProperty("behavior");
+  expect(pc).not.toHaveProperty("redemptionUrl");
+  expect(pc).not.toHaveProperty("redemptionCodes");
+  expect(pc).not.toHaveProperty("manageUrl");
+  expect(pc).not.toHaveProperty("deepLinks");
+});
+
 it("custom container option mounts the overlay there instead of body", async () => {
   const host = document.createElement("section");
   host.id = "custom-host";

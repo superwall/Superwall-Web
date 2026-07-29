@@ -671,6 +671,14 @@ function readTransactionField(
   return key === "productIdentifier" ? asProductIdentifier(v) : asTransactionId(v);
 }
 
+/** Read the web-app-sdk `redemption_codes` string array if present. */
+const readRedemptionCodes = (evt: { [k: string]: unknown }): string[] | undefined => {
+  const raw = evt["redemption_codes"];
+  if (!Array.isArray(raw)) return undefined;
+  const codes = raw.filter((c): c is string => typeof c === "string");
+  return codes.length > 0 ? codes : undefined;
+};
+
 /** Read the web-app-sdk `deep_links` object ({ios?, android?}) if present. */
 const readDeepLinks = (
   evt: { [k: string]: unknown },
@@ -905,6 +913,7 @@ const handleInbound = (
             : null;
         const redirectUrl = readString(evt, "redirect_url");
         const redemptionUrl = readString(evt, "redemption_url");
+        const redemptionCodes = readRedemptionCodes(evt);
         const manageUrl = readString(evt, "manage_url");
         const deepLinks = readDeepLinks(evt);
         ctx.onPurchaseEvent?.({
@@ -915,6 +924,7 @@ const handleInbound = (
           ...(behavior !== null && { behavior }),
           ...(redirectUrl !== null && { redirectUrl }),
           ...(redemptionUrl !== null && { redemptionUrl }),
+          ...(redemptionCodes !== undefined && { redemptionCodes }),
           ...(manageUrl !== null && { manageUrl }),
           ...(deepLinks !== undefined && { deepLinks }),
           ...(ctx.bootstrap?.clientSurface && {

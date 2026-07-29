@@ -536,6 +536,11 @@ export interface Web2AppPostPurchaseTargets {
   redirectUrl?: string;
   /** Hosted redeem page (`https://<domain>.<host>/redeem?codes=...`). */
   redemptionUrl?: string;
+  /** Public (prefixed, `redemption_…`) codes of the successful redemptions —
+   *  what the mobile app redeems. Same values as in `redemptionUrl`'s
+   *  `?codes=` param and the deep links, surfaced standalone so handlers
+   *  never have to parse them out of a URL. */
+  redemptionCodes?: string[];
   /** Hosted subscription-management page (`https://<domain>.<host>/manage`). */
   manageUrl?: string;
   /** Platform deep links into the mobile app (`<scheme>://superwall/redeem?...`). */
