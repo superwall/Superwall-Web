@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Superwall web2app — Embedded Paywall Example</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0b0d10;
+        --panel: #14181d;
+        --border: #2a3038;
+        --text: #e6e9ef;
+        --muted: #8a93a3;
+        --accent: #6ea8fe;
+        --good: #54d489;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f7f8fa;
+          --panel: #ffffff;
+          --border: #d8dde4;
+          --text: #14181d;
+          --muted: #5a6373;
+          --accent: #2563eb;
+          --good: #0f9d58;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      main { max-width: 640px; margin: 0 auto; padding: 32px 16px; }
+      h1 { font-size: 20px; }
+      p.hint { color: var(--muted); }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+        margin: 16px 0;
+      }
+      label { display: block; color: var(--muted); margin: 8px 0 4px; }
+      input {
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+      }
+      button {
+        margin-top: 12px;
+        padding: 8px 16px;
+        border-radius: 8px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      pre {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .codes { color: var(--good); font-weight: 600; }
+      #result-panel { display: none; }
+      #result-panel.visible { display: block; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Superwall web2app — embedded paywall</h1>
+      <p class="hint">
+        Presents a web2app (STRIPE-platform) paywall embedded on this page via
+        <code>@superwall/web2app</code>. On purchase, the redemption code
+        arrives in <code>onPurchaseComplete</code> — no redirect.
+      </p>
+
+      <section>
+        <label for="api-key">Public API key (web2app app)</label>
+        <input id="api-key" placeholder="pk_…" autocomplete="off" />
+        <label for="placement">Placement</label>
+        <input id="placement" value="campaign_trigger" autocomplete="off" />
+        <button id="register" disabled>Show paywall</button>
+        <p class="hint" id="status">Enter your key to configure.</p>
+      </section>
+
+      <section id="result-panel">
+        <h2>Purchase complete 🎉</h2>
+        <p>Redemption codes: <span class="codes" id="codes"></span></p>
+        <pre id="result"></pre>
+      </section>
+    </main>
+    <script type="module" src="./app.ts"></script>
+  </body>
+</html>

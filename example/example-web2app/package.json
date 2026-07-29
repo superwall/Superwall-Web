@@ -1,0 +1,13 @@
+{
+  "name": "@superwall/example-web2app",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --conditions=@superwall/source --hot src/server.ts",
+    "start": "bun --conditions=@superwall/source src/server.ts"
+  },
+  "dependencies": {
+    "@superwall/web2app": "workspace:*"
+  }
+}

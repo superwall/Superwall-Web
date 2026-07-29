@@ -47,6 +47,13 @@
         "tw-animate-css": "^1.4.0",
       },
     },
+    "example/example-web2app": {
+      "name": "@superwall/example-web2app",
+      "version": "0.0.0",
+      "dependencies": {
+        "@superwall/web2app": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@superwall/core",
       "version": "0.2.1",
@@ -349,6 +356,8 @@
     "@superwall/example-browser": ["@superwall/example-browser@workspace:example/example-browser"],
 
     "@superwall/example-react": ["@superwall/example-react@workspace:example/example-react"],
+
+    "@superwall/example-web2app": ["@superwall/example-web2app@workspace:example/example-web2app"],
 
     "@superwall/paywalls-js": ["@superwall/paywalls-js@workspace:packages/paywalls-js"],
 
