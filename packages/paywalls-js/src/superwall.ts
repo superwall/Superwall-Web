@@ -1897,7 +1897,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }),
           ...(hostOrigin && { hostOrigin }),
           ...(cancelUrl && { cancelUrl }),
-          apiBase: `https://${hosts.webPaywallApp}`,
+          // Accept either a bare host (normal) or a full origin — a custom
+          // env pointing at a local `wrangler dev` worker needs http://.
+          apiBase: hosts.webPaywallApp.includes("://")
+            ? hosts.webPaywallApp
+            : `https://${hosts.webPaywallApp}`,
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: isWeb2App ? ("web-app-sdk" as const) : ("web-sdk" as const),
