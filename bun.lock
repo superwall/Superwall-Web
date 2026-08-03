@@ -56,7 +56,7 @@
     },
     "packages/core": {
       "name": "@superwall/core",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "devDependencies": {
         "@types/bun": "latest",
         "typescript": "^5.6.0",
@@ -64,7 +64,7 @@
     },
     "packages/paywalls-js": {
       "name": "@superwall/paywalls-js",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "@superwall/core": "workspace:^",
         "@superwall/superscript": "^1.0.2",
@@ -82,7 +82,7 @@
     },
     "packages/paywalls-react": {
       "name": "@superwall/paywalls-react",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "@superwall/paywalls-js": "workspace:^",
       },
@@ -103,7 +103,7 @@
     },
     "packages/server": {
       "name": "@superwall/server",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "@superwall/core": "workspace:*",
         "@superwall/verify": "workspace:*",
@@ -115,7 +115,7 @@
     },
     "packages/verify": {
       "name": "@superwall/verify",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "jose": "^5.9.6",
       },
@@ -126,7 +126,7 @@
     },
     "packages/web2app": {
       "name": "@superwall/web2app",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "@superwall/paywalls-js": "workspace:^",
       },

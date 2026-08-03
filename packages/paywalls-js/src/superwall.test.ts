@@ -2705,6 +2705,7 @@ it("discount_redeem_complete / _fail POST to the collector with correlation cont
   rig.dismiss();
   await reg;
   await sw.dispose();
+});
 
 // ── navigateAfterWeb2AppPurchase (web-app-sdk post-purchase host navigation) ──
 
