@@ -78,7 +78,9 @@ export interface CustomEnvironmentHosts {
   subscriptions: string;
   /** Host of the web-paywall-app worker (embedded checkout initiate +
    *  post-checkout resolution for the web-sdk / web-app-sdk iframe
-   *  surfaces). Optional — falls back to the release host. */
+   *  surfaces). A bare host gets https:// prepended; a full origin
+   *  (e.g. `http://localhost:8787` for a local `wrangler dev` worker) is
+   *  used as-is. Optional — falls back to the release host. */
   webPaywallApp?: string;
 }
 
