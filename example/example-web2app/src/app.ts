@@ -22,10 +22,13 @@ const resultPanel = $("#result-panel");
 const codesEl = $("#codes");
 const resultEl = $<HTMLPreElement>("#result");
 
+// Test key for the review-lab web2app app; override with ?apiKey=pk_….
+const DEFAULT_API_KEY = "pk_8610a1b862d329cc0ce2076fba5b26bca1fcbdd4cd7279ee";
+
 // Allow ?apiKey=pk_…&placement=… for quick sharing of a configured page.
 const params = new URLSearchParams(location.search);
 const presetKey = params.get("apiKey");
-if (presetKey) apiKeyInput.value = presetKey;
+apiKeyInput.value = presetKey ?? DEFAULT_API_KEY;
 const presetPlacement = params.get("placement");
 if (presetPlacement) placementInput.value = presetPlacement;
 
@@ -48,6 +51,19 @@ const configure = async (apiKey: string) => {
     // "stay" is the default; spelled out here because it's the point of the
     // demo — swap for "navigate" or { url: "/thanks" } to see the others.
     afterPurchase: "stay",
+    superwall: {
+      options: {
+        // Temporary: point the base API at the review-lab deployment.
+        networkEnvironment: {
+          custom: {
+            base: "ir-fix-web2app-websdk.prd.us-east-1.review-lab.superwall-services.com",
+            collector: "collector.superwall.com",
+            enrichment: "enrichment-api.superwall.com",
+            subscriptions: "subscriptions-api.superwall.com",
+          },
+        },
+      },
+    },
   });
   // Expose for ad-hoc poking from the browser console.
   (globalThis as unknown as { web2app: Web2App }).web2app = web2app;
