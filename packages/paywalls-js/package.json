@@ -1,6 +1,6 @@
 {
   "name": "@superwall/paywalls-js",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "type": "module",
   "license": "MIT",
   "publishConfig": {
@@ -34,6 +34,16 @@
       "import": "./dist/browser/auto.js",
       "default": "./dist/browser/auto.js"
     }
+  },
+  "imports": {
+    "#superscript-loader": {
+      "@superwall/source": "./src/internal/superscript-loader.ts",
+      "browser": "./dist/internal/superscript-loader.browser.js",
+      "default": "./dist/internal/superscript-loader.js"
+    }
+  },
+  "browser": {
+    "./dist/internal/superscript-loader.js": "./dist/internal/superscript-loader.browser.js"
   },
   "scripts": {
     "test": "vitest run",

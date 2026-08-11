@@ -5,38 +5,16 @@
 // dropping the placement. An `Err` envelope from a valid eval returns "error".
 
 import { Context, Effect, Layer, Option } from "effect";
-// Lazy + environment-conditional Superscript import: the `/node` entry uses
-// `fs.readFileSync` to load the WASM (works in Bun/Node, breaks in browsers);
-// the `/browser` entry uses bundler `import './*.wasm'` glue (works in browsers
-// + Bun's HTML bundler, breaks in plain Node/Bun runtime). Rust core is the
-// same — only the loader differs. Cache the resolved module per process.
+// Superscript loading lives behind the `#superscript-loader` subpath import
+// (see package.json `imports`): browser bundles resolve a loader that only
+// references `@superwall/superscript/browser`, so the `/node` WASM glue
+// (which `require`s `fs`) never enters client bundles. The type-only import
+// below is erased at emit and safe everywhere.
 import type {
   ExecutionContext,
   WasmHostContext as SuperscriptHostContext,
 } from "@superwall/superscript/node";
-
-let evaluatorPromise: Promise<{
-  // Superscript ≥1.0 returns `Promise<string>` (a JSON `{Ok|Err}` envelope).
-  evaluateWithContext: (
-    input: ExecutionContext,
-    host: SuperscriptHostContext,
-  ) => Promise<string> | string | boolean;
-}> | null = null;
-
-const loadEvaluator = () => {
-  if (evaluatorPromise) return evaluatorPromise;
-  // `typeof window/document` is unreliable — happy-dom + jsdom register both
-  // as globals in Bun/Node test runtimes. The presence of `Bun` or `process`
-  // is the actual signal we're outside a browser.
-  const isBunOrNode =
-    typeof (globalThis as { Bun?: unknown }).Bun !== "undefined" ||
-    typeof (globalThis as { process?: { versions?: { node?: string } } })
-      .process?.versions?.node === "string";
-  evaluatorPromise = isBunOrNode
-    ? import("@superwall/superscript/node")
-    : import("@superwall/superscript/browser");
-  return evaluatorPromise;
-};
+import { loadEvaluator } from "#superscript-loader";
 
 // `PassableValue` is the typed-tagged-union the Superscript WASM module
 // expects. The node entry doesn't re-export it, so we re-declare it here.
