@@ -23,6 +23,13 @@ const flush = async () => {
   await new Promise<void>((r) => setTimeout(r, 0));
   await tick();
 };
+// Re-flush until `cond` holds (or the deadline passes). A single flush() is
+// one macrotask tick — not enough for multi-hop async flows (e.g. a full
+// register() round-trip) on slow CI runners.
+const flushUntil = async (cond: () => boolean, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond() && Date.now() < deadline) await flush();
+};
 
 // React 19 + `IS_REACT_ACT_ENVIRONMENT=true` does NOT flush the initial mount
 // synchronously when `render()` is called outside `act()` — the container
@@ -327,7 +334,10 @@ test("usePlacement: ACTIVE subscription → register returns skipped(userSubscri
     });
     await flush();
   });
-  await act(async () => { fireEvent.click(getByText("go")); await flush(); });
+  await act(async () => {
+    fireEvent.click(getByText("go"));
+    await flushUntil(() => lastType !== "");
+  });
   expect(lastType).toBe("skipped");
   expect(getByTestId("state").textContent).toBe("skipped");
 });
