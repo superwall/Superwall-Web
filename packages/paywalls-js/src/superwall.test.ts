@@ -457,6 +457,53 @@ it("identify() triggers a background /entitlements refresh when the user ID chan
   await sw.dispose();
 });
 
+it("identify({ restorePaywallAssignments: true }) re-fetches config before resolving", async () => {
+  let configCalls = 0;
+  const countingFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      configCalls++;
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+  const sw = make({ fetch: countingFetch });
+  await sw.ready;
+  const callsAfterConfigure = configCalls;
+
+  // Without the option: no config re-fetch.
+  await sw.user.identify("user_plain");
+  expect(configCalls).toBe(callsAfterConfigure);
+
+  // With the option: identify() blocks on a fresh config fetch + re-assign.
+  await sw.user.identify("user_restored", { restorePaywallAssignments: true });
+  expect(configCalls).toBe(callsAfterConfigure + 1);
+
+  // The Assignments pending gate must have drained — register() paths that
+  // await phase=Ready would hang otherwise. getPresentationResult exercises
+  // the config read-side without needing a presenter.
+  const result = await sw.placements.getPresentationResult("nonexistent");
+  expect(result.type).toBe("placementNotFound");
+  await sw.dispose();
+});
+
+it("customPaywallAction event bridges to delegate.onCustomPaywallAction", async () => {
+  const actions: string[] = [];
+  const sw = make({
+    delegate: { onCustomPaywallAction: (name) => actions.push(name) },
+  });
+  await sw.ready;
+
+  sw.events.dispatchEvent(
+    new CustomEvent("customPaywallAction", { detail: { name: "contact_support" } }),
+  );
+  await tick();
+  await tick();
+  expect(actions).toEqual(["contact_support"]);
+  await sw.dispose();
+});
+
 it("setAttributes merges into the attributes signal", async () => {
   const sw = make();
   await sw.ready;
@@ -590,6 +637,157 @@ it("reset() clears the entitlements token", async () => {
   await tick();
   expect(sw.purchases.getEntitlementsToken()).toBeNull();
   expect(sw.entitlementsToken.value).toBeNull();
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// customerInfo — populated from /entitlements reads
+// ---------------------------------------------------------------------------
+
+it("/entitlements refresh populates customerInfo (readable + getCustomerInfo)", async () => {
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      customerInfo: {
+        entitlements: [
+          { identifier: "pro", isActive: true, productIds: ["pro_yearly"] },
+          { identifier: "plus", isActive: false, productIds: ["plus_monthly"] },
+        ],
+      },
+    })),
+  });
+  await sw.ready;
+
+  await waitFor(() => sw.customerInfo.value !== null);
+  const info = sw.customerInfo.value!;
+  expect(info.userId).toBe(sw.user.effectiveId.value);
+  expect(info.entitlements).toEqual([
+    { id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: ["pro_yearly"] },
+    { id: "plus", type: "SERVICE_LEVEL", isActive: false, productIds: ["plus_monthly"] },
+  ]);
+  // No transaction history on the web wire shape yet.
+  expect(info.subscriptions).toEqual([]);
+  expect(info.nonSubscriptions).toEqual([]);
+  expect(await sw.purchases.getCustomerInfo()).toBe(info);
+  await sw.dispose();
+});
+
+it("entitlements.active/inactive/all derive from status + customerInfo", async () => {
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      customerInfo: {
+        entitlements: [
+          { identifier: "pro", isActive: true, productIds: ["pro_yearly"] },
+          { identifier: "plus", isActive: false, productIds: ["plus_monthly"] },
+        ],
+      },
+    })),
+  });
+  await sw.ready;
+
+  await waitFor(
+    () =>
+      sw.entitlements.active.value.length === 1 &&
+      sw.entitlements.inactive.value.length === 1,
+  );
+  expect(sw.entitlements.active.value.map((e) => e.id)).toEqual(["pro"]);
+  expect(sw.entitlements.inactive.value).toEqual([
+    { id: "plus", type: "SERVICE_LEVEL", isActive: false, productIds: ["plus_monthly"] },
+  ]);
+  expect(sw.entitlements.all.value.map((e) => e.id)).toEqual(["pro", "plus"]);
+
+  // byProductIds surfaces the real inactive entitlement, not a config stub.
+  const byProduct = sw.entitlements.byProductIds(["plus_monthly"]);
+  expect(byProduct).toEqual([
+    { id: "plus", type: "SERVICE_LEVEL", isActive: false, productIds: ["plus_monthly"] },
+  ]);
+  await sw.dispose();
+});
+
+it("refreshCustomerInfo() forces a read and reconciles status + snapshot", async () => {
+  let active = false;
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      customerInfo: {
+        entitlements: active ? [{ identifier: "pro", isActive: true }] : [],
+      },
+    })),
+  });
+  await sw.ready;
+  await waitFor(() => sw.subscriptionStatus.value.status === "INACTIVE");
+
+  // Backend state changes out-of-band; a manual refresh must pick it up
+  // without waiting for the 10-min poll.
+  active = true;
+  const info = await sw.purchases.refreshCustomerInfo();
+  expect(info).not.toBeNull();
+  expect(info!.entitlements.map((e) => e.id)).toEqual(["pro"]);
+  expect(sw.customerInfo.value).toBe(info);
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  await sw.dispose();
+});
+
+it("refreshCustomerInfo() resolves with the prior snapshot when the read fails", async () => {
+  let fail = false;
+  const failableFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config"))
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    if (url.includes("/entitlements")) {
+      if (fail) return Promise.resolve(new Response("", { status: 500 }));
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            customerInfo: { entitlements: [{ identifier: "pro", isActive: true }] },
+          }),
+        ),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+  const sw = make({ fetch: failableFetch });
+  await sw.ready;
+  await waitFor(() => sw.customerInfo.value !== null);
+  const before = sw.customerInfo.value;
+
+  fail = true;
+  // Must resolve (not reject) and leave prior state intact.
+  const info = await sw.purchases.refreshCustomerInfo();
+  expect(info).toBe(before);
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  await sw.dispose();
+});
+
+it("onCustomerInfoChange fires on a change between two non-null snapshots", async () => {
+  let active = false;
+  const changes: Array<[string[], string[]]> = [];
+  const sw = make({
+    fetch: entitlementsFetch(() => ({
+      customerInfo: {
+        entitlements: active ? [{ identifier: "pro", isActive: true }] : [],
+      },
+    })),
+    delegate: {
+      onCustomerInfoChange: (from, to) => {
+        changes.push([
+          from.entitlements.map((e) => e.id),
+          to.entitlements.map((e) => e.id),
+        ]);
+      },
+    },
+  });
+  await sw.ready;
+  await waitFor(() => sw.customerInfo.value !== null);
+
+  active = true;
+  await sw.purchases.refreshCustomerInfo();
+  await waitFor(() => changes.length === 1);
+  expect(changes[0]).toEqual([[], ["pro"]]);
+
+  // Identical set re-applied (poll semantics) → deduped, no second call.
+  await sw.purchases.refreshCustomerInfo();
+  await tick();
+  expect(changes).toHaveLength(1);
   await sw.dispose();
 });
 

@@ -207,6 +207,11 @@ export interface LocalSuperwallEventMap {
   /** Paywall asked to follow a deep link. Bridged to
    *  `SuperwallDelegate.onPaywallWillOpenDeepLink`. */
   paywallWillOpenDeepLink: { url: string };
+  /** Paywall fired a legacy `custom` postMessage
+   *  (`{ event_name: "custom", data: "<name>" }` — same contract as the
+   *  mobile SDKs' paywall.js bridge). Bridged to
+   *  `SuperwallDelegate.onCustomPaywallAction`. */
+  customPaywallAction: { name: string };
 }
 
 export type AllSuperwallEvents = SuperwallEventMap & LocalSuperwallEventMap;
@@ -329,4 +334,5 @@ export interface SuperwallDelegate {
 export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEventMap>([
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
+  "customPaywallAction",
 ]);

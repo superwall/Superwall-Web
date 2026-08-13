@@ -677,6 +677,32 @@ it("custom_placement is forwarded via ctx.emit (P1)", async () => {
   await presentation;
 });
 
+it("legacy `custom` message is forwarded via ctx.emit as customPaywallAction", async () => {
+  const emitted: Array<{ name: string; detail: unknown }> = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_a"),
+    newCtx({
+      emit: (name, detail) => emitted.push({ name, detail }),
+    }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  dispatchFromPaywall(iframe, [
+    { event_name: "custom", data: "help_center_tapped" },
+  ]);
+  // Empty payload must be ignored, not emitted with an empty name.
+  dispatchFromPaywall(iframe, [{ event_name: "custom" }]);
+  await flushMessages();
+
+  const actions = emitted.filter((e) => e.name === "customPaywallAction");
+  expect(actions).toHaveLength(1);
+  expect(actions[0]!.detail).toEqual({ name: "help_center_tapped" });
+
+  presenter.dismiss();
+  await presentation;
+});
+
 it("open_url_external calls globalThis.open with the url", async () => {
   const opened: Array<[string, string | undefined, string | undefined]> = [];
   const originalOpen = globalThis.open;

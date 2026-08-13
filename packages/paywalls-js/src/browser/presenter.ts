@@ -959,6 +959,15 @@ const handleInbound = (
         }
         break;
       }
+      // Legacy `custom` action — `{ event_name: "custom", data: "<name>" }`,
+      // same contract the mobile SDKs' paywall.js bridge uses. Bridged to
+      // `SuperwallDelegate.onCustomPaywallAction` by the SDK core.
+      case "custom": {
+        const actionName = readString(evt, "data") ?? readString(evt, "name");
+        if (!actionName) break;
+        ctx.emit("customPaywallAction", { name: actionName });
+        break;
+      }
       case "custom_placement": {
         // paywall_info is the ACTIVE paywall, captured at present() time.
         const placementName =

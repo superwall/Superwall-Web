@@ -31,11 +31,17 @@ const ALGORITHMS = ["ES256"] as const;
  * on success; **throws a typed {@link VerifyError}** on any failure — never a
  * partial result.
  *
+ * The `entitlements` array is returned **verbatim from the token** — a
+ * snapshot at issue time. Because the token lives up to 1h, an entitlement's
+ * own `expiresAt` (epoch ms) can already be in the past; check it (or use
+ * {@link userHasEntitlement}, which does) before granting access.
+ *
  * ```ts
  * const result = await verifyEntitlements(tokenFromClient, {
  *   publicApiKey: process.env.SUPERWALL_PUBLIC_API_KEY!, // the `pk_...` value
  * });
- * if (!result.entitlements.some((e) => e.identifier === "pro")) {
+ * const pro = result.entitlements.find((e) => e.identifier === "pro");
+ * if (!pro || (pro.expiresAt !== null && pro.expiresAt <= Date.now())) {
  *   return res.status(402).end();
  * }
  * ```
@@ -80,11 +86,27 @@ export async function verifyEntitlements(
 }
 
 /**
- * Convenience: does the token assert `identifier` for its subject? Returns
- * `false` only for a *valid* token that lacks the entitlement; re-throws every
- * verification failure (invalid signature, expired, etc.) so a broken token is
- * never silently treated as "no access" — that distinction is the caller's to
- * handle. Mirrors `@superwall/server`'s `userHas` ergonomics.
+ * An entitlement inside a still-valid token can itself have lapsed: the
+ * claims are a snapshot at issue time and the token lives up to 1h, so a
+ * subscription that expired minutes after minting still appears in the
+ * array. `expiresAt` is epoch **ms** (`null` = lifetime/non-expiring);
+ * honor `clockToleranceSec` the same way `jwtVerify` does for `exp`.
+ */
+const isEntitlementCurrent = (
+  e: Entitlement,
+  toleranceSec: number,
+): boolean =>
+  e.expiresAt === null || e.expiresAt > Date.now() - toleranceSec * 1000;
+
+/**
+ * Convenience: does the token assert `identifier` for its subject, and is that
+ * entitlement still current? An entitlement whose own `expiresAt` is in the
+ * past counts as **not held**, even inside a still-valid token (the claims are
+ * a snapshot at issue time). Returns `false` only for a *valid* token that
+ * lacks a current entitlement; re-throws every verification failure (invalid
+ * signature, expired, etc.) so a broken token is never silently treated as
+ * "no access" — that distinction is the caller's to handle. Mirrors
+ * `@superwall/server`'s `userHas` ergonomics.
  */
 export async function userHasEntitlement(
   token: string,
@@ -92,11 +114,15 @@ export async function userHasEntitlement(
   options: VerifyOptions,
 ): Promise<boolean> {
   const result = await verifyEntitlements(token, options);
-  return result.entitlements.some((e) => e.identifier === identifier);
+  const tolerance = options.clockToleranceSec ?? 0;
+  return result.entitlements.some(
+    (e) => e.identifier === identifier && isEntitlementCurrent(e, tolerance),
+  );
 }
 
-/** Convenience: does the token assert *any* of `identifiers`? Same throw/return
- *  contract as {@link userHasEntitlement}. */
+/** Convenience: does the token assert *any* of `identifiers` that is still
+ *  current? Same throw/return + per-entitlement expiry contract as
+ *  {@link userHasEntitlement}. */
 export async function userHasAnyEntitlement(
   token: string,
   identifiers: readonly string[],
@@ -104,7 +130,10 @@ export async function userHasAnyEntitlement(
 ): Promise<boolean> {
   const result = await verifyEntitlements(token, options);
   const wanted = new Set(identifiers);
-  return result.entitlements.some((e) => wanted.has(e.identifier));
+  const tolerance = options.clockToleranceSec ?? 0;
+  return result.entitlements.some(
+    (e) => wanted.has(e.identifier) && isEntitlementCurrent(e, tolerance),
+  );
 }
 
 // --- internals -------------------------------------------------------------

@@ -159,6 +159,127 @@ bind(sw.entitlementsToken, $("#s-token"), (t) =>
   t ? `${t.slice(0, 24)}…${t.slice(-12)} (${t.length} chars)` : "(none)",
 );
 
+// ---------------------------------------------------------------------------
+// Customer Info panel (collapsible)
+// ---------------------------------------------------------------------------
+//
+// Renders `sw.customerInfo` — the server-truth snapshot from the last
+// `/entitlements` read. The ⟳ button demonstrates
+// `sw.purchases.refreshCustomerInfo()`.
+
+const ciPanel = $("#customer-info-panel");
+const ciBody = $<HTMLDivElement>("#ci-body");
+const ciSummary = $("#ci-summary");
+
+const fmtEpochDate = (ms: number) =>
+  new Date(ms).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+
+const kvRow = (k: string, v: string): HTMLDivElement => {
+  const row = document.createElement("div");
+  row.className = "row";
+  const key = document.createElement("span");
+  key.className = "k";
+  key.textContent = k;
+  const val = document.createElement("span");
+  val.className = "v";
+  val.textContent = v;
+  row.append(key, val);
+  return row;
+};
+
+const renderCustomerInfo = () => {
+  const info = sw.customerInfo.value;
+  const token = sw.entitlementsToken.value;
+  ciBody.replaceChildren();
+
+  if (!info) {
+    ciSummary.textContent = "no snapshot yet";
+    const empty = document.createElement("div");
+    empty.className = "ci-empty";
+    empty.textContent =
+      "Populated from the first /entitlements read after configure — hit ⟳ to force one now.";
+    ciBody.appendChild(empty);
+    return;
+  }
+
+  ciSummary.textContent = `${info.entitlements.length} entitlement${
+    info.entitlements.length === 1 ? "" : "s"
+  } on record`;
+
+  ciBody.appendChild(kvRow("userId", info.userId));
+  ciBody.appendChild(
+    kvRow("entitlementsToken", token ? `${token.slice(0, 16)}…` : "(none)"),
+  );
+
+  if (info.entitlements.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "ci-empty";
+    empty.style.marginTop = "8px";
+    empty.textContent = "No entitlements on record for this user.";
+    ciBody.appendChild(empty);
+    return;
+  }
+
+  for (const ent of info.entitlements) {
+    const row = document.createElement("div");
+    row.className = "ent-row";
+
+    const main = document.createElement("div");
+    main.className = "ent-main";
+    const id = document.createElement("div");
+    id.className = "ent-id";
+    id.textContent = ent.id;
+    const sub = document.createElement("div");
+    sub.className = "ent-sub";
+    sub.textContent = ent.expiresAt
+      ? `${ent.willRenew ? "renews" : "expires"} ${fmtEpochDate(ent.expiresAt)}`
+      : ent.isLifetime
+        ? "lifetime"
+        : ent.renewedAt
+          ? `renewed ${fmtEpochDate(ent.renewedAt)}`
+          : (ent.productIds[0] ?? "—");
+    main.append(id, sub);
+
+    const badge = document.createElement("span");
+    badge.className = ent.isActive ? "badge active" : "badge inactive";
+    badge.textContent = ent.isActive ? "active" : "lapsed";
+
+    row.append(main, badge);
+    ciBody.appendChild(row);
+  }
+};
+
+const cleanupCiInfo = sw.customerInfo.subscribe(renderCustomerInfo);
+const cleanupCiToken = sw.entitlementsToken.subscribe(renderCustomerInfo);
+ac.signal.addEventListener("abort", cleanupCiInfo, { once: true });
+ac.signal.addEventListener("abort", cleanupCiToken, { once: true });
+
+$("#ci-head").addEventListener(
+  "click",
+  () => ciPanel.classList.toggle("collapsed"),
+  { signal: ac.signal },
+);
+
+$<HTMLButtonElement>("#ci-refresh").addEventListener(
+  "click",
+  (e) => {
+    e.stopPropagation(); // don't toggle the collapse state
+    const btn = e.currentTarget as HTMLButtonElement;
+    btn.disabled = true;
+    sw.purchases
+      .refreshCustomerInfo()
+      .catch((err) => log("refreshCustomerInfo failed", err))
+      .finally(() => {
+        btn.disabled = false;
+      });
+  },
+  { signal: ac.signal },
+);
+
 const configBadge = $<HTMLDivElement>("#config-badge");
 const cleanupConfig = sw.configurationStatus.subscribe((status) => {
   configBadge.textContent = status;

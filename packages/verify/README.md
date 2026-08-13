@@ -16,24 +16,29 @@ The browser SDK exposes the signed token as `sw.entitlementsToken`. Send it to
 your server, then:
 
 ```ts
-import { verifyEntitlements } from "@superwall/verify";
+import { userHasEntitlement } from "@superwall/verify";
 
-const result = await verifyEntitlements(tokenFromClient, {
+const hasPro = await userHasEntitlement(tokenFromClient, "pro", {
   publicApiKey: process.env.SUPERWALL_PUBLIC_API_KEY!, // your pk_... value
 });
-
-if (!result.entitlements.some((e) => e.identifier === "pro")) {
-  return res.status(402).end();
-}
+if (!hasPro) return res.status(402).end();
 ```
 
-Convenience helpers:
+`userHasEntitlement` / `userHasAnyEntitlement` also check each entitlement's
+own `expiresAt` — the token is a snapshot at issue time with a ~1h life, so an
+entitlement can lapse while the token is still valid.
+
+For raw claims, `verifyEntitlements` returns the token's entitlements verbatim
+(including possibly-lapsed ones — check `expiresAt` yourself):
 
 ```ts
-import { userHasEntitlement, userHasAnyEntitlement } from "@superwall/verify";
+import { verifyEntitlements } from "@superwall/verify";
 
-await userHasEntitlement(token, "pro", { publicApiKey });
-await userHasAnyEntitlement(token, ["pro", "team"], { publicApiKey });
+const result = await verifyEntitlements(tokenFromClient, { publicApiKey });
+const pro = result.entitlements.find((e) => e.identifier === "pro");
+if (!pro || (pro.expiresAt !== null && pro.expiresAt <= Date.now())) {
+  return res.status(402).end();
+}
 ```
 
 A valid signature proves Superwall issued those exact entitlements. Errors

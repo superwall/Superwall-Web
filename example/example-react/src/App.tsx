@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { BadgeCheck, Crown, Plus, Search, Sparkles, UserRound, BarChart3, ArrowLeft } from "lucide-react";
+import { BadgeCheck, ChevronDown, Crown, Plus, RefreshCw, Search, Sparkles, UserRound, BarChart3, ArrowLeft, Wallet } from "lucide-react";
 import { SuperwallPaywall, usePlacement, useSignal, useSuperwall, useUser } from "@superwall/paywalls-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import "./index.css";
 
 interface Horse {
@@ -320,6 +320,8 @@ export function App() {
             </CardContent>
           </Card>
 
+          <CustomerInfoCard />
+
           <Card className="rounded-lg">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-lg">
@@ -398,6 +400,127 @@ function HorseCard({
           {owned ? "Claimed" : pending ? "Stamping" : "Claim card"}
         </Button>
       </CardContent>
+    </Card>
+  );
+}
+
+const fmtEpoch = (ms: number) =>
+  new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(ms));
+
+/** Collapsible card over `sw.customerInfo` — the server-truth snapshot from
+ *  the last `/entitlements` read. The refresh button demonstrates
+ *  `sw.purchases.refreshCustomerInfo()`. */
+function CustomerInfoCard() {
+  const sw = useSuperwall();
+  const info = useSignal(sw.customerInfo);
+  const token = useSignal(sw.entitlementsToken);
+  const [open, setOpen] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await sw.purchases.refreshCustomerInfo();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <Card className="rounded-lg">
+      <CardHeader
+        className="cursor-pointer select-none"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Wallet className="size-5" />
+          Customer Info
+        </CardTitle>
+        <CardDescription>
+          {info
+            ? `${info.entitlements.length} entitlement${info.entitlements.length === 1 ? "" : "s"} on record`
+            : "No server snapshot yet"}
+        </CardDescription>
+        <CardAction className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={refreshing}
+            onClick={(e) => {
+              e.stopPropagation();
+              void refresh();
+            }}
+            aria-label="Refresh customer info"
+          >
+            <RefreshCw className={refreshing ? "animate-spin" : ""} />
+          </Button>
+          <ChevronDown
+            className={`size-4 text-stone-500 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </CardAction>
+      </CardHeader>
+
+      {open && (
+        <CardContent className="space-y-4">
+          {!info ? (
+            <div className="rounded-md border border-dashed border-stone-300 p-4 text-sm text-stone-500">
+              Populated from the first <code>/entitlements</code> read after
+              configure — hit refresh to force one now.
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <StatusItem label="User ID" value={info.userId} />
+                <StatusItem
+                  label="Signed token"
+                  value={token ? `${token.slice(0, 12)}…` : "None"}
+                />
+              </div>
+
+              {info.entitlements.length === 0 ? (
+                <div className="rounded-md border border-dashed border-stone-300 p-4 text-sm text-stone-500">
+                  No entitlements on record for this user.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {info.entitlements.map((ent) => (
+                    <div
+                      key={ent.id}
+                      className="flex items-center gap-3 rounded-md border border-stone-200 bg-white px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-semibold">{ent.id}</div>
+                        <div className="text-xs text-stone-500">
+                          {ent.expiresAt
+                            ? `${ent.willRenew ? "Renews" : "Expires"} ${fmtEpoch(ent.expiresAt)}`
+                            : ent.isLifetime
+                              ? "Lifetime"
+                              : ent.renewedAt
+                                ? `Renewed ${fmtEpoch(ent.renewedAt)}`
+                                : ent.productIds[0] ?? "—"}
+                        </div>
+                      </div>
+                      <span
+                        className={`rounded-full border px-2 py-1 text-xs font-medium ${
+                          ent.isActive
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : "border-amber-200 bg-amber-50 text-amber-800"
+                        }`}
+                      >
+                        {ent.isActive ? "Active" : "Lapsed"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </CardContent>
+      )}
     </Card>
   );
 }

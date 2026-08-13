@@ -8,7 +8,6 @@ import { SDK_VERSION } from "./version.ts";
 import {
   DiscountError,
   NoPresenterRegisteredError,
-  NotConfiguredError,
   PaywallAlreadyPresentedError,
   PaywallNotAvailableError,
   PresenterError,
@@ -118,6 +117,7 @@ import {
   RedemptionService,
   redemptionServiceLayer,
   RedeemType,
+  subscriptionStatusFromEntitlements,
   type RedemptionServiceImpl,
 } from "./internal/redemption.ts";
 import { createAutomaticPurchaseController } from "./internal/automaticPurchaseController.ts";
@@ -208,7 +208,11 @@ export interface PlacementsNamespace {
 
 export interface PurchasesNamespace {
   restore(): Promise<void>;
-  refreshCustomerInfo(): Promise<never>;
+  /** Force a `/entitlements` read and reconcile `customerInfo`,
+   *  `entitlementsToken` and `subscriptionStatus` from it. Resolves with the
+   *  updated `CustomerInfo` snapshot; a failed read leaves prior state intact
+   *  (resolves with the existing snapshot, `null` if none yet). */
+  refreshCustomerInfo(): Promise<CustomerInfo | null>;
   setSubscriptionStatus(s: SubscriptionStatus): void;
   /** Catalog products from the parsed config. Empty array pre-configure
    *  or when the static_config carries no products. */
@@ -219,9 +223,10 @@ export interface PurchasesNamespace {
   /** Current Superwall-signed entitlements token (`null` if none yet). Send it
    *  to your backend and verify with `@superwall/verify`'s `verifyEntitlements`
    *  for a stateless, offline entitlement check. Refreshed from each
-   *  `/entitlements` read (~hourly to track `exp`). Best-effort: `null` when
-   *  the backend isn't issuing tokens. For reactive reads, see
-   *  `sw.entitlementsToken`. */
+   *  `/entitlements` read — every ~10 min of foreground time, on tab refocus,
+   *  and after purchase / restore / identify — comfortably inside the token's
+   *  1h `exp`. Best-effort: `null` when the backend isn't issuing tokens. For
+   *  reactive reads, see `sw.entitlementsToken`. */
   getEntitlementsToken(): string | null;
   // NOTE: `purchase(product)` is intentionally hidden for now. With the default
   // automaticPurchaseController it only resolves while a paywall is presenting
@@ -232,8 +237,13 @@ export interface PurchasesNamespace {
 }
 
 export interface EntitlementsNamespace {
+  /** Currently-active entitlements — derived from `subscriptionStatus`. */
   readonly active: Readable<Entitlement[]>;
+  /** Lapsed/expired entitlements the server still knows about — derived from
+   *  the last `/entitlements` read (`customerInfo`). Empty until the first
+   *  read lands. */
   readonly inactive: Readable<Entitlement[]>;
+  /** Union of `active` + `inactive` (active wins on id collisions). */
   readonly all: Readable<Entitlement[]>;
   byProductIds(ids: string[]): Entitlement[];
 }
@@ -805,6 +815,23 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         ),
       );
     });
+    // Legacy `custom` postMessage from the paywall iframe, surfaced by the
+    // presenter as `customPaywallAction`.
+    target.addEventListener("customPaywallAction", (e) => {
+      runFireAndForget(
+        "paywallEvents",
+        "customPaywallAction bridge effect failed",
+        bus.withDelegate(
+          (d) => d.onCustomPaywallAction?.(e.detail.name),
+          (cause) =>
+            logViaRuntime(
+              "paywallEvents",
+              "delegate.onCustomPaywallAction threw",
+              cause,
+            ),
+        ),
+      );
+    });
 
     // Discount redemption results: resolve a matching in-flight
     // redeemDiscount(). The paywall's `discount_redemption_result` postMessage
@@ -1323,7 +1350,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     attributes: asReadable(attrsSig),
     integrationAttributes: asReadable(intAttrsSig),
 
-    identify: (userId, _identityOpts) =>
+    identify: (userId, identityOpts) =>
       runPublic(
         Effect.gen(function* () {
           // Capture the appUserId before the identity mutation so we can detect
@@ -1362,6 +1389,32 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
                 "identityManager",
                 "entitlements refresh on identify failed",
                 cause,
+              ),
+            );
+          }
+          // restorePaywallAssignments — re-fetch config + re-run experiment
+          // assignment for the new identity under the Assignments pending
+          // gate, so register() blocks until fresh assignments land (mirrors
+          // the mobile SDKs' IdentityOptions semantics). Best-effort: a
+          // failed fetch keeps the cached assignments and never fails
+          // identify() itself.
+          if (identityOpts?.restorePaywallAssignments) {
+            yield* IdentityService.beginPending(IdentityPending.Assignments);
+            yield* Effect.gen(function* () {
+              const config = yield* ConfigService;
+              const assignments = yield* AssignmentService;
+              yield* config.fetch();
+              yield* eagerAssign(config, assignments);
+              yield* confirmAssignments(assignments);
+            }).pipe(
+              Effect.tapError((e) =>
+                Effect.logDebug("identify: assignment restore failed", {
+                  error: String(e),
+                }),
+              ),
+              Effect.catchAll(() => Effect.void),
+              Effect.ensuring(
+                IdentityService.endPending(IdentityPending.Assignments),
               ),
             );
           }
@@ -1602,8 +1655,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         // Decision pipeline:
         //   placementNotFound / noAudienceMatch / holdout / userSubscribed → skipped
         //   paywall → look up real paywall info from config; present
-        // No config loaded ⇒ throw — caller is responsible for awaiting
-        // sw.ready before register().
+        // The awaitReady() gate above already blocked until the initial
+        // configure pass finished, so a null config here means configuration
+        // actually FAILED (offline with no cache, bad key) — throw rather
+        // than evaluate against nothing. Awaiting sw.ready wouldn't help;
+        // it surfaces the same failure earlier.
         const configLoaded = await runtime.runPromise(
           Effect.gen(function* () {
             const config = yield* ConfigService;
@@ -2264,6 +2320,72 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     activePresenter?.redeemDiscount?.("");
   };
 
+  /** Publish a CustomerInfo snapshot derived from an entitlement set.
+   *  The `/entitlements` wire response carries no transaction history, so
+   *  `subscriptions` / `nonSubscriptions` stay empty on web for now.
+   *  Structural dedupe — the 10-min poll re-applying an identical set must
+   *  not re-fire `onCustomerInfoChange`. */
+  const applyCustomerInfo = (ents: Entitlement[]): void => {
+    const next: CustomerInfo = {
+      userId: effectiveSig.value,
+      subscriptions: [],
+      nonSubscriptions: [],
+      entitlements: ents,
+    };
+    const prev = customerSig.value;
+    if (
+      prev !== null &&
+      prev.userId === next.userId &&
+      prev.entitlements.length === next.entitlements.length &&
+      prev.entitlements.every((e, i) => {
+        const n = next.entitlements[i]!;
+        return e.id === n.id && e.isActive === n.isActive;
+      })
+    ) {
+      return;
+    }
+    customerSig.set(next);
+  };
+
+  /** One-shot `/entitlements` read. Shared by the automatic purchase
+   *  controller's poll and the public `purchases.refreshCustomerInfo()`.
+   *  On success updates the signed-token + customerInfo signals and returns
+   *  the parsed set; on failure returns `null` leaving prior state intact. */
+  const refreshWebEntitlements = async (): Promise<Entitlement[] | null> => {
+    const res = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const r = yield* RedemptionService;
+          return yield* r.refreshWebEntitlements();
+        }),
+      )
+      .catch(() => null);
+    if (!res) return null;
+    // Surface the signed token to the host (best-effort). Only set when the
+    // read succeeded — a null `res` above leaves the prior token intact.
+    if (res.entitlementsToken !== undefined) {
+      entitlementsTokenSig.set(res.entitlementsToken);
+    }
+    // Prefer customerInfo.entitlements; the top-level array is often an
+    // empty `[]` (not nullish) so `??` alone would pick it and drop the
+    // real ones. BE wire uses `identifier`, tolerate `id`.
+    const ci = res.customerInfo?.entitlements;
+    const list = ci && ci.length > 0 ? ci : (res.entitlements ?? ci ?? []);
+    const ents = list.map((e) => {
+      const ent = typeof e === "object" && e !== null
+        ? (e as { id?: string; identifier?: string; isActive?: boolean; productIds?: string[] })
+        : {};
+      return {
+        id: ent.identifier ?? ent.id ?? "",
+        type: "SERVICE_LEVEL" as const,
+        isActive: ent.isActive ?? true,
+        productIds: ent.productIds ?? [],
+      };
+    });
+    applyCustomerInfo(ents);
+    return ents;
+  };
+
   // Build the PurchaseController. Default = automatic (handles standard
   // Stripe paywall flow + ?code= redemption + web_entitlements polling).
   // Consumer-provided controllers take over fully.
@@ -2318,6 +2440,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             isActive: e.isActive ?? true,
             productIds: e.productIds ?? [],
           }));
+        // A successful redeem carries the authoritative customerInfo — seed
+        // the public snapshot without waiting for the next /entitlements read.
+        if (res.customerInfo?.entitlements) {
+          applyCustomerInfo(ents);
+        }
         const status =
           codeResult?.status === "EXPIRED"
             ? ("expired" as const)
@@ -2337,38 +2464,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }
         return { status, entitlements: ents };
       },
-      refreshEntitlements: async () => {
-        const res = await runtime
-          .runPromise(
-            Effect.gen(function* () {
-              const r = yield* RedemptionService;
-              return yield* r.refreshWebEntitlements();
-            }),
-          )
-          .catch(() => null);
-        if (!res) return null;
-        // Surface the signed token to the host (best-effort). Only set when the
-        // read succeeded — a null `res` above leaves the prior token intact.
-        if (res.entitlementsToken !== undefined) {
-          entitlementsTokenSig.set(res.entitlementsToken);
-        }
-        // Prefer customerInfo.entitlements; the top-level array is often an
-        // empty `[]` (not nullish) so `??` alone would pick it and drop the
-        // real ones. BE wire uses `identifier`, tolerate `id`.
-        const ci = res.customerInfo?.entitlements;
-        const list = ci && ci.length > 0 ? ci : (res.entitlements ?? ci ?? []);
-        return list.map((e) => {
-          const ent = typeof e === "object" && e !== null
-            ? (e as { id?: string; identifier?: string; isActive?: boolean; productIds?: string[] })
-            : {};
-          return {
-            id: ent.identifier ?? ent.id ?? "",
-            type: "SERVICE_LEVEL" as const,
-            isActive: ent.isActive ?? true,
-            productIds: ent.productIds ?? [],
-          };
-        });
-      },
+      refreshEntitlements: refreshWebEntitlements,
       setSubscriptionStatus: (s) => {
         // Reuse the public-facing setter so delegate / event chain fires.
         const prev = subStatusSig.value;
@@ -2492,8 +2588,16 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     restore: async () => {
       await runRestore();
     },
-    refreshCustomerInfo: () =>
-      Promise.reject(new NotConfiguredError(new Error("purchases not yet wired"))),
+    refreshCustomerInfo: async () => {
+      const ents = await refreshWebEntitlements();
+      if (ents !== null) {
+        // The /entitlements read is authoritative server state — reconcile
+        // subscriptionStatus through the public setter so the delegate +
+        // event chain fires (dedupe inside makes a no-change call silent).
+        purchases.setSubscriptionStatus(subscriptionStatusFromEntitlements(ents));
+      }
+      return customerSig.value;
+    },
     setSubscriptionStatus: (s) => {
       const prev = subStatusSig.value;
       if (subscriptionStatusEqual(prev, s)) return;
@@ -2547,16 +2651,27 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   };
 
   const entitlements: EntitlementsNamespace = (() => {
-    // Derived from subscriptionStatus.
+    // `active` derives from subscriptionStatus (authoritative for the active
+    // set — includes optimistic post-checkout flips the customerInfo read
+    // hasn't reconciled yet). `inactive` derives from the customerInfo
+    // snapshot, which carries the full /entitlements set including lapsed
+    // ones. `all` is the union, active winning on id collisions.
     const activeSig = createSignal<Entitlement[]>([]);
     const inactiveSig = createSignal<Entitlement[]>([]);
     const allSig = createSignal<Entitlement[]>([]);
-    subStatusSig.subscribe((s) => {
-      const ents = s.status === "ACTIVE" ? s.entitlements : [];
-      activeSig.set(ents);
-      inactiveSig.set([]); // inactive isn't tracked client-side yet
-      allSig.set(ents);
-    });
+    const recompute = () => {
+      const s = subStatusSig.value;
+      const active = s.status === "ACTIVE" ? s.entitlements : [];
+      const activeIds = new Set(active.map((e) => e.id));
+      const inactive = (customerSig.value?.entitlements ?? []).filter(
+        (e) => !e.isActive && !activeIds.has(e.id),
+      );
+      activeSig.set(active);
+      inactiveSig.set(inactive);
+      allSig.set([...active, ...inactive]);
+    };
+    subStatusSig.subscribe(recompute);
+    customerSig.subscribe(recompute);
     return {
       active: asReadable(activeSig),
       inactive: asReadable(inactiveSig),
@@ -2567,6 +2682,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           e.productIds.some((p) => ids.includes(p)),
         );
         const seen = new Set(active.map((e) => e.id));
+
+        // Real inactive state from the last /entitlements read — richer
+        // than a config stub (the server actually knows it lapsed).
+        const inactive = inactiveSig.value.filter(
+          (e) => !seen.has(e.id) && e.productIds.some((p) => ids.includes(p)),
+        );
+        for (const e of inactive) seen.add(e.id);
 
         // Config-derived stubs (isActive=false) — purchase events upgrade
         // them later.
@@ -2584,7 +2706,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             });
           }
         }
-        return [...active, ...fromConfig];
+        return [...active, ...inactive, ...fromConfig];
       },
     };
   })();

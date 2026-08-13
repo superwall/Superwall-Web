@@ -172,6 +172,57 @@
       }
       .badge.active { color: var(--good); border-color: var(--good); }
       .badge.inactive { color: var(--warn); border-color: var(--warn); }
+      #customer-info-panel .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #customer-info-panel .panel-head h2 { margin: 0; }
+      #customer-info-panel .head-meta {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      #ci-summary { color: var(--muted); font-size: 12px; }
+      #ci-refresh {
+        padding: 4px 9px;
+        font-size: 13px;
+        line-height: 1;
+      }
+      #customer-info-panel .chev {
+        color: var(--muted);
+        font-size: 11px;
+        display: inline-block;
+        transition: transform 0.12s;
+      }
+      #customer-info-panel.collapsed .chev { transform: rotate(-90deg); }
+      #customer-info-panel.collapsed #ci-body { display: none; }
+      #ci-body { margin-top: 12px; }
+      .ent-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 0;
+        border-bottom: 1px dashed var(--border);
+      }
+      .ent-row:last-child { border-bottom: 0; }
+      .ent-row .ent-main { min-width: 0; flex: 1; }
+      .ent-row .ent-id { font-weight: 600; }
+      .ent-row .ent-sub {
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .ci-empty {
+        color: var(--muted);
+        font-size: 13px;
+        border: 1px dashed var(--border);
+        border-radius: 8px;
+        padding: 12px;
+      }
     </style>
   </head>
   <body>
@@ -191,6 +242,18 @@
           <div class="row"><span class="k">isPaywallPresented</span><span class="v" id="s-presented">—</span></div>
           <div class="row"><span class="k">entitlementsToken</span><span class="v" id="s-token" style="word-break: break-all; font-family: monospace; font-size: 11px;">—</span></div>
         </div>
+      </section>
+
+      <section class="panel" id="customer-info-panel">
+        <div class="panel-head" id="ci-head">
+          <h2>Customer Info</h2>
+          <div class="head-meta">
+            <span id="ci-summary">—</span>
+            <button id="ci-refresh" title="Refresh customer info (purchases.refreshCustomerInfo)">⟳</button>
+            <span class="chev">▾</span>
+          </div>
+        </div>
+        <div id="ci-body"></div>
       </section>
 
       <section class="panel">

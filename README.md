@@ -38,10 +38,13 @@ bun install        # from the workspace root
 ```ts
 import { createSuperwall } from "@superwall/paywalls-js";
 
-const sw = createSuperwall({ apiKey: "pk_web_…" });
+const sw = createSuperwall({ apiKey: "pk_…" });
 
-// Optional — block until config + identity hydration land. Most methods
-// internally await sw.ready so you don't need to.
+// Optional — public methods (register, identify, …) wait for the initial
+// configure pass internally, so you don't need to await this. If
+// configuration failed outright (offline with no cached config, bad key),
+// register() throws PaywallNotAvailableError("no_config"); awaiting `ready`
+// just surfaces that failure earlier.
 await sw.ready;
 
 await sw.user.identify("user_42");
@@ -68,7 +71,7 @@ if (result.type === "presented" && result.result.type === "purchased") {
 ```ts
 import { createSuperwall, user, register, events } from "@superwall/paywalls-js";
 
-createSuperwall({ apiKey: "pk_web_…" });   // first call registers the default
+createSuperwall({ apiKey: "pk_…" });   // first call registers the default
 
 await user.identify("user_42");
 const r = await register({ placement: "checkout" });
@@ -86,7 +89,7 @@ import { SuperwallProvider, useUser, usePlacement } from "@superwall/paywalls-re
 
 function App() {
   return (
-    <SuperwallProvider apiKey="pk_web_…">
+    <SuperwallProvider apiKey="pk_…">
       <Home />
     </SuperwallProvider>
   );
@@ -111,7 +114,7 @@ function Home() {
 
 ### Gating render on configuration (optional)
 
-By default every method internally awaits `sw.ready`, so you don't need a Suspense boundary. Use it only if you want a fallback while initial config + enrichment land:
+Public methods wait for the initial configure pass internally, so you don't need a Suspense boundary for correctness. Use one only if you want a fallback while initial config + enrichment land:
 
 ```tsx
 import { use, Suspense } from "react";
@@ -122,7 +125,7 @@ function ConfigGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-<SuperwallProvider apiKey="pk_web_…">
+<SuperwallProvider apiKey="pk_…">
   <Suspense fallback={<Loading />}>
     <ConfigGate><Home /></ConfigGate>
   </Suspense>

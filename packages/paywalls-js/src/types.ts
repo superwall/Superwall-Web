@@ -72,6 +72,11 @@ export type LogScope =
   | "transactions";
 
 export interface IdentityOptions {
+  /** When true, `identify()` re-fetches the config and re-runs experiment
+   *  assignment for the new identity before resolving. `register()` calls
+   *  block until the restore completes, so the identified user never sees a
+   *  paywall picked from the anonymous identity's stale assignments.
+   *  Best-effort — a failed fetch keeps the cached assignments. */
   restorePaywallAssignments?: boolean;
 }
 

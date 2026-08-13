@@ -420,4 +420,74 @@ describe("userHasEntitlement / userHasAnyEntitlement", () => {
       }),
     ).toBe(false);
   });
+
+  // The token is a snapshot at issue time with a 1h life — an entitlement
+  // can lapse while the token is still valid. The helpers must not grant
+  // access on it.
+  test("userHasEntitlement returns false for a lapsed entitlement in a valid token", async () => {
+    const token = await sign({
+      kid: k.kid,
+      privateKey: k.privateKey,
+      entitlements: [
+        {
+          identifier: "pro",
+          expiresAt: Date.now() - 60_000, // lapsed a minute ago
+          productId: "prod_x",
+          store: "STRIPE",
+          state: "subscribed",
+        },
+      ],
+    });
+    expect(
+      await userHasEntitlement(token, "pro", { publicApiKey: PK }),
+    ).toBe(false);
+    // But verifyEntitlements still returns it verbatim — the raw-claims
+    // contract is unchanged.
+    const result = await verifyEntitlements(token, { publicApiKey: PK });
+    expect(result.entitlements[0]?.identifier).toBe("pro");
+  });
+
+  test("userHasEntitlement treats expiresAt=null as lifetime (never lapsed)", async () => {
+    const token = await sign({
+      kid: k.kid,
+      privateKey: k.privateKey,
+      entitlements: [{ identifier: "lifetime", expiresAt: null }],
+    });
+    expect(
+      await userHasEntitlement(token, "lifetime", { publicApiKey: PK }),
+    ).toBe(true);
+  });
+
+  test("userHasEntitlement honors clockToleranceSec for a just-lapsed entitlement", async () => {
+    const token = await sign({
+      kid: k.kid,
+      privateKey: k.privateKey,
+      entitlements: [
+        { identifier: "pro", expiresAt: Date.now() - 5_000 }, // lapsed 5s ago
+      ],
+    });
+    expect(
+      await userHasEntitlement(token, "pro", {
+        publicApiKey: PK,
+        clockToleranceSec: 30,
+      }),
+    ).toBe(true);
+  });
+
+  test("userHasAnyEntitlement skips lapsed entitlements", async () => {
+    const token = await sign({
+      kid: k.kid,
+      privateKey: k.privateKey,
+      entitlements: [
+        { identifier: "pro", expiresAt: Date.now() - 60_000 },
+        { identifier: "team", expiresAt: Date.now() + 60_000 },
+      ],
+    });
+    expect(
+      await userHasAnyEntitlement(token, ["pro"], { publicApiKey: PK }),
+    ).toBe(false);
+    expect(
+      await userHasAnyEntitlement(token, ["pro", "team"], { publicApiKey: PK }),
+    ).toBe(true);
+  });
 });
