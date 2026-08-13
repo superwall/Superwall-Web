@@ -7,8 +7,13 @@ name: Publish
 # already on npm — so merges that don't bump a version are no-ops. Bump the
 # version in a package's package.json to release it.
 #
-# Requires the `NPM_TOKEN` repo secret (npm automation token with publish
-# rights to the @superwall scope).
+# Auth is npm trusted publishing (OIDC) — no NPM_TOKEN secret. Each package on
+# npmjs.com is configured with a trusted publisher pointing at this repo,
+# workflow `publish.yml`, environment `Publish`. That requires:
+#   - the `Publish` environment on the job
+#   - `id-token: write` permission
+#   - npm CLI >= 11.5.1 (Node 24 ships it)
+#   - a GitHub-hosted runner
 
 on:
   push:
@@ -28,8 +33,10 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: Publish
     permissions:
       contents: read
+      id-token: write # required for npm trusted publishing (OIDC)
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
     steps:
@@ -41,18 +48,28 @@ jobs:
           # `packageManager` in the root package.json.
           bun-version: "1.3.11"
 
+      # Node 24 ships npm >= 11.5.1, the first npm CLI that can do the OIDC
+      # token exchange for trusted publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
       - name: Install
         run: bun install --frozen-lockfile
 
       - name: Test
         run: bun run test
 
-      - name: Configure npm auth
-        run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > "$HOME/.npmrc"
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Build
+        run: bun run build
 
       - name: Publish changed packages
+        # `bun publish` can't do the OIDC exchange, and `npm publish` can't
+        # resolve `workspace:*` deps — so pack with bun (which rewrites
+        # workspace protocols to concrete versions) and upload the tarball
+        # with npm (which authenticates via trusted publishing when no token
+        # is present).
         run: |
           set -euo pipefail
           # Dependency order: dependees before dependents.
@@ -66,12 +83,14 @@ jobs:
               echo "✓ $name@$version already on npm — skipping"
               continue
             fi
+            # `--quiet` still prints a leading blank line — take the last line.
+            tarball=$(cd "$dir" && bun pm pack --quiet | tail -n1)
             if [ "$DRY_RUN" = "1" ]; then
               echo "→ [dry run] would publish $name@$version"
-              (cd "$dir" && bun publish --access public --dry-run)
+              (cd "$dir" && npm publish "$tarball" --access public --dry-run)
             else
               echo "→ publishing $name@$version"
-              (cd "$dir" && bun publish --access public)
+              (cd "$dir" && npm publish "$tarball" --access public)
               published=$((published + 1))
             fi
           done
