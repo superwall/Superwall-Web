@@ -182,6 +182,35 @@ it.effect("getStaticConfig hits the right URL with all required headers", () => 
   }).pipe(Effect.provide(stack));
 });
 
+it.effect("getStaticConfig forces browser-cache revalidation in release (no-cache)", () => {
+  // The CDN stamps a browser-facing `Cache-Control: max-age` (hours) on the
+  // config endpoint. Without an explicit cache mode the browser serves the
+  // config from its HTTP cache without hitting the network, so dashboard
+  // changes stay invisible until the max-age expires — server-side purges
+  // can't reach a browser cache. Regression guard for that.
+  const { fetch, calls } = mockFetch(() => new Response("{}", { status: 200 }));
+  const stack = buildStack(fetch, { environment: "release" });
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.getStaticConfig();
+    expect(calls[0]!.init?.cache).toBe("no-cache");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("getStaticConfig bypasses the browser cache entirely in sandbox (no-store)", () => {
+  const { fetch, calls } = mockFetch(() => new Response("{}", { status: 200 }));
+  const stack = buildStack(fetch, { environment: "developer" });
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.getStaticConfig();
+    expect(calls[0]!.init?.cache).toBe("no-store");
+  }).pipe(Effect.provide(stack));
+});
+
 it.effect("getStaticConfig URL-encodes the apiKey", () => {
   const { fetch, calls } = mockFetch(() => new Response("{}", { status: 200 }));
   const stack = buildStack(fetch, { apiKey: "pk live/ABC+xyz" });

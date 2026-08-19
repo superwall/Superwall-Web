@@ -180,15 +180,21 @@ const make = (config: NetworkConfig) =>
         const headers = yield* buildHeaders();
 
         const response = yield* Effect.tryPromise({
-          // In non-release environments bypass the browser HTTP cache so
-          // config changes are picked up immediately during development.
-          // In release the endpoint's own Cache-Control headers apply and
-          // our storage-backed layer handles staleness detection.
+          // Never let the browser HTTP cache satisfy a config fetch without
+          // consulting the network. The CDN stamps a browser-facing
+          // `Cache-Control: max-age` (hours) on this endpoint, so the default
+          // cache mode returns a disk-cached body — making the SDK's
+          // background revalidation a no-op and leaving dashboard changes
+          // invisible until that max-age expires; server-side cache purges
+          // can't reach a browser cache. `no-cache` forces revalidation with
+          // the CDN on every fetch (still allowing a 304 + cached-body reuse
+          // when validators match); sandbox environments use `no-store` to
+          // skip the browser cache entirely during development.
           try: async () =>
             requireFetch()(url, {
               method: "GET",
               headers,
-              ...(isSandbox(config.environment) && { cache: "no-store" }),
+              cache: isSandbox(config.environment) ? "no-store" : "no-cache",
             }),
           catch: (cause) =>
             new NetworkRequestError({
