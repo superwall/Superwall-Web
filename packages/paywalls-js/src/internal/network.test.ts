@@ -183,11 +183,6 @@ it.effect("getStaticConfig hits the right URL with all required headers", () => 
 });
 
 it.effect("getStaticConfig forces browser-cache revalidation in release (no-cache)", () => {
-  // The CDN stamps a browser-facing `Cache-Control: max-age` (hours) on the
-  // config endpoint. Without an explicit cache mode the browser serves the
-  // config from its HTTP cache without hitting the network, so dashboard
-  // changes stay invisible until the max-age expires — server-side purges
-  // can't reach a browser cache. Regression guard for that.
   const { fetch, calls } = mockFetch(() => new Response("{}", { status: 200 }));
   const stack = buildStack(fetch, { environment: "release" });
 
