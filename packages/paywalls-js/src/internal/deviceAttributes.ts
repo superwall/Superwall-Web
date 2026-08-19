@@ -62,6 +62,41 @@ const deriveInterfaceStyle = (): "Light" | "Dark" => {
   }
 };
 
+const DEFAULT_ROOT_FONT_PX = 16;
+
+/** Effective root font size in px (integer) — best-available proxy for the
+ *  browser/OS text-size setting. Returns 16 on SSR / failure. */
+const deriveFontSize = (): number => {
+  const w = safeWindow();
+  const doc = typeof document === "undefined" ? undefined : document;
+  if (!w || !doc?.documentElement || typeof w.getComputedStyle !== "function") {
+    return DEFAULT_ROOT_FONT_PX;
+  }
+  try {
+    const px = parseFloat(w.getComputedStyle(doc.documentElement).fontSize);
+    if (!Number.isFinite(px) || px <= 0) return DEFAULT_ROOT_FONT_PX;
+    return Math.round(px);
+  } catch {
+    return DEFAULT_ROOT_FONT_PX;
+  }
+};
+
+/** Root font size ÷ 16 (2-decimal multiplier). Returns 1 on SSR / failure. */
+const deriveFontScale = (): number => {
+  const w = safeWindow();
+  const doc = typeof document === "undefined" ? undefined : document;
+  if (!w || !doc?.documentElement || typeof w.getComputedStyle !== "function") {
+    return 1;
+  }
+  try {
+    const px = parseFloat(w.getComputedStyle(doc.documentElement).fontSize);
+    if (!Number.isFinite(px) || px <= 0) return 1;
+    return Math.round((px / DEFAULT_ROOT_FONT_PX) * 100) / 100;
+  } catch {
+    return 1;
+  }
+};
+
 const deriveDeviceLocale = (): string => safeNavigator()?.language ?? "en-US";
 
 const derivePreferredLocale = (): string => {
@@ -293,6 +328,8 @@ export const buildDeviceAttributes = (
     screenWidth: s?.width ?? 0,
     screenHeight: s?.height ?? 0,
     devicePixelRatio: w?.devicePixelRatio ?? 1,
+    fontScale: deriveFontScale(),
+    fontSize: deriveFontSize(),
     connectionType: deriveConnectionType(),
     hardwareConcurrency: n?.hardwareConcurrency ?? null,
     deviceMemory: n?.deviceMemory ?? null,
