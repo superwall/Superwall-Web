@@ -180,15 +180,13 @@ const make = (config: NetworkConfig) =>
         const headers = yield* buildHeaders();
 
         const response = yield* Effect.tryPromise({
-          // In non-release environments bypass the browser HTTP cache so
-          // config changes are picked up immediately during development.
-          // In release the endpoint's own Cache-Control headers apply and
-          // our storage-backed layer handles staleness detection.
+          // Explicit cache mode: the CDN sends a browser-facing max-age, so
+          // the default mode would serve stale config from the browser cache.
           try: async () =>
             requireFetch()(url, {
               method: "GET",
               headers,
-              ...(isSandbox(config.environment) && { cache: "no-store" }),
+              cache: isSandbox(config.environment) ? "no-store" : "no-cache",
             }),
           catch: (cause) =>
             new NetworkRequestError({
