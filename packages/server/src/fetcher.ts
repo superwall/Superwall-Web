@@ -11,8 +11,7 @@ import {
   type WebEntitlementsResponse,
 } from "@superwall/core";
 import type { FetchLike } from "./types.ts";
-
-const SDK_VERSION = "0.0.0";
+import { SDK_VERSION } from "./version.ts";
 
 export interface FetcherConfig {
   readonly apiKey: string;

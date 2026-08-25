@@ -67,6 +67,30 @@ for await (const rel of new Glob("*/package.json").scan(PACKAGES_DIR)) {
   updated.push(`${pkg.name} ${pkg.version === version ? "→" : ""} ${version}`);
 }
 
+// Stamp in-source SDK_VERSION constants (shipped in bundles, where
+// package.json isn't readable). Same lockstep version as the packages.
+const VERSION_TS_FILES = [
+  "../packages/paywalls-js/src/version.ts",
+  "../packages/server/src/version.ts",
+];
+for (const rel of VERSION_TS_FILES) {
+  const url = new URL(rel, import.meta.url);
+  const file = Bun.file(url);
+  if (!(await file.exists())) fail(`missing version constant file: ${rel}`);
+  const src = await file.text();
+  const stamped = src.replace(
+    /export const SDK_VERSION = "[^"]*";/,
+    `export const SDK_VERSION = "${version}";`,
+  );
+  if (!stamped.includes(`export const SDK_VERSION = "${version}";`)) {
+    fail(`could not stamp SDK_VERSION in ${rel}`);
+  }
+  if (stamped !== src) {
+    await Bun.write(url, stamped);
+    updated.push(`${rel} → ${version}`);
+  }
+}
+
 console.log(`Canonical version: ${version}`);
 console.log(
   updated.length

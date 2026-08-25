@@ -1,9 +1,9 @@
 import { it, expect } from "@effect/vitest";
 import {
   buildDeviceAttributes,
-  SDK_VERSION,
   type DeviceAttributesInput,
 } from "./deviceAttributes.ts";
+import { SDK_VERSION } from "../version.ts";
 
 const baseInput = (
   overrides: Partial<DeviceAttributesInput> = {},
@@ -36,10 +36,16 @@ it("buildDeviceAttributes: emits the canonical platform header", () => {
 
 it("buildDeviceAttributes: padded versions are zero-padded for CEL string compare", () => {
   const out = buildDeviceAttributes(baseInput({ appVersion: "1.10.2" }));
-  expect(out.appVersionPadded).toBe("0001.0010.0002");
+  // 3-digit segments — the platform's padded-version width. A different
+  // width breaks lexicographic comparison against platform-padded values.
+  expect(out.appVersionPadded).toBe("001.010.002");
   expect(out.sdkVersion).toBe(SDK_VERSION);
-  // Padded SDK version always padded even if SDK_VERSION is "0.0.0-alpha".
-  expect((out.sdkVersionPadded as string).split(".")).toHaveLength(3);
+  expect(SDK_VERSION).not.toBe("0.0.0");
+  expect(out.sdkVersionPadded).toBe(
+    SDK_VERSION.split(".")
+      .map((seg) => seg.replace(/[^0-9]/g, "").padStart(3, "0"))
+      .join("."),
+  );
 });
 
 it("buildDeviceAttributes: subscription state + entitlements flow through", () => {
