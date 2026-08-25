@@ -3,8 +3,7 @@
 // builder runs on an SSR boundary.
 
 import type { JsonValue } from "../types.ts";
-
-export const SDK_VERSION = "0.0.0-alpha";
+import { SDK_VERSION } from "../version.ts";
 
 export interface DeviceAttributesInput {
   readonly publicApiKey: string;
@@ -117,10 +116,13 @@ const deriveBundleId = (input: DeviceAttributesInput): string => {
 
 /** Zero-pad each version segment to 4 digits so CEL string-compare matches
  *  semver order. `1.10.2` → `0001.0010.0002`. */
+// 3-digit segments to match the platform's padded-version convention
+// (device.sdkVersionPadded examples like "003.000.010"); padded values are
+// compared lexicographically, so the width must agree everywhere.
 const padVersion = (v: string): string =>
   v
     .split(".")
-    .map((seg) => seg.replace(/[^0-9]/g, "").padStart(4, "0"))
+    .map((seg) => seg.replace(/[^0-9]/g, "").padStart(3, "0"))
     .join(".");
 
 /** `connection.effectiveType` (Chrome/Edge/Opera) — undefined on Safari/FF. */
