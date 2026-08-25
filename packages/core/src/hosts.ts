@@ -5,6 +5,7 @@ const RELEASE_HOSTS: EnvironmentHosts = {
   collector: "collector.superwall.com",
   enrichment: "enrichment-api.superwall.com",
   subscriptions: "subscriptions-api.superwall.com",
+  paywallWorker: "web-api.superwall.app",
 };
 
 const RC_HOSTS: EnvironmentHosts = {
@@ -12,6 +13,7 @@ const RC_HOSTS: EnvironmentHosts = {
   collector: "collector.superwallcanary.com",
   enrichment: "enrichment-api.superwall.dev",
   subscriptions: "subscriptions-api.superwall.dev",
+  paywallWorker: "web-api.superwallbeta.app",
 };
 
 const DEV_HOSTS: EnvironmentHosts = {
@@ -19,6 +21,7 @@ const DEV_HOSTS: EnvironmentHosts = {
   collector: "collector.superwall.com",
   enrichment: "enrichment-api.superwall.dev",
   subscriptions: "subscriptions-api.superwall.dev",
+  paywallWorker: "web-api.superwallapp.dev",
 };
 
 export const resolveHosts = (env: NetworkEnvironment): EnvironmentHosts => {
@@ -32,7 +35,9 @@ export const resolveHosts = (env: NetworkEnvironment): EnvironmentHosts => {
         return DEV_HOSTS;
     }
   }
-  return env.custom;
+  // Custom environments predate `paywallWorker`; fall back to the production
+  // worker (consistent with isSandbox treating custom as production).
+  return { paywallWorker: RELEASE_HOSTS.paywallWorker, ...env.custom };
 };
 
 // Custom environments are typically internal proxies → assume production.

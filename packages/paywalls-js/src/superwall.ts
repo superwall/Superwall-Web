@@ -1837,7 +1837,12 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }),
           ...(hostOrigin && { hostOrigin }),
           ...(cancelUrl && { cancelUrl }),
-          apiBase: `https://${hosts.base}`,
+          // The iframe controller resolves every WEBAPP endpoint against
+          // `apiBase` (`/api/checkout/*`, `/api/proxy/events`,
+          // `/api/products/variables`, `/api/post-checkout-redirect`). Those
+          // routes exist only on the web-paywall-app worker's zones — the
+          // `hosts.base` config API does not serve or CORS-allow them.
+          apiBase: `https://${hosts.paywallWorker}`,
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: "web-sdk" as const,
