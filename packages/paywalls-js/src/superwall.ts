@@ -124,6 +124,28 @@ import { createAutomaticPurchaseController } from "./internal/automaticPurchaseC
 import type { PaywallPurchaseEvent } from "./presenter.ts";
 
 // ---------------------------------------------------------------------------
+// Paywall worker hosts
+// ---------------------------------------------------------------------------
+
+// The iframe controller resolves every WEBAPP endpoint against `apiBase`
+// (`/api/checkout/*`, `/api/proxy/events`, `/api/products/variables`,
+// `/api/post-checkout-redirect`). Those routes exist only on the
+// web-paywall-app worker's zones — the config API (`hosts.base`) does not
+// serve or CORS-allow them — so the worker host is fixed per environment
+// rather than configurable through NetworkEnvironment. Custom environments
+// use the production worker, consistent with isSandbox treating them as
+// production.
+const PAYWALL_WORKER_HOSTS = {
+  release: "web-api.superwall.app",
+  releaseCandidate: "web-api.superwallbeta.app",
+  developer: "web-api.superwallapp.dev",
+} as const;
+
+export const resolvePaywallWorkerHost = (
+  env: import("./types.ts").NetworkEnvironment,
+): string => (typeof env === "string" ? PAYWALL_WORKER_HOSTS[env] : PAYWALL_WORKER_HOSTS.release);
+
+// ---------------------------------------------------------------------------
 // Public namespace shapes
 // ---------------------------------------------------------------------------
 
@@ -1837,12 +1859,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           }),
           ...(hostOrigin && { hostOrigin }),
           ...(cancelUrl && { cancelUrl }),
-          // The iframe controller resolves every WEBAPP endpoint against
-          // `apiBase` (`/api/checkout/*`, `/api/proxy/events`,
-          // `/api/products/variables`, `/api/post-checkout-redirect`). Those
-          // routes exist only on the web-paywall-app worker's zones — the
-          // `hosts.base` config API does not serve or CORS-allow them.
-          apiBase: `https://${hosts.paywallWorker}`,
+          // Worker host, not `hosts.base` — see PAYWALL_WORKER_HOSTS.
+          apiBase: `https://${resolvePaywallWorkerHost(env)}`,
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: "web-sdk" as const,

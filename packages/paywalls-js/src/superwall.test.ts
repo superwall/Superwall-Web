@@ -58,7 +58,19 @@ const EMPTY_STATIC_CONFIG = JSON.stringify({
 // Default fetch for tests that don't exercise the network: returns a valid
 // empty static_config so configure() flips to "configured", and 204 for
 // everything else.
-import { buildInitPayload } from "./superwall.ts";
+import { buildInitPayload, resolvePaywallWorkerHost } from "./superwall.ts";
+
+it("resolvePaywallWorkerHost maps each environment to its worker zone", () => {
+  expect(resolvePaywallWorkerHost("release")).toBe("web-api.superwall.app");
+  expect(resolvePaywallWorkerHost("releaseCandidate")).toBe("web-api.superwallbeta.app");
+  expect(resolvePaywallWorkerHost("developer")).toBe("web-api.superwallapp.dev");
+  // Custom environments use the production worker.
+  expect(
+    resolvePaywallWorkerHost({
+      custom: { base: "api.local", collector: "c.local", enrichment: "e.local", subscriptions: "s.local" },
+    }),
+  ).toBe("web-api.superwall.app");
+});
 
 it("buildInitPayload includes all controller-required slices + resolveVariables:true", () => {
   const payload = buildInitPayload({

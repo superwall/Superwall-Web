@@ -60,22 +60,8 @@ const buildStack = (fetchImpl: typeof fetch, configOverride: Partial<NetworkConf
 it("resolveHosts returns the right base/collector/enrichment per env", () => {
   expect(resolveHosts("release").base).toBe("api.superwall.me");
   expect(resolveHosts("release").collector).toBe("collector.superwall.com");
-  expect(resolveHosts("release").paywallWorker).toBe("web-api.superwall.app");
   expect(resolveHosts("releaseCandidate").base).toBe("api.superwallcanary.com");
-  expect(resolveHosts("releaseCandidate").paywallWorker).toBe("web-api.superwallbeta.app");
   expect(resolveHosts("developer").base).toBe("api.superwall.dev");
-  expect(resolveHosts("developer").paywallWorker).toBe("web-api.superwallapp.dev");
-  const custom = resolveHosts({
-    custom: {
-      base: "api.local",
-      collector: "c.local",
-      enrichment: "e.local",
-      subscriptions: "s.local",
-    },
-  });
-  expect(custom.base).toBe("api.local");
-  // Custom hosts predate paywallWorker: it falls back to the production worker.
-  expect(custom.paywallWorker).toBe("web-api.superwall.app");
   expect(
     resolveHosts({
       custom: {
@@ -83,10 +69,9 @@ it("resolveHosts returns the right base/collector/enrichment per env", () => {
         collector: "c.local",
         enrichment: "e.local",
         subscriptions: "s.local",
-        paywallWorker: "w.local",
       },
-    }).paywallWorker,
-  ).toBe("w.local");
+    }).base,
+  ).toBe("api.local");
 });
 
 // ---------------------------------------------------------------------------

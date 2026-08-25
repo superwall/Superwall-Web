@@ -7,7 +7,7 @@ Versions apply to every published package in lockstep (see `scripts/version.ts`)
 
 ### Fixed
 
-- Route WEBAPP paywall-iframe API calls (`/api/checkout/initiate`, `/api/checkout/complete-webapp`, `/api/proxy/events`, `/api/products/variables`, `/api/post-checkout-redirect`) to the web paywall worker via a new `paywallWorker` host instead of the config API host, which does not serve those paths and fails the browser's CORS preflight. Custom environment hosts accept an optional `paywallWorker` that defaults to the production worker.
+- Route WEBAPP paywall-iframe API calls (`/api/checkout/initiate`, `/api/checkout/complete-webapp`, `/api/proxy/events`, `/api/products/variables`, `/api/post-checkout-redirect`) to the web paywall worker instead of the config API host, which does not serve those paths and fails the browser's CORS preflight. The worker host is fixed per environment; custom environments use the production worker.
 
 ## 0.2.6 — 2026-08-19
 

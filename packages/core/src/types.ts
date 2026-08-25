@@ -76,11 +76,6 @@ export interface CustomEnvironmentHosts {
   collector: string;
   enrichment: string;
   subscriptions: string;
-  /** apps/web-paywall-app worker host (`/api/checkout/*`, `/api/proxy/events`,
-   *  `/api/products/variables`, `/api/post-checkout-redirect`). The `base`
-   *  config API does not serve these paths. Defaults to the production worker
-   *  when omitted. */
-  paywallWorker?: string;
 }
 
 export type NetworkEnvironment =
@@ -94,5 +89,4 @@ export interface EnvironmentHosts {
   readonly collector: string;
   readonly enrichment: string;
   readonly subscriptions: string;
-  readonly paywallWorker: string;
 }
