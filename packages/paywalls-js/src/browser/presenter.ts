@@ -506,7 +506,7 @@ const mount = (
   if (!ctx.bootstrap && typeof console !== "undefined") {
     // No bootstrap = the paywall server can't tell we're the Web SDK and
     // will route post-checkout completion via window.location.href inside
-    // this iframe. Loud warn so regressions surface immediately.
+    // this iframe.
     console.warn(
       "[Superwall] presenter received no ctx.bootstrap — iframe URL will lack client_surface=web-sdk and post-checkout will trap-navigate inside the iframe.",
     );
@@ -862,33 +862,19 @@ const handleInbound = (
         );
         break;
       }
-      // Terminal success signal from the paywall's WebPaywallController on
-      // the `client_surface=web-sdk` branch — the controller has finished
-      // its post-checkout server work (POST /checkout/session/complete,
-      // redemption resolution) and would otherwise have done a top-frame
-      // navigation. We resolve the purchase here.
-      // ---------------------------------------------------------------
-      // Two parallel terminal-success paths exist in this dispatcher and
-      // they MUST stay separate:
-      //   • `purchase` (line ~`case "purchase":` above) — bare purchase-intent
-      //     message from non-Stripe paywalls. The SDK doesn't run checkout for
-      //     it; the consumer drives their own and reports state via
-      //     `sw.purchases.setSubscriptionStatus`. Resolves immediately on click
-      //     only in test mode.
-      //   • `post_checkout_complete` (this case) — Stripe-checkout flow on
-      //     `client_surface=web-sdk`. Resolves AFTER the paywall's
-      //     WebPaywallController finishes its server-side post-checkout
-      //     work (POST /checkout/session/complete + redemption).
-      // Don't unify them — a Stripe paywall fires both `purchase`
-      // (intent) and `post_checkout_complete` (terminal); only the latter
-      // is the real success signal.
-      // ---------------------------------------------------------------
+      // Terminal success on the `client_surface=web-sdk` branch: the paywall's
+      // WebPaywallController has finished its post-checkout server work (POST
+      // /checkout/session/complete, redemption resolution) and would otherwise
+      // have done a top-frame navigation. We resolve the purchase here.
+      //
+      // Distinct from the `purchase` case above, which is a bare intent
+      // message from non-Stripe paywalls (the consumer drives their own
+      // checkout and reports state via `sw.purchases.setSubscriptionStatus`).
+      // A Stripe paywall fires both, and only this one is terminal.
       case "post_checkout_complete": {
-        // Terminal success on the web-sdk surface. Per BE contract:
-        //  - The backend has ALREADY emitted `transaction_complete` server-
-        //    side before posting this — do NOT re-emit it locally or
-        //    consumers see double events.
-        // APC handler reads `/entitlements` after this fires to populate
+        // The backend emits `transaction_complete` server-side before posting
+        // this, so re-emitting it locally would double up consumer events.
+        // The APC handler reads `/entitlements` after this fires to populate
         // the entitlement set + transaction details.
         const rawProductId = readString(evt, "product_identifier");
         const productId: ProductIdentifier = rawProductId

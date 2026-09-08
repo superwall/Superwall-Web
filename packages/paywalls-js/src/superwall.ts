@@ -261,12 +261,11 @@ export interface PurchasesNamespace {
    *  1h `exp`. Best-effort: `null` when the backend isn't issuing tokens. For
    *  reactive reads, see `sw.entitlementsToken`. */
   getEntitlementsToken(): string | null;
-  // NOTE: `purchase(product)` is intentionally hidden for now. With the default
+  // `purchase(product)` is deliberately absent: under the default
   // automaticPurchaseController it only resolves while a paywall is presenting
-  // and the user completes Stripe checkout in parallel — standalone it does
-  // nothing useful, so it's not part of the public surface yet. The
-  // implementation lives on internally as `directPurchase` (the custom-paywall
-  // render path needs it); re-expose here once it can initiate checkout itself.
+  // and the user completes Stripe checkout in parallel, so standalone it does
+  // nothing useful. The internal `directPurchase` serves the custom-paywall
+  // render path.
 }
 
 export interface EntitlementsNamespace {
@@ -2465,7 +2464,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   /** Publish a CustomerInfo snapshot derived from an entitlement set.
    *  The `/entitlements` wire response carries no transaction history, so
-   *  `subscriptions` / `nonSubscriptions` stay empty on web for now.
+   *  `subscriptions` / `nonSubscriptions` stay empty on web.
    *  Structural dedupe — the 10-min poll re-applying an identical set must
    *  not re-fire `onCustomerInfoChange`. */
   const applyCustomerInfo = (ents: Entitlement[]): void => {
@@ -2686,10 +2685,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   ): Promise<
     { type: "purchased" } | { type: "declined" } | { type: "error"; error: Error }
   > => {
-    // directPurchase runs outside a register() call so no PaywallInfo is available,
-    // but the transaction events were designed with paywall_info as required. We cast
-    // here to emit the events with partial detail; the paywall_info field will be
-    // absent on non-register purchase paths (a known design debt, TODO: make optional).
+    // Runs outside a register() call, so there's no PaywallInfo to attach —
+    // the cast emits the transaction events with `paywall_info` absent, even
+    // though the event types declare it required.
     const emit = (
       name: "transaction_start" | "transaction_complete" | "transaction_abandon" | "transaction_fail" | "subscription_start",
       detail: Record<string, unknown>,

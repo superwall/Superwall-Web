@@ -189,7 +189,7 @@ export const createAutomaticPurchaseController = (
           off();
           resolve({ type: "cancelled" });
         }
-        // start / submit / complete: in-flight signals, no-op for now.
+        // start / submit / complete: in-flight signals, not terminal.
       });
     });
 

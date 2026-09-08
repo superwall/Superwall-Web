@@ -102,8 +102,8 @@ const resolveInterfaceStyle = (
   return "light";
 };
 
-// Enrichment is fire-and-forget with a hard 1s budget and no retries (matches
-// the native SDKs). It must never hold up `configure()`/`register()` readiness:
+// Enrichment is fire-and-forget with a hard 1s budget and no retries. It must
+// never hold up `configure()`/`register()` readiness:
 // on a cold load the enrichment effect is awaited alongside the config fetch,
 // so an unbounded wait here would stall the whole SDK behind a slow server.
 const ENRICHMENT_TIMEOUT = Duration.seconds(1);
