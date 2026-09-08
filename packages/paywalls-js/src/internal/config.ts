@@ -89,6 +89,10 @@ export interface RawExperimentRef {
 
 export interface RawPaywallResponse {
   readonly identifier: string;
+  /** Database id from `paywall_responses[].id` — distinct from the
+   *  `identifier` slug. Sent as `paywallId` (native SDK parity); absent on
+   *  configs that predate the field. */
+  readonly databaseId?: string;
   readonly name: string;
   readonly url: string;
   readonly productIds: ReadonlyArray<string>;
@@ -357,6 +361,7 @@ const ProductSlotWire = Schema.Struct({ product_id: Schema.String });
 const UrlConfigWire = Schema.Struct({ endpoints: Schema.optional(Schema.Unknown) });
 const PaywallWire = Schema.Struct({
   identifier: Schema.String,
+  id: optStr,
   name: optStr,
   url: optStr,
   product_ids: Schema.optionalWith(Schema.Array(Schema.String), { nullable: true }),
@@ -400,6 +405,7 @@ const toPaywall = (
         : undefined;
   return {
     identifier: w.identifier,
+    ...(w.id !== undefined && { databaseId: w.id }),
     name: w.name ?? w.identifier,
     url: w.url ?? "",
     productIds,

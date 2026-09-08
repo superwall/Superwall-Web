@@ -306,6 +306,11 @@ export const closeReasonShouldComplete = (r: PaywallCloseReason): boolean =>
 
 export interface PaywallInfo {
   identifier: string;
+  /** Database id from `paywall_responses[].id` — distinct from the
+   *  `identifier` slug. Mirrors the native SDKs' `PaywallInfo.databaseId`;
+   *  sent to the paywall/collector as `paywallId`. Absent on configs that
+   *  predate the field. */
+  databaseId?: string;
   name: string;
   url: string;
   experiment?: Experiment;
@@ -389,8 +394,29 @@ export interface ConfirmedAssignment {
   variant: Variant;
 }
 
+/** Post-purchase behavior resolved by the paywall's checkout flow (unified
+ *  webapp/web2app config). GRANT_ACCESS grants web entitlements directly;
+ *  REDIRECT carries a merchant URL; REDEEM and CUSTOM carry redemption
+ *  codes. Absent on older paywalls that predate the field. */
+export type PostPurchaseBehavior =
+  | "GRANT_ACCESS"
+  | "REDIRECT"
+  | "REDEEM"
+  | "CUSTOM";
+
 export type PaywallResult =
-  | { type: "purchased"; productId: string; transaction?: StoreTransaction }
+  | {
+      type: "purchased";
+      productId: string;
+      transaction?: StoreTransaction;
+      /** Prefixed (`redemption_…`) codes minted by the REDEEM / CUSTOM
+       *  post-purchase behaviors. Hand one to `sw.redeem(code)` (or the
+       *  mobile SDK's redeem) as-is to attach the purchase to a user.
+       *  Absent for paywalls without those behaviors. */
+      redemptionCodes?: string[];
+      /** Which post-purchase behavior the paywall resolved. */
+      postPurchaseBehavior?: PostPurchaseBehavior;
+    }
   | { type: "declined" }
   | { type: "restored" };
 
@@ -505,6 +531,11 @@ export interface PaywallOptions {
   automaticallyDismiss?: boolean;
   /** Test-mode override. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
+  /** How the default presenter follows a post-purchase `redirect_url`
+   *  (REDIRECT behavior). `"navigate"` (default) redirects the current tab;
+   *  `"newTab"` preserves page state but is subject to popup blocking.
+   *  Listen for `paywallWillOpenURL` to route it yourself instead. */
+  postPurchaseRedirect?: "navigate" | "newTab";
 }
 
 export interface SuperwallOptions {

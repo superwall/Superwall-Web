@@ -95,24 +95,32 @@ export interface StripeCheckoutAbandonMessage {
  *  Replaces the controller's `window.location.href = redirectUrl` step (which
  *  would otherwise trap navigation inside the SDK's iframe).
  *
- *  - `transactionData` is enrichment; it can be absent on success (e.g. one-
+ *  - `transaction_data` is enrichment; it can be absent on success (e.g. one-
  *    time prices). The SDK resolves the in-flight purchase promise from the
  *    product passed to `purchase()`, not from this field.
- *  - `redirectUrl` is only present when the merchant configured a post-purchase
- *    URL in dashboard. Internal Superwall paths (/redeem, /manage, /app-link)
- *    are filtered server-side and never appear here.
+ *  - `redirect_url` is only present when the merchant configured a post-purchase
+ *    URL in dashboard (REDIRECT behavior). Internal Superwall paths (/redeem,
+ *    /manage, /app-link) are filtered server-side and never appear here.
  */
 export interface PostCheckoutCompleteMessage {
   event_name: "post_checkout_complete";
   checkout_context_id: string;
   product_identifier: string;
-  transactionData?: {
-    transactionId: string;
-    productIdentifier: string;
+  transaction_data?: {
+    transaction_id: string;
+    product_identifier: string;
     currency?: string;
     value?: number;
   };
-  redirectUrl?: string;
+  redirect_url?: string;
+  /** Prefixed (`redemption_…`) codes, sent for the REDEEM and CUSTOM
+   *  post-purchase behaviors. Pass one to `redeem()` as-is. */
+  redemption_codes?: string[];
+  /** Which post-purchase behavior the paywall resolved. Enrichment for the
+   *  fields above: REDIRECT pairs with `redirect_url`, REDEEM / CUSTOM with
+   *  `redemption_codes`, GRANT_ACCESS with neither. Absent on paywalls that
+   *  predate the field. */
+  post_purchase_behavior?: "GRANT_ACCESS" | "REDIRECT" | "REDEEM" | "CUSTOM";
   /** Short-lived Superwall-signed entitlements JWT for offline server-side
    *  verification (`@superwall/verify`). Best-effort — absent when signing is
    *  unavailable. The steady-state `/entitlements` read also carries it, so a
