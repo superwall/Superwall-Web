@@ -116,7 +116,6 @@ const make = Effect.gen(function* () {
     .get(REDEMPTION_KEY)
     .pipe(Effect.catchAll(() => Effect.succeed(null as string | null)));
   if (stored !== null) {
-    // Fix 1: bare try/catch → Effect.try + Effect.option
     const parsed = yield* Effect.try({
       try: () => JSON.parse(stored) as RedeemResponse,
       catch: (e) => e,
@@ -170,7 +169,6 @@ const make = Effect.gen(function* () {
           codes: allCodes,
         })
         .pipe(
-          // Fix 3: pass full structured error, not just .message
           Effect.tapError((err) =>
             logger.warn("transactions", "redeem POST failed", null, String(err)),
           ),
@@ -206,7 +204,6 @@ const make = Effect.gen(function* () {
             ...(queryUserId && { userId: queryUserId }),
           })
           .pipe(
-            // Fix 3: pass full structured error, not just .message
             Effect.tapError((err) =>
               logger.warn(
                 "transactions",
@@ -222,7 +219,6 @@ const make = Effect.gen(function* () {
         return result;
       });
 
-  // Fix 2: replace setInterval with Effect.runFork + Schedule.fixed.
   // refreshWebEntitlements() closes over resolved service impls (R = never),
   // so Effect.runFork can run it without an explicit runtime context.
   // The cleanup callback interrupts the fiber synchronously.

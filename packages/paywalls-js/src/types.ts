@@ -307,9 +307,8 @@ export const closeReasonShouldComplete = (r: PaywallCloseReason): boolean =>
 export interface PaywallInfo {
   identifier: string;
   /** Database id from `paywall_responses[].id` — distinct from the
-   *  `identifier` slug. Mirrors the native SDKs' `PaywallInfo.databaseId`;
-   *  sent to the paywall/collector as `paywallId`. Absent on configs that
-   *  predate the field. */
+   *  `identifier` slug. Sent to the paywall/collector as `paywallId`.
+   *  Absent on configs that predate the field. */
   databaseId?: string;
   name: string;
   url: string;
@@ -345,9 +344,9 @@ export interface PaywallInfo {
    *  styles). Sent to the iframe as a separate `accept64` after the main
    *  templates bundle. */
   paywalljsEvent?: string;
-  /** Dashboard "web checkout destination" flag from config. SDK no longer
-   *  branches on it for URL derivation (every paywall iframes its own
-   *  editor URL), but kept on the type for downstream / analytics use. */
+  /** Dashboard "web checkout destination" flag from config, for downstream /
+   *  analytics use. Every paywall iframes its own editor URL, so the SDK
+   *  doesn't branch on this for URL derivation. */
   webCheckoutDestination?: string;
   /** Per-paywall presentation style from `presentation_style_v3`. The
    *  presenter selects dimensions, position, and animation from this.
