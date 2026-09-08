@@ -12,6 +12,7 @@ import type {
   PaywallPresentationRequestStatusReason,
   PaywallPresentationRequestStatusType,
   PaywallResult,
+  PostPurchaseBehavior,
   Product,
   RedemptionResult,
   RestoreType,
@@ -212,6 +213,21 @@ export interface LocalSuperwallEventMap {
    *  mobile SDKs' paywall.js bridge). Bridged to
    *  `SuperwallDelegate.onCustomPaywallAction`. */
   customPaywallAction: { name: string };
+  /** A completed checkout carried redemption codes (REDEEM / CUSTOM
+   *  post-purchase behaviors). The same codes also arrive on the purchased
+   *  `PaywallResult` (`handler.onDismiss` / `register()`'s return value).
+   *  Bridged to `SuperwallDelegate.onRedemptionCodesReceived`. Local-only —
+   *  the backend already records the redemption server-side. */
+  redemptionCodesReceived: {
+    codes: string[];
+    productId: string;
+    checkoutContextId: string;
+    paywallInfo: PaywallInfo;
+    /** REDEEM (codes meant for the mobile SDK's redeem / a deep link) or
+     *  CUSTOM (merchant handles them their own way). Absent on paywalls
+     *  that predate the field. */
+    behavior?: PostPurchaseBehavior;
+  };
 }
 
 export type AllSuperwallEvents = SuperwallEventMap & LocalSuperwallEventMap;
@@ -309,9 +325,14 @@ export interface SuperwallDelegate {
   onCustomPaywallAction?(name: string): void;
 
   // redemption — fires when a `?code=` (web entitlement) redirect arrives
-  // and the SDK is about to POST it / has finished POSTing it.
+  // or `sw.redeem(code)` is called, and the SDK is about to POST it / has
+  // finished POSTing it.
   onWillRedeemLink?(): void;
   onDidRedeemLink?(result: RedemptionResult): void;
+  /** A completed checkout carried redemption codes (REDEEM / CUSTOM
+   *  post-purchase behaviors). Typed convenience around the local-only
+   *  `redemptionCodesReceived` event. */
+  onRedemptionCodesReceived?(codes: string[], info: PaywallInfo): void;
 
   // logging
   onLog?(
@@ -335,4 +356,5 @@ export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEvent
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
   "customPaywallAction",
+  "redemptionCodesReceived",
 ]);

@@ -128,7 +128,10 @@ import {
   subscriptionStatusFromEntitlements,
   type RedemptionServiceImpl,
 } from "./internal/redemption.ts";
-import { createAutomaticPurchaseController } from "./internal/automaticPurchaseController.ts";
+import {
+  createAutomaticPurchaseController,
+  type RedemptionOutcome,
+} from "./internal/automaticPurchaseController.ts";
 import type { PaywallPurchaseEvent } from "./presenter.ts";
 
 // ---------------------------------------------------------------------------
@@ -331,6 +334,24 @@ export interface Superwall {
   register(args: RegisterPlacementArgs): Promise<RegisterPlacementResult>;
   readonly purchases: PurchasesNamespace;
   readonly entitlements: EntitlementsNamespace;
+
+  /**
+   * Redeem a Superwall redemption code (`redemption_…`) for the current user.
+   * Codes come from the REDEEM / CUSTOM post-purchase behaviors — via the
+   * purchased `PaywallResult` (`handler.onDismiss` / `register()`'s return
+   * value), the `redemptionCodesReceived` event, or your own channel — and
+   * from web checkout links. Pass the code verbatim, prefix included.
+   *
+   * On success the code's purchase attaches to the current user:
+   * `customerInfo` is seeded from the response and `subscriptionStatus`
+   * flips to ACTIVE when entitlements were granted. Fires the
+   * `onWillRedeemLink` / `onDidRedeemLink` delegate callbacks; never throws —
+   * failures resolve as `{ type: "error" | "expired" | "invalid" }`.
+   *
+   * A returning `?code=redemption_…` URL is still redeemed automatically at
+   * configure time; call this only for codes you receive some other way.
+   */
+  redeem(code: string): Promise<RedemptionResult>;
 
   readonly subscriptionStatus: Readable<SubscriptionStatus>;
   readonly customerInfo: Readable<CustomerInfo | null>;
@@ -882,6 +903,23 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         ),
       );
     });
+    // Redemption codes from the REDEEM / CUSTOM post-purchase behaviors,
+    // surfaced by the presenter on checkout completion.
+    target.addEventListener("redemptionCodesReceived", (e) => {
+      runFireAndForget(
+        "paywallEvents",
+        "redemptionCodesReceived bridge effect failed",
+        bus.withDelegate(
+          (d) => d.onRedemptionCodesReceived?.(e.detail.codes, e.detail.paywallInfo),
+          (cause) =>
+            logViaRuntime(
+              "paywallEvents",
+              "delegate.onRedemptionCodesReceived threw",
+              cause,
+            ),
+        ),
+      );
+    });
 
     // Discount redemption results: resolve a matching in-flight
     // redeemDiscount(). The paywall's `discount_redemption_result` postMessage
@@ -1241,6 +1279,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         fresh,
         (p): PaywallInfo => ({
           identifier: p.identifier,
+          ...(p.databaseId && { databaseId: p.databaseId }),
           name: p.name,
           url: p.url,
           productIds: [...p.productIds],
@@ -1598,6 +1637,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         databaseId: result.paywall.databaseId,
       }),
       identifier: result.paywall.identifier,
+      ...(result.paywall.databaseId && { databaseId: result.paywall.databaseId }),
       name: result.paywall.name,
       url: result.paywall.url,
       experiment,
@@ -2213,8 +2253,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const getDefaultPresenter = (): Promise<PaywallPresenter | null> => {
     if (typeof document === "undefined") return Promise.resolve(null);
     if (!defaultPresenterPromise) {
+      const postPurchaseRedirect = opts.options?.paywalls?.postPurchaseRedirect;
       defaultPresenterPromise = import("./browser/presenter.ts")
-        .then((m) => m.createBrowserPresenter() as PaywallPresenter)
+        .then(
+          (m) =>
+            m.createBrowserPresenter({
+              ...(postPurchaseRedirect && { postPurchaseRedirect }),
+            }) as PaywallPresenter,
+        )
         .catch((cause: unknown) => {
           logViaRuntime(
             "superwallCore",
@@ -2483,6 +2529,87 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     return ents;
   };
 
+  /** Shared redemption-code POST behind both the automatic controller's
+   *  `?code=` auto-redeem and the public `sw.redeem()`. Fires the
+   *  `onWillRedeemLink` / `onDidRedeemLink` delegate pair and seeds the
+   *  `customerInfo` snapshot from a successful response. */
+  const redeemCode = async (
+    code: string,
+  ): Promise<{ outcome: RedemptionOutcome; result: RedemptionResult }> => {
+    runFireAndForget(
+      "transactions",
+      "delegate.onWillRedeemLink threw",
+      Effect.gen(function* () {
+        const bus = yield* EventBus;
+        yield* bus.withDelegate((d) => d.onWillRedeemLink?.());
+      }),
+    );
+    const res = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const r = yield* RedemptionService;
+          return yield* r.redeem(RedeemType.Code(code));
+        }),
+      )
+      .catch((cause: unknown) => {
+        logViaRuntime("transactions", "redemption.redeem failed", cause);
+        return null;
+      });
+    const emitDidRedeem = (result: RedemptionResult): void => {
+      runFireAndForget(
+        "transactions",
+        "delegate.onDidRedeemLink threw",
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          yield* bus.withDelegate((d) => d.onDidRedeemLink?.(result));
+        }),
+      );
+    };
+    if (!res) {
+      const result: RedemptionResult = {
+        type: "error",
+        code,
+        error: "redemption request failed",
+      };
+      emitDidRedeem(result);
+      return { outcome: { status: "error", entitlements: [] }, result };
+    }
+    const codeResult = res.codes?.find((c) => c.code === code);
+    const ents: Entitlement[] = (res.customerInfo?.entitlements ?? [])
+      .filter((e) => e.isActive ?? true)
+      .map((e) => ({
+        id: e.id,
+        type: "SERVICE_LEVEL" as const,
+        isActive: e.isActive ?? true,
+        productIds: e.productIds ?? [],
+      }));
+    // A successful redeem carries the authoritative customerInfo — seed
+    // the public snapshot without waiting for the next /entitlements read.
+    if (res.customerInfo?.entitlements) {
+      applyCustomerInfo(ents);
+    }
+    const status =
+      codeResult?.status === "EXPIRED"
+        ? ("expired" as const)
+        : codeResult?.status === "ERROR" || codeResult?.status === "INVALID"
+          ? ("error" as const)
+          : ("success" as const);
+    const result: RedemptionResult =
+      status === "success"
+        ? { type: "success", code, entitlements: ents }
+        : status === "expired"
+          ? { type: "expired", code }
+          : codeResult?.status === "INVALID"
+            ? { type: "invalid", code }
+            : {
+                type: "error",
+                code,
+                error: codeResult?.error?.message ?? "redemption failed",
+              };
+    emitDidRedeem(result);
+    return { outcome: { status, entitlements: ents }, result };
+  };
+
   // Build the PurchaseController. Default = automatic (handles standard
   // Stripe paywall flow + ?code= redemption + web_entitlements polling).
   // Consumer-provided controllers take over fully.
@@ -2490,77 +2617,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     opts.purchaseController ??
     createAutomaticPurchaseController({
       subscribe: subscribeToPaywallPurchaseEvents,
-      redeem: async (code) => {
-        runFireAndForget(
-          "transactions",
-          "delegate.onWillRedeemLink threw",
-          Effect.gen(function* () {
-            const bus = yield* EventBus;
-            yield* bus.withDelegate((d) => d.onWillRedeemLink?.());
-          }),
-        );
-        const res = await runtime
-          .runPromise(
-            Effect.gen(function* () {
-              const r = yield* RedemptionService;
-              return yield* r.redeem(RedeemType.Code(code));
-            }),
-          )
-          .catch((cause: unknown) => {
-            logViaRuntime("transactions", "redemption.redeem failed", cause);
-            return null;
-          });
-        const emitDidRedeem = (result: RedemptionResult): void => {
-          runFireAndForget(
-            "transactions",
-            "delegate.onDidRedeemLink threw",
-            Effect.gen(function* () {
-              const bus = yield* EventBus;
-              yield* bus.withDelegate((d) => d.onDidRedeemLink?.(result));
-            }),
-          );
-        };
-        if (!res) {
-          emitDidRedeem({
-            type: "error",
-            code,
-            error: "redemption request failed",
-          });
-          return { status: "error", entitlements: [] };
-        }
-        const codeResult = res.codes?.find((c) => c.code === code);
-        const ents: Entitlement[] = (res.customerInfo?.entitlements ?? [])
-          .filter((e) => e.isActive ?? true)
-          .map((e) => ({
-            id: e.id,
-            type: "SERVICE_LEVEL" as const,
-            isActive: e.isActive ?? true,
-            productIds: e.productIds ?? [],
-          }));
-        // A successful redeem carries the authoritative customerInfo — seed
-        // the public snapshot without waiting for the next /entitlements read.
-        if (res.customerInfo?.entitlements) {
-          applyCustomerInfo(ents);
-        }
-        const status =
-          codeResult?.status === "EXPIRED"
-            ? ("expired" as const)
-            : codeResult?.status === "ERROR" || codeResult?.status === "INVALID"
-              ? ("error" as const)
-              : ("success" as const);
-        if (status === "success") {
-          emitDidRedeem({ type: "success", code, entitlements: ents });
-        } else if (status === "expired") {
-          emitDidRedeem({ type: "expired", code });
-        } else {
-          emitDidRedeem({
-            type: codeResult?.status === "INVALID" ? "invalid" : "error",
-            code,
-            error: codeResult?.error?.message ?? "redemption failed",
-          });
-        }
-        return { status, entitlements: ents };
-      },
+      redeem: async (code) => (await redeemCode(code)).outcome,
       refreshEntitlements: refreshWebEntitlements,
       setSubscriptionStatus: (s) => {
         // Reuse the public-facing setter so delegate / event chain fires.
@@ -2844,6 +2901,20 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     register,
     purchases,
     entitlements,
+
+    redeem: async (code) => {
+      const { outcome, result } = await redeemCode(code);
+      // Mirror the automatic `?code=` path: a successful redeem that granted
+      // entitlements flips subscription status through the public setter so
+      // the delegate / event chain fires.
+      if (outcome.status === "success" && outcome.entitlements.length > 0) {
+        purchases.setSubscriptionStatus({
+          status: "ACTIVE",
+          entitlements: outcome.entitlements,
+        });
+      }
+      return result;
+    },
 
     subscriptionStatus: asReadable(subStatusSig),
     customerInfo: asReadable(customerSig),

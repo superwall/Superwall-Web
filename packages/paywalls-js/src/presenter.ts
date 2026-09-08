@@ -7,6 +7,7 @@ import type {
   PaywallInfo,
   PaywallResult,
   PlacementParams,
+  PostPurchaseBehavior,
   Product,
 } from "./types.ts";
 import type { AllSuperwallEvents } from "./events.ts";
@@ -187,6 +188,11 @@ export type PaywallPurchaseEvent =
         value?: number;
       };
       redirectUrl?: string;
+      /** Prefixed (`redemption_…`) codes from the REDEEM and CUSTOM
+       *  post-purchase behaviors. Pass one to `redeem()` as-is. */
+      redemptionCodes?: string[];
+      /** Which post-purchase behavior the paywall resolved. */
+      postPurchaseBehavior?: PostPurchaseBehavior;
       /** Signed entitlements JWT for offline server-side verification
        *  (`@superwall/verify`). Best-effort — absent when the BE didn't sign. */
       entitlementsToken?: string;

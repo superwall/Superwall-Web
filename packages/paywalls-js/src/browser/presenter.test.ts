@@ -255,50 +255,6 @@ it("post_checkout_complete (flat shape from controller's postMessageToHost) reso
   if (r.type === "purchased") expect(r.productId).toBe("pro_yearly");
 });
 
-it("redirect_required calls window.open and emits paywallWillOpenURL", async () => {
-  const emitted: Array<[string, unknown]> = [];
-  const opens: string[] = [];
-  const originalOpen = globalThis.open;
-  // happy-dom's window.open returns null and triggers navigation; stub it.
-  (globalThis as { open?: unknown }).open = (url: string) => {
-    opens.push(url);
-    return null;
-  };
-  try {
-    const presenter = createBrowserPresenter();
-    const info = stubInfo("pw_redir");
-    const ctx = newCtx({
-      emit: (name, detail) => emitted.push([name as string, detail]),
-    });
-    const presentation = presenter.present(info, ctx);
-    await tick();
-
-    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
-    const origin = new URL(iframe.src).origin;
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          version: 1,
-          payload: {
-            events: [
-              { event_name: "redirect_required", url: "https://stripe.com/checkout/abc" },
-            ],
-          },
-        },
-        origin,
-        source: iframe.contentWindow,
-      } as MessageEventInit),
-    );
-    await flushMessages();
-    expect(opens).toEqual(["https://stripe.com/checkout/abc"]);
-    expect(emitted.find(([n]) => n === "paywallWillOpenURL")).toBeDefined();
-    presenter.dismiss();
-    await presentation;
-  } finally {
-    (globalThis as { open?: unknown }).open = originalOpen;
-  }
-});
-
 it("post_checkout_complete resolves purchased + routes via onPurchaseEvent + does NOT emit transaction_complete (BE does it)", async () => {
   const emitted: Array<[string, unknown]> = [];
   const purchaseEvents: unknown[] = [];
@@ -344,6 +300,122 @@ it("post_checkout_complete resolves purchased + routes via onPurchaseEvent + doe
   expect(pc).toBeDefined();
   expect(pc!.productId).toBe("pro_yearly");
   expect(pc!.checkoutContextId).toBe("ckctx_42");
+});
+
+it("post_checkout_complete forwards redemption_codes and opens redirect_url in a new tab (postPurchaseRedirect: 'newTab')", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const purchaseEvents: unknown[] = [];
+  const opens: string[] = [];
+  const originalOpen = globalThis.open;
+  (globalThis as { open?: unknown }).open = (url: string) => {
+    opens.push(url);
+    return null;
+  };
+  try {
+    const presenter = createBrowserPresenter({ postPurchaseRedirect: "newTab" });
+    const info = stubInfo("pw_pc_behavior");
+    const ctx = newCtx({
+      emit: (name, detail) => emitted.push([name as string, detail]),
+      onPurchaseEvent: (ev) => purchaseEvents.push(ev),
+    });
+    const presentation = presenter.present(info, ctx);
+    await tick();
+
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    const origin = new URL(iframe.src).origin;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          event_name: "post_checkout_complete",
+          checkout_context_id: "ckctx_beh",
+          product_identifier: "pro_yearly",
+          transaction_data: {
+            transaction_id: "txn_1",
+            product_identifier: "pro_yearly",
+          },
+          redirect_url: "https://merchant.test/thanks",
+          redemption_codes: ["redemption_abc123"],
+          post_purchase_behavior: "REDEEM",
+        },
+        origin,
+        source: iframe.contentWindow,
+      } as MessageEventInit),
+    );
+
+    const r = await presentation;
+    expect(r.type).toBe("purchased");
+    // Codes + behavior ride the purchased result so onDismiss / register()
+    // carry them.
+    if (r.type === "purchased") {
+      expect(r.redemptionCodes).toEqual(["redemption_abc123"]);
+      expect(r.postPurchaseBehavior).toBe("REDEEM");
+    }
+    const pc = purchaseEvents.find(
+      (e) => (e as { type: string }).type === "postCheckout",
+    ) as undefined | { redemptionCodes?: string[]; postPurchaseBehavior?: string };
+    expect(pc).toBeDefined();
+    expect(pc!.redemptionCodes).toEqual(["redemption_abc123"]);
+    expect(pc!.postPurchaseBehavior).toBe("REDEEM");
+    // …and the public event fires with purchase context.
+    const codesEvt = emitted.find(([n]) => n === "redemptionCodesReceived");
+    expect(codesEvt?.[1]).toMatchObject({
+      codes: ["redemption_abc123"],
+      productId: "pro_yearly",
+      checkoutContextId: "ckctx_beh",
+      behavior: "REDEEM",
+    });
+    // REDIRECT: opened outside the (now torn down) iframe, with the event.
+    expect(opens).toEqual(["https://merchant.test/thanks"]);
+    const willOpen = emitted.find(([n]) => n === "paywallWillOpenURL");
+    expect(willOpen?.[1]).toEqual({ url: "https://merchant.test/thanks" });
+  } finally {
+    (globalThis as { open?: unknown }).open = originalOpen;
+  }
+});
+
+it("post_checkout_complete redirect_url navigates the current tab by default (no user activation → window.open would be popup-blocked)", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const assigns: string[] = [];
+  const originalAssign = location.assign.bind(location);
+  // happy-dom would actually try to navigate; stub the instance method.
+  (location as { assign: (url: string) => void }).assign = (url: string) => {
+    assigns.push(String(url));
+  };
+  try {
+    const presenter = createBrowserPresenter();
+    const info = stubInfo("pw_redirect_nav");
+    const ctx = newCtx({
+      emit: (name, detail) => emitted.push([name as string, detail]),
+    });
+    const presentation = presenter.present(info, ctx);
+    await tick();
+
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    const origin = new URL(iframe.src).origin;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          event_name: "post_checkout_complete",
+          checkout_context_id: "ckctx_nav",
+          product_identifier: "pro_yearly",
+          redirect_url: "https://merchant.test/thanks",
+        },
+        origin,
+        source: iframe.contentWindow,
+      } as MessageEventInit),
+    );
+
+    const r = await presentation;
+    expect(r.type).toBe("purchased");
+    // Navigation is deferred a tick so the resolution flushes first.
+    expect(assigns).toEqual([]);
+    await flushMessages();
+    expect(assigns).toEqual(["https://merchant.test/thanks"]);
+    const willOpen = emitted.find(([n]) => n === "paywallWillOpenURL");
+    expect(willOpen?.[1]).toEqual({ url: "https://merchant.test/thanks" });
+  } finally {
+    (location as { assign: (url: string) => void }).assign = originalAssign;
+  }
 });
 
 it("custom container option mounts the overlay there instead of body", async () => {
