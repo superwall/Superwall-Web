@@ -43,7 +43,12 @@ const registry = new Map<string, Superwall>();
 const acquire = (apiKey: string, opts: CreateSuperwallOptions): Superwall => {
   const existing = registry.get(apiKey);
   if (existing) return existing;
-  const sw = createSuperwall(opts);
+  // Identify the wrapper in `X-Platform-Wrapper`; an explicit caller value
+  // still wins.
+  const sw = createSuperwall({
+    ...opts,
+    options: { platformWrapper: "React", ...opts.options },
+  });
   registry.set(apiKey, sw);
   return sw;
 };
