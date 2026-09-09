@@ -75,6 +75,7 @@ import {
   extractEntitlementsByProductId,
   extractEntitlementsByReferenceName,
   type ConfigServiceImpl,
+  type ConfigState,
 } from "./internal/config.ts";
 import {
   AudienceEvaluator,
@@ -680,13 +681,32 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   ): NetworkConfig["environment"] =>
     (env ?? "release") as NetworkConfig["environment"];
 
+  // Config metadata mirrored out of ConfigService for the header set. The
+  // network layer is built before ConfigService (which depends on it), so
+  // these are kept current by a subscription to `config.stateRef` in
+  // `configure` rather than read through the service.
+  let staticConfigBuildId = "";
+  let configRetryCount = 0;
+
   const networkConfig: NetworkConfig = {
     apiKey: opts.apiKey,
     environment: resolveNetworkEnvironment(opts.options?.networkEnvironment),
     ...(opts.options?.appVersion !== undefined && { appVersion: opts.options.appVersion }),
     ...(opts.options?.bundleId !== undefined && { bundleId: opts.options.bundleId }),
     ...(opts.fetch !== undefined && { fetch: opts.fetch }),
+    ...(opts.options?.platformWrapper !== undefined && {
+      platformWrapper: opts.options.platformWrapper,
+    }),
     interfaceStyleOverride: () => interfaceStyleOverride,
+    // Test mode is the only sandbox signal available in a browser; an app on
+    // Stripe test keys sets `options.isSandbox` explicitly.
+    isSandbox: () => opts.options?.isSandbox ?? isTestMode(),
+    staticConfigBuildId: () => staticConfigBuildId,
+    configRetryCount: () => configRetryCount,
+    activeEntitlementIds: () => {
+      const s = subStatusSig.value;
+      return s.status === "ACTIVE" ? s.entitlements.map((e) => e.id) : [];
+    },
   };
   const networkLayer = networkServiceLayer(networkConfig, identityLayer);
   const computedLayer = computedPropertiesLayer(storageLayer);
@@ -1012,6 +1032,24 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     // network fetch revalidates.
     const config = yield* ConfigService;
     const assignments = yield* AssignmentService;
+
+    // Mirror config state onto the plain closure vars the network layer reads
+    // for `X-Static-Config-Build-Id` / `X-Retry-Count`. forkDaemon so it keeps
+    // tracking past configure(), including background revalidation.
+    yield* Effect.forkDaemon(
+      config.stateRef.changes.pipe(
+        Stream.runForEach((state: ConfigState) =>
+          Effect.sync(() => {
+            if (state._tag === "Retrieved") {
+              staticConfigBuildId = state.config.buildId;
+              configRetryCount = 0;
+            } else if (state._tag === "Failed") {
+              configRetryCount = state.retryCount;
+            }
+          }),
+        ),
+      ),
+    );
     yield* config.hydrateFromStorage().pipe(
       Effect.tapError((e) => Effect.logDebug("Config hydration from storage failed", { error: String(e) })),
       Effect.catchAll(() => Effect.void),

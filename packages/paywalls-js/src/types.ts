@@ -540,6 +540,24 @@ export interface PaywallOptions {
 export interface SuperwallOptions {
   paywalls?: PaywallOptions;
   networkEnvironment?: NetworkEnvironment;
+  /**
+   * Reported as `X-Is-Sandbox`: whether purchases on this surface are not
+   * real money. The backend routes redemptions and transactions to its test
+   * environment when this is true.
+   *
+   * Defaults to whether the SDK is in test mode
+   * (`testModeBehavior: "always"`), which is the only sandbox signal the
+   * browser can observe — unlike native, there's no StoreKit receipt or
+   * debuggable-build flag to read. Set it explicitly when your checkout runs
+   * against Stripe test keys, since that lives server-side and the SDK can't
+   * detect it.
+   */
+  isSandbox?: boolean;
+  /**
+   * Reported as `X-Platform-Wrapper`. Defaults to `"Web"`; wrapper packages
+   * pass their own name (`@superwall/paywalls-react` sends `"React"`).
+   */
+  platformWrapper?: string;
   localeIdentifier?: string;
   logging?: { level?: LogLevel; scopes?: LogScope[] };
   testModeBehavior?: "automatic" | "whenEnabledForUser" | "never" | "always";
