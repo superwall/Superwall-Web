@@ -5,6 +5,7 @@ import type {
   PaywallInfo,
   PaywallPresentationStyle,
   PaywallResult,
+  PostPurchaseBehavior,
   Product,
 } from "../types.ts";
 import type {
@@ -41,6 +42,13 @@ export interface BrowserPresenterOptions {
    *  with custom UI: resolve `"purchased"` to simulate success or
    *  `"declined"` to cancel. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
+  /** How to follow a post-purchase `redirect_url` (REDIRECT behavior).
+   *  `"navigate"` (default) redirects the current tab — reliable, since the
+   *  message arrives without user activation and `window.open` gets popup-
+   *  blocked. `"newTab"` preserves the host page's state but only works when
+   *  the browser allows the popup. Either way `paywallWillOpenURL` fires
+   *  first, so a consumer can route it themselves. */
+  postPurchaseRedirect?: "navigate" | "newTab";
 }
 
 const DEFAULT_Z_INDEX = 2147483000;
@@ -496,7 +504,7 @@ const mount = (
   if (!ctx.bootstrap && typeof console !== "undefined") {
     // No bootstrap = the paywall server can't tell we're the Web SDK and
     // will route post-checkout completion via window.location.href inside
-    // this iframe. Loud warn so regressions surface immediately.
+    // this iframe.
     console.warn(
       "[Superwall] presenter received no ctx.bootstrap — iframe URL will lack client_surface=web-sdk and post-checkout will trap-navigate inside the iframe.",
     );
@@ -658,17 +666,17 @@ const readString = (
   key: string,
 ): string | null => (typeof evt[key] === "string" ? (evt[key] as string) : null);
 
-function readTransactionField(evt: { [k: string]: unknown }, key: "productIdentifier"): ProductIdentifier | null;
-function readTransactionField(evt: { [k: string]: unknown }, key: "transactionId"): TransactionId | null;
+function readTransactionField(evt: { [k: string]: unknown }, key: "product_identifier"): ProductIdentifier | null;
+function readTransactionField(evt: { [k: string]: unknown }, key: "transaction_id"): TransactionId | null;
 function readTransactionField(
   evt: { [k: string]: unknown },
-  key: "productIdentifier" | "transactionId",
+  key: "product_identifier" | "transaction_id",
 ): ProductIdentifier | TransactionId | null {
-  const td = evt["transactionData"];
+  const td = evt["transaction_data"];
   if (!td || typeof td !== "object") return null;
   const v = (td as Record<string, unknown>)[key];
   if (typeof v !== "string") return null;
-  return key === "productIdentifier" ? asProductIdentifier(v) : asTransactionId(v);
+  return key === "product_identifier" ? asProductIdentifier(v) : asTransactionId(v);
 }
 
 /** Read the product identifier from an iframe event, returning a branded type. */
@@ -839,70 +847,95 @@ const handleInbound = (
         });
         break;
       }
-      // Terminal success signal from the paywall's WebPaywallController on
-      // the `client_surface=web-sdk` branch — the controller has finished
-      // its post-checkout server work (POST /checkout/session/complete,
-      // redemption resolution) and would otherwise have done a top-frame
-      // navigation. We resolve the purchase here.
-      // ---------------------------------------------------------------
-      // Two parallel terminal-success paths exist in this dispatcher and
-      // they MUST stay separate:
-      //   • `purchase` (line ~`case "purchase":` above) — bare purchase-intent
-      //     message from non-Stripe paywalls. The SDK doesn't run checkout for
-      //     it; the consumer drives their own and reports state via
-      //     `sw.purchases.setSubscriptionStatus`. Resolves immediately on click
-      //     only in test mode.
-      //   • `post_checkout_complete` (this case) — Stripe-checkout flow on
-      //     `client_surface=web-sdk`. Resolves AFTER the paywall's
-      //     WebPaywallController finishes its server-side post-checkout
-      //     work (POST /checkout/session/complete + redemption).
-      // Don't unify them — a Stripe paywall fires both `purchase`
-      // (intent) and `post_checkout_complete` (terminal); only the latter
-      // is the real success signal.
-      // ---------------------------------------------------------------
+      // Terminal success on the `client_surface=web-sdk` branch: the paywall's
+      // WebPaywallController has finished its post-checkout server work (POST
+      // /checkout/session/complete, redemption resolution) and would otherwise
+      // have done a top-frame navigation. We resolve the purchase here.
+      //
+      // Distinct from the `purchase` case above, which is a bare intent
+      // message from non-Stripe paywalls (the consumer drives their own
+      // checkout and reports state via `sw.purchases.setSubscriptionStatus`).
+      // A Stripe paywall fires both, and only this one is terminal.
       case "post_checkout_complete": {
-        // Terminal success on the web-sdk surface. Per BE contract:
-        //  - `transaction_data` and `redirect_url` are ALWAYS undefined here
-        //    (controller strips them for web-sdk; details live in
-        //    `/entitlements` instead).
-        //  - The backend has ALREADY emitted `transaction_complete` server-
-        //    side before posting this — do NOT re-emit it locally or
-        //    consumers see double events.
-        // APC handler reads `/entitlements` after this fires to populate
+        // The backend emits `transaction_complete` server-side before posting
+        // this, so re-emitting it locally would double up consumer events.
+        // The APC handler reads `/entitlements` after this fires to populate
         // the entitlement set + transaction details.
         const rawProductId = readString(evt, "product_identifier");
         const productId: ProductIdentifier = rawProductId
           ? asProductIdentifier(rawProductId)
-          : (readTransactionField(evt, "productIdentifier") ?? asProductIdentifier(""));
+          : (readTransactionField(evt, "product_identifier") ?? asProductIdentifier(""));
         const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
         const entitlementsToken = readString(evt, "entitlements_token");
+        const redirectUrl = readString(evt, "redirect_url");
+        const rawCodes = evt["redemption_codes"];
+        const redemptionCodes =
+          Array.isArray(rawCodes) && rawCodes.every((c) => typeof c === "string")
+            ? (rawCodes as string[])
+            : null;
+        const rawBehavior = readString(evt, "post_purchase_behavior");
+        const postPurchaseBehavior: PostPurchaseBehavior | null =
+          rawBehavior === "GRANT_ACCESS" ||
+          rawBehavior === "REDIRECT" ||
+          rawBehavior === "REDEEM" ||
+          rawBehavior === "CUSTOM"
+            ? rawBehavior
+            : null;
         ctx.onPurchaseEvent?.({
           type: "postCheckout",
           productId: String(productId),
           checkoutContextId,
           ...(entitlementsToken !== null && { entitlementsToken }),
+          ...(redemptionCodes !== null && { redemptionCodes }),
+          ...(postPurchaseBehavior !== null && { postPurchaseBehavior }),
         });
-        cleanup();
-        resolve({ type: "purchased", productId: String(productId) });
-        return;
-      }
-      // The paywall's `redirect` checkout directive would otherwise do
-      // `window.location.href = checkoutUrl` inside our iframe (trapping
-      // the navigation). The paywall change to emit a structured
-      // `redirect_required` message is open with their team — until then
-      // this handler is dead code. When it lands, payload is `{ url }`
-      // and we open in a new tab; the merchant can also subscribe to
-      // `paywallWillOpenURL` for custom handling.
-      case "redirect_required": {
-        const url = readString(evt, "url");
-        if (!url) break;
-        ctx.emit("paywallWillOpenURL", { url });
-        if (typeof globalThis.open === "function") {
-          try {
-            globalThis.open(url, "_blank", "noopener");
-          } catch {}
+        // REDEEM / CUSTOM behaviors: surface the codes to the merchant.
+        // They also ride the purchased PaywallResult below.
+        if (redemptionCodes !== null && redemptionCodes.length > 0) {
+          ctx.emit("redemptionCodesReceived", {
+            codes: redemptionCodes,
+            productId: String(productId),
+            checkoutContextId,
+            paywallInfo: info,
+            ...(postPurchaseBehavior !== null && {
+              behavior: postPurchaseBehavior,
+            }),
+          });
         }
-        break;
+        // REDIRECT behavior: the merchant's own URL. This postMessage
+        // handler runs without transient user activation, so `window.open`
+        // is routinely popup-blocked — same-tab navigation is the reliable
+        // default. `paywallWillOpenURL` fires before either so the consumer
+        // can route it themselves.
+        if (redirectUrl) {
+          ctx.emit("paywallWillOpenURL", { url: redirectUrl });
+        }
+        cleanup();
+        resolve({
+          type: "purchased",
+          productId: String(productId),
+          ...(redemptionCodes !== null &&
+            redemptionCodes.length > 0 && { redemptionCodes }),
+          ...(postPurchaseBehavior !== null && { postPurchaseBehavior }),
+        });
+        if (redirectUrl) {
+          if (options.postPurchaseRedirect === "newTab") {
+            if (typeof globalThis.open === "function") {
+              try {
+                globalThis.open(redirectUrl, "_blank", "noopener");
+              } catch {}
+            }
+          } else {
+            // Deferred a tick so the resolved purchase (onDismiss,
+            // paywall_close, event dispatches) flushes before unload starts.
+            setTimeout(() => {
+              try {
+                globalThis.location?.assign(redirectUrl);
+              } catch {}
+            }, 0);
+          }
+        }
+        return;
       }
       case "open_url_external": {
         const url = typeof evt["url"] === "string" ? (evt["url"] as string) : null;

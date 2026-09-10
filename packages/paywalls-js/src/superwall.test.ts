@@ -76,6 +76,7 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
   const payload = buildInitPayload({
     info: {
       identifier: "pw_init",
+      databaseId: "9876",
       name: "Init Test",
       url: "https://user-content.test/runtime/x",
       productIds: ["price_1", "price_2"],
@@ -157,8 +158,10 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
     experimentId: "exp_1",
     variantId: "var_1",
   });
+  // Native parity: `paywallId` = database id, `paywallIdentifier` = slug.
   expect(c["paywallSlice"]).toMatchObject({
-    paywallId: "pw_init",
+    paywallId: "9876",
+    paywallIdentifier: "pw_init",
     paywallProductIds: "price_1,price_2",
     paywallUrl: "https://user-content.test/runtime/x",
   });
@@ -169,12 +172,56 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
   expect(c["productSlice"]).toEqual({});
   // CheckoutContext
   const cc = payload["checkoutContext"] as Record<string, unknown>;
-  expect(cc["paywall"]).toMatchObject({ paywallId: "pw_init" });
+  expect(cc["paywall"]).toMatchObject({
+    paywallId: "9876",
+    paywallIdentifier: "pw_init",
+  });
   expect(cc["experiment"]).toEqual({ experimentId: "exp_1", variantId: "var_1" });
   expect((cc["identity"] as { userId: { type: string } }).userId.type).toBe(
     "aliasId",
   );
   expect(cc["products"]).toEqual({});
+});
+
+it("buildInitPayload falls back to the slug for paywallId when the config has no database id", () => {
+  const payload = buildInitPayload({
+    info: {
+      identifier: "pw_legacy",
+      name: "Legacy",
+      url: "https://user-content.test/runtime/y",
+      productIds: [],
+      products: [],
+    },
+    placement: "checkout",
+    params: {} as PlacementParams,
+    decision: {
+      kind: "paywall",
+      experiment: {
+        id: "exp_1",
+        groupId: "grp_1",
+        variant: { id: "var_1", type: "treatment", paywallId: "pw_legacy" },
+      },
+    },
+    application: undefined,
+    bootstrap: {
+      apiKey: "pk_test",
+      sdkVersion: "1.0.0",
+      collector: "https://collector.superwall.com",
+      apiBase: "https://api.superwall.me",
+      clientSurface: "web-sdk",
+    },
+    aliasId: "$SuperwallAlias:abc",
+    appUserId: undefined,
+    deviceId: "11111111-1111-1111-1111-111111111111",
+    email: undefined,
+    userAttributes: {},
+    deviceAttributes: {},
+  });
+  const c = payload["collector"] as Record<string, unknown>;
+  expect(c["paywallSlice"]).toMatchObject({
+    paywallId: "pw_legacy",
+    paywallIdentifier: "pw_legacy",
+  });
 });
 
 const noopFetch = ((input: RequestInfo | URL) => {
@@ -2914,5 +2961,90 @@ it("discount_redeem_complete / _fail POST to the collector with correlation cont
   expect(complete?.parameters).toHaveProperty("$presentation_id");
   rig.dismiss();
   await reg;
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// public redeem() — redemption codes from REDEEM / CUSTOM behaviors
+// ---------------------------------------------------------------------------
+
+it("sw.redeem() POSTs the code, resolves success, flips subscription status, and fires onDidRedeemLink", async () => {
+  const posted: Array<Record<string, unknown>> = [];
+  const redeemFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    }
+    if (url.includes("/subscriptions-api/public/v1/redeem")) {
+      posted.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            codes: [{ code: "redemption_abc", status: "SUCCESS" }],
+            customerInfo: {
+              entitlements: [
+                { id: "pro", isActive: true, productIds: ["pro_yearly"] },
+              ],
+            },
+          }),
+        ),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  const didRedeem: unknown[] = [];
+  const sw = make({
+    fetch: redeemFetch,
+    delegate: { onDidRedeemLink: (r) => didRedeem.push(r) },
+  });
+  await sw.ready;
+
+  const result = await sw.redeem("redemption_abc");
+  expect(result).toEqual({
+    type: "success",
+    code: "redemption_abc",
+    entitlements: [
+      { id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: ["pro_yearly"] },
+    ],
+  });
+  // The POST carries the code with first-redemption bookkeeping.
+  expect(posted[0]?.codes).toEqual([
+    { code: "redemption_abc", firstRedemption: true },
+  ]);
+  // Success with entitlements flips subscription status through the public
+  // setter (mirrors the automatic ?code= path).
+  await pollValue(() =>
+    sw.subscriptionStatus.value.status === "ACTIVE"
+      ? sw.subscriptionStatus.value
+      : null,
+  );
+  await pollValue(() => (didRedeem.length > 0 ? didRedeem : null));
+  expect(didRedeem[0]).toMatchObject({ type: "success", code: "redemption_abc" });
+  await sw.dispose();
+});
+
+it("sw.redeem() resolves { type: 'invalid' } for an INVALID code and leaves status alone", async () => {
+  const invalidFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    }
+    if (url.includes("/subscriptions-api/public/v1/redeem")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            codes: [{ code: "redemption_bad", status: "INVALID" }],
+            customerInfo: { entitlements: [] },
+          }),
+        ),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  const sw = make({ fetch: invalidFetch });
+  await sw.ready;
+  const result = await sw.redeem("redemption_bad");
+  expect(result).toEqual({ type: "invalid", code: "redemption_bad" });
+  expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
   await sw.dispose();
 });

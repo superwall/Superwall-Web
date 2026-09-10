@@ -306,6 +306,10 @@ export const closeReasonShouldComplete = (r: PaywallCloseReason): boolean =>
 
 export interface PaywallInfo {
   identifier: string;
+  /** Database id from `paywall_responses[].id` — distinct from the
+   *  `identifier` slug. Sent to the paywall/collector as `paywallId`.
+   *  Absent on configs that predate the field. */
+  databaseId?: string;
   name: string;
   url: string;
   experiment?: Experiment;
@@ -340,9 +344,9 @@ export interface PaywallInfo {
    *  styles). Sent to the iframe as a separate `accept64` after the main
    *  templates bundle. */
   paywalljsEvent?: string;
-  /** Dashboard "web checkout destination" flag from config. SDK no longer
-   *  branches on it for URL derivation (every paywall iframes its own
-   *  editor URL), but kept on the type for downstream / analytics use. */
+  /** Dashboard "web checkout destination" flag from config, for downstream /
+   *  analytics use. Every paywall iframes its own editor URL, so the SDK
+   *  doesn't branch on this for URL derivation. */
   webCheckoutDestination?: string;
   /** Per-paywall presentation style from `presentation_style_v3`. The
    *  presenter selects dimensions, position, and animation from this.
@@ -389,8 +393,29 @@ export interface ConfirmedAssignment {
   variant: Variant;
 }
 
+/** Post-purchase behavior resolved by the paywall's checkout flow (unified
+ *  webapp/web2app config). GRANT_ACCESS grants web entitlements directly;
+ *  REDIRECT carries a merchant URL; REDEEM and CUSTOM carry redemption
+ *  codes. Absent on older paywalls that predate the field. */
+export type PostPurchaseBehavior =
+  | "GRANT_ACCESS"
+  | "REDIRECT"
+  | "REDEEM"
+  | "CUSTOM";
+
 export type PaywallResult =
-  | { type: "purchased"; productId: string; transaction?: StoreTransaction }
+  | {
+      type: "purchased";
+      productId: string;
+      transaction?: StoreTransaction;
+      /** Prefixed (`redemption_…`) codes minted by the REDEEM / CUSTOM
+       *  post-purchase behaviors. Hand one to `sw.redeem(code)` (or the
+       *  mobile SDK's redeem) as-is to attach the purchase to a user.
+       *  Absent for paywalls without those behaviors. */
+      redemptionCodes?: string[];
+      /** Which post-purchase behavior the paywall resolved. */
+      postPurchaseBehavior?: PostPurchaseBehavior;
+    }
   | { type: "declined" }
   | { type: "restored" };
 
@@ -505,11 +530,34 @@ export interface PaywallOptions {
   automaticallyDismiss?: boolean;
   /** Test-mode override. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
+  /** How the default presenter follows a post-purchase `redirect_url`
+   *  (REDIRECT behavior). `"navigate"` (default) redirects the current tab;
+   *  `"newTab"` preserves page state but is subject to popup blocking.
+   *  Listen for `paywallWillOpenURL` to route it yourself instead. */
+  postPurchaseRedirect?: "navigate" | "newTab";
 }
 
 export interface SuperwallOptions {
   paywalls?: PaywallOptions;
   networkEnvironment?: NetworkEnvironment;
+  /**
+   * Reported as `X-Is-Sandbox`: whether purchases on this surface are not
+   * real money. The backend routes redemptions and transactions to its test
+   * environment when this is true.
+   *
+   * Defaults to whether the SDK is in test mode
+   * (`testModeBehavior: "always"`), which is the only sandbox signal the
+   * browser can observe — unlike native, there's no StoreKit receipt or
+   * debuggable-build flag to read. Set it explicitly when your checkout runs
+   * against Stripe test keys, since that lives server-side and the SDK can't
+   * detect it.
+   */
+  isSandbox?: boolean;
+  /**
+   * Reported as `X-Platform-Wrapper`. Defaults to `"Web"`; wrapper packages
+   * pass their own name (`@superwall/paywalls-react` sends `"React"`).
+   */
+  platformWrapper?: string;
   localeIdentifier?: string;
   logging?: { level?: LogLevel; scopes?: LogScope[] };
   testModeBehavior?: "automatic" | "whenEnabledForUser" | "never" | "always";

@@ -89,6 +89,9 @@ export interface RawExperimentRef {
 
 export interface RawPaywallResponse {
   readonly identifier: string;
+  /** Database id from `paywall_responses[].id` — distinct from the
+   *  `identifier` slug. Absent on configs that predate the field. */
+  readonly databaseId?: string;
   readonly name: string;
   readonly url: string;
   readonly productIds: ReadonlyArray<string>;
@@ -119,9 +122,9 @@ export interface RawPaywallResponse {
    *  payload alongside `resolveVariables: true` so the server resolves
    *  per-locale `ProductVariables`. */
   readonly productsV2?: ReadonlyArray<Record<string, JsonValue>>;
-  /** Per-paywall destination flag from the dashboard. Kept on the type for
-   *  downstream consumers; the SDK no longer branches on it for URL
-   *  derivation — every paywall is iframed at its own editor URL. */
+  /** Per-paywall destination flag from the dashboard, for downstream
+   *  consumers. Every paywall is iframed at its own editor URL, so the SDK
+   *  doesn't branch on this for URL derivation. */
   readonly webCheckoutDestination?: string;
   /** Per-paywall presentation style from the dashboard
    *  (`presentation_style_v3`). Drawer/Popup carry their own dimensions.
@@ -357,6 +360,7 @@ const ProductSlotWire = Schema.Struct({ product_id: Schema.String });
 const UrlConfigWire = Schema.Struct({ endpoints: Schema.optional(Schema.Unknown) });
 const PaywallWire = Schema.Struct({
   identifier: Schema.String,
+  id: optStr,
   name: optStr,
   url: optStr,
   product_ids: Schema.optionalWith(Schema.Array(Schema.String), { nullable: true }),
@@ -400,6 +404,7 @@ const toPaywall = (
         : undefined;
   return {
     identifier: w.identifier,
+    ...(w.id !== undefined && { databaseId: w.id }),
     name: w.name ?? w.identifier,
     url: w.url ?? "",
     productIds,
