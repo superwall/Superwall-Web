@@ -3,7 +3,11 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
-## Unreleased
+## 0.2.8 — 2026-09-16
+
+### Changed
+
+- Bump `@superwall/superscript` to 1.0.16.
 
 ### Added
 
