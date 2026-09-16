@@ -17,6 +17,9 @@ import type { Readable } from "./signal.ts";
 export type SuperwallEventEmit = <K extends keyof AllSuperwallEvents>(
   name: K,
   detail: AllSuperwallEvents[K],
+  /** `wireEmit: false` skips the collector POST (listeners + delegate still
+   *  fire) — for events the paywall iframe already sends itself. */
+  opts?: { wireEmit?: boolean },
 ) => void;
 
 export interface PresentationContext {
@@ -27,6 +30,9 @@ export interface PresentationContext {
   readonly signal: AbortSignal;
   /** Forward paywall events into the public bus. */
   readonly emit: SuperwallEventEmit;
+  /** Internal: the paywall iframe closed itself and already sent
+   *  `paywall_close` to the collector, so the SDK must not send it again. */
+  readonly onPaywallTrackedClose?: () => void;
   /** User attributes snapshot at present-time. Forwarded into the paywall's
    *  `template_variables.user`. */
   readonly user?: Record<string, unknown>;
@@ -211,6 +217,14 @@ export interface PaywallPresenter {
 
   /** Optional: warm a paywall before it's needed. */
   preload?(info: PaywallInfo): Promise<void>;
+
+  /** True when the presented paywall reports its own lifecycle analytics to
+   *  the collector — `trigger_fire` (present), `paywall_open`, `paywall_close`
+   *  from its close button, and checkout `transaction_start` /
+   *  `transaction_abandon`. The SDK then dispatches those events to local
+   *  listeners only, so they aren't counted twice. Set by the default browser
+   *  presenter; leave unset for custom UIs, which rely on the SDK to report. */
+  readonly tracksLifecycleEvents?: boolean;
 }
 
 // Re-export for consumers building custom survey UIs.

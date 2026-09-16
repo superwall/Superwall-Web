@@ -1006,3 +1006,61 @@ it("preload(): mounts a hidden iframe and removes it after load", async () => {
     document.querySelector('iframe[data-sw-preload="pw_warm"]'),
   ).toBeNull();
 });
+
+// ---------------------------------------------------------------------------
+// Events the iframe controller already sends to the collector (SW-5975)
+// ---------------------------------------------------------------------------
+
+it("close from the paywall reports that the iframe tracked paywall_close", async () => {
+  let tracked = 0;
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_close_tracked"),
+    newCtx({ onPaywallTrackedClose: () => tracked++ }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  dispatchFromPaywall(iframe, [{ event_name: "close" }]);
+  await presentation;
+  expect(tracked).toBe(1);
+});
+
+it("host-side dismiss does not report an iframe-tracked close", async () => {
+  let tracked = 0;
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_close_host"),
+    newCtx({ onPaywallTrackedClose: () => tracked++ }),
+  );
+  await tick();
+  presenter.dismiss();
+  await presentation;
+  expect(tracked).toBe(0);
+});
+
+it("stripe checkout start / abandon are emitted locally only (iframe tracks them)", async () => {
+  const emitted: Array<[string, { wireEmit?: boolean } | undefined]> = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_stripe_wire"),
+    newCtx({ emit: (name, _detail, opts) => emitted.push([name, opts]) }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  dispatchFromPaywall(iframe, [
+    { event_name: "stripe_checkout_start", product_identifier: "price_1", checkout_context_id: "cc_1" },
+    { event_name: "stripe_checkout_abandon", product_identifier: "price_1", checkout_context_id: "cc_1" },
+    { event_name: "stripe_checkout_fail", product_identifier: "price_1", checkout_context_id: "cc_1" },
+  ]);
+  await flushMessages();
+  expect(emitted.find(([n]) => n === "transaction_start")?.[1]).toEqual({ wireEmit: false });
+  expect(emitted.find(([n]) => n === "transaction_abandon")?.[1]).toEqual({ wireEmit: false });
+  // The iframe only sends stripeCheckout_fail, so transaction_fail stays wire-bound.
+  expect(emitted.find(([n]) => n === "transaction_fail")?.[1]).toBeUndefined();
+  presenter.dismiss();
+  await presentation;
+});
+
+it("declares that the paywall iframe tracks its own lifecycle events", () => {
+  expect(createBrowserPresenter().tracksLifecycleEvents).toBe(true);
+});

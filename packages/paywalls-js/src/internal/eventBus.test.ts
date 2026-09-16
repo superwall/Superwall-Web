@@ -104,7 +104,9 @@ it.effect("publish posts wire-bound events to the collector", () => {
     const body = JSON.parse(calls[0]!.body!);
     expect(body.events).toHaveLength(1);
     expect(body.events[0].event_name).toBe("paywall_close");
-    expect(body.events[0].parameters.paywall_info.identifier).toBe("pw_1");
+    // Wire payload uses the flat analytics fields, not the public detail shape.
+    expect(body.events[0].parameters.$paywall_identifier).toBe("pw_1");
+    expect(body.events[0].parameters).not.toHaveProperty("paywall_info");
     expect(body.events[0].event_id).toMatch(/^[0-9a-f-]+$/);
     expect(body.events[0].created_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   }).pipe(Effect.provide(stack));

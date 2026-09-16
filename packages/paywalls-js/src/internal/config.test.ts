@@ -112,6 +112,7 @@ test("parseConfig reads the real snake_case wire shape (trigger_options, paywall
     ],
     paywall_responses: [
       {
+        id: "76628",
         identifier: "new-paywall-38fe-2025-05-08",
         name: "Stripe Product Example",
         url: "https://user-content.example.com/abc",
@@ -149,6 +150,7 @@ test("parseConfig reads the real snake_case wire shape (trigger_options, paywall
   expect(cfg.paywallResponses[0]!.identifier).toBe(
     "new-paywall-38fe-2025-05-08",
   );
+  expect(cfg.paywallResponses[0]!.databaseId).toBe("76628");
   expect(cfg.paywallResponses[0]!.url).toBe("https://user-content.example.com/abc");
   expect(cfg.paywallResponses[0]!.productIds).toEqual(["superwall_pro_3999"]);
   expect(cfg.paywallResponses[0]!.featureGatingBehavior).toBe("nonGated");

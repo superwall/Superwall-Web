@@ -75,6 +75,7 @@ it("resolvePaywallWorkerHost maps each environment to its worker zone", () => {
 it("buildInitPayload includes all controller-required slices + resolveVariables:true", () => {
   const payload = buildInitPayload({
     info: {
+      databaseId: "76628",
       identifier: "pw_init",
       name: "Init Test",
       url: "https://user-content.test/runtime/x",
@@ -117,6 +118,7 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
     aliasId: "$SuperwallAlias:abc",
     appUserId: undefined,
     deviceId: "11111111-1111-1111-1111-111111111111",
+    vendorId: "11111111-1111-1111-1111-111111111111",
     email: undefined,
     userAttributes: { plan: "free" },
     deviceAttributes: { deviceLocale: "en-US", appVersion: "1.0.0" },
@@ -146,6 +148,8 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
   expect(c["headers"]).toMatchObject({
     "x-public-api-key": "pk_test",
     "x-device-id": "11111111-1111-1111-1111-111111111111",
+    // The collector derives `meta.vendorId` from this header only.
+    "x-vendor-id": "11111111-1111-1111-1111-111111111111",
     "x-platform": "web",
     "x-sdk-version": "1.0.0",
   });
@@ -153,23 +157,41 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
   expect((c["identity"] as { userId: { type: string } }).userId.type).toBe(
     "aliasId",
   );
+  // Collector slices are pre-encoded the way the iframe controller spreads
+  // them into events: `$snake_case`, audience keys repeated unprefixed.
   expect(c["experimentSlice"]).toEqual({
-    experimentId: "exp_1",
-    variantId: "var_1",
+    $experiment_id: "exp_1",
+    $variant_id: "var_1",
   });
-  expect(c["paywallSlice"]).toMatchObject({
-    paywallId: "pw_init",
-    paywallProductIds: "price_1,price_2",
-    paywallUrl: "https://user-content.test/runtime/x",
+  expect(c["paywallSlice"]).toEqual({
+    $paywall_id: "76628",
+    paywall_id: "76628",
+    $paywall_identifier: "pw_init",
+    $paywall_name: "Init Test",
+    paywall_name: "Init Test",
+    $paywall_product_ids: "price_1,price_2",
+    paywall_product_ids: "price_1,price_2",
+    $paywall_url: "https://user-content.test/runtime/x",
   });
-  expect((c["presentmentSlice"] as { isFreeTrialAvailable: boolean }).isFreeTrialAvailable).toBe(true);
-  expect((c["presentmentSlice"] as { presentationSourceType: string }).presentationSourceType).toBe("register");
-  expect((c["presentmentSlice"] as { presentedBy: string }).presentedBy).toBe("placement");
-  expect(c["placementParamsSlice"]).toEqual({ placementParams: { src: "home" } });
+  expect(c["presentmentSlice"]).toMatchObject({
+    $is_free_trial_available: true,
+    is_free_trial_available: true,
+    $presentation_source_type: "register",
+    presentation_source_type: "register",
+    $presented_by: "placement",
+    presented_by: "placement",
+    $presented_by_event_name: "checkout",
+  });
+  expect(c["placementParamsSlice"]).toEqual({
+    $placement_params: { src: "home" },
+    placement_params: { src: "home" },
+  });
+  expect(c["deviceAttributes"]).toEqual({ $deviceLocale: "en-US", $appVersion: "1.0.0" });
   expect(c["productSlice"]).toEqual({});
-  // CheckoutContext
+  // CheckoutContext keeps the camelCase contract subscriptions-api decodes.
   const cc = payload["checkoutContext"] as Record<string, unknown>;
-  expect(cc["paywall"]).toMatchObject({ paywallId: "pw_init" });
+  expect(cc["paywall"]).toMatchObject({ paywallId: "76628", paywallIdentifier: "pw_init" });
+  expect(cc["presentment"]).toMatchObject({ presentedByEventName: "checkout" });
   expect(cc["experiment"]).toEqual({ experimentId: "exp_1", variantId: "var_1" });
   expect((cc["identity"] as { userId: { type: string } }).userId.type).toBe(
     "aliasId",
@@ -239,6 +261,7 @@ const CHECKOUT_STATIC_CONFIG = {
   ],
   paywall_responses: [
     {
+      id: "4242",
       identifier: "pw_default",
       name: "Default",
       url: "https://paywalls.superwall.test/pw_default",
@@ -2913,6 +2936,152 @@ it("discount_redeem_complete / _fail POST to the collector with correlation cont
   // redemption to the paywall session.
   expect(complete?.parameters).toHaveProperty("$presentation_id");
   rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Analytics wire payloads (SW-5975)
+// ---------------------------------------------------------------------------
+
+const recordingCheckoutFetch = () => {
+  const posted: Array<{ event_name: string; parameters: Record<string, unknown> }> = [];
+  const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(JSON.stringify(CHECKOUT_STATIC_CONFIG)));
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(new Response(JSON.stringify({ user: {}, device: {} })));
+    }
+    if (url.includes("/api/v1/events") && init?.body) {
+      const parsed = JSON.parse(init.body as string) as { events: typeof posted };
+      posted.push(...parsed.events);
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  return { posted, fetch: fetchImpl };
+};
+
+it("custom presenter: trigger_fire and paywall_open POST flat attribution fields", async () => {
+  const { posted, fetch } = recordingCheckoutFetch();
+  const rig = controllablePresenter();
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch,
+    storage: newAdapter(),
+    presenter: rig.presenter,
+  });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() =>
+    posted.some((e) => e.event_name === "paywall_open") &&
+    posted.some((e) => e.event_name === "trigger_fire")
+      ? posted
+      : null,
+  );
+  const trigger = posted.find((e) => e.event_name === "trigger_fire");
+  expect(trigger?.parameters).toMatchObject({
+    $trigger_name: "checkout",
+    $result: "present",
+    $experiment_id: "exp_checkout",
+    $variant_id: "var_default",
+    $paywall_identifier: "pw_default",
+  });
+  const open = posted.find((e) => e.event_name === "paywall_open");
+  expect(open?.parameters).toMatchObject({
+    $experiment_id: "exp_checkout",
+    $variant_id: "var_default",
+    $paywall_id: "4242",
+    $paywall_identifier: "pw_default",
+    $presented_by_event_name: "checkout",
+  });
+  expect(open?.parameters).not.toHaveProperty("paywall_info");
+  rig.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+import { createBrowserPresenter } from "./browser/presenter.ts";
+
+/** The paywall iframe the default presenter mounted most recently. */
+const mountedIframe = () =>
+  pollValue(() => {
+    const all = document.querySelectorAll("iframe");
+    return all.length > 0 ? all[all.length - 1]! : null;
+  });
+
+// The browser presenter's iframe reports trigger_fire / paywall_open itself,
+// whether the SDK resolved it by default or the caller passed it per call
+// (`@superwall/paywalls-react`'s inline `SuperwallPaywall` does the latter).
+const expectIframeOwnsOpen = async (presenter?: PaywallPresenter) => {
+  const { posted, fetch } = recordingCheckoutFetch();
+  const sw = _createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  const localOpens: unknown[] = [];
+  sw.events.addEventListener("paywall_open", (e) => localOpens.push(e.detail));
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout", ...(presenter && { presenter }) });
+  await pollValue(() => sw.activePaywall.value);
+  // sw.dismiss() closes from the host page — the iframe never tracks it.
+  sw.dismiss();
+  await reg;
+  await pollValue(() =>
+    posted.some((e) => e.event_name === "paywall_close") ? posted : null,
+  );
+  const names = posted.map((e) => e.event_name);
+  expect(names).not.toContain("paywall_open");
+  expect(names).not.toContain("trigger_fire");
+  expect(posted.find((e) => e.event_name === "paywall_close")?.parameters).toMatchObject({
+    $paywall_id: "4242",
+    $experiment_id: "exp_checkout",
+  });
+  // Public listeners are unaffected.
+  expect(localOpens).toHaveLength(1);
+  await sw.dispose();
+};
+
+it("default iframe presenter: SDK leaves trigger_fire / paywall_open to the iframe but still reports host-side closes", () =>
+  expectIframeOwnsOpen());
+
+it("browser presenter passed per call (React inline paywall) is treated the same", () =>
+  expectIframeOwnsOpen(createBrowserPresenter()));
+
+it("default iframe presenter: the paywall's own close is not reported twice, paywall_decline still is", async () => {
+  const { posted, fetch } = recordingCheckoutFetch();
+  const sw = _createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() => sw.activePaywall.value);
+  const iframe = await mountedIframe();
+  // The iframe controller posts `paywall_close` to the collector, then this.
+  globalThis.dispatchEvent(
+    new MessageEvent("message", {
+      data: { version: 1, payload: { events: [{ event_name: "close" }] } },
+      source: iframe.contentWindow,
+      origin: new URL(iframe.src).origin,
+    }),
+  );
+  await expect(reg).resolves.toMatchObject({ result: { type: "declined" } });
+  const names = posted.map((e) => e.event_name);
+  expect(names).toContain("paywall_decline");
+  expect(names).not.toContain("paywall_close");
+  await sw.dispose();
+});
+
+it("default iframe presenter: the iframe's device_attributes carry the vendor / device ids, like native SDKs", async () => {
+  const { fetch } = recordingCheckoutFetch();
+  const sw = _createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  const iframe = await mountedIframe();
+  const init = JSON.parse(atob(new URL(iframe.src).hash.slice("#init=".length))) as {
+    collector: { headers: Record<string, string>; deviceAttributes: Record<string, unknown> };
+  };
+  const vendorId = init.collector.headers["x-vendor-id"];
+  expect(vendorId).not.toBe("");
+  expect(init.collector.deviceAttributes["$vendorId"]).toBe(vendorId);
+  expect(init.collector.deviceAttributes["$deviceId"]).not.toBe("");
+  sw.dismiss();
   await reg;
   await sw.dispose();
 });
