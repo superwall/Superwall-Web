@@ -166,7 +166,9 @@ export const createBrowserPresenter = (
       }
     });
 
-  return { present, dismiss, redeemDiscount, preload };
+  // The paywall-next controller inside the iframe posts trigger_fire,
+  // paywall_open, paywall_close and checkout transaction events itself.
+  return { present, dismiss, redeemDiscount, preload, tracksLifecycleEvents: true };
 };
 
 interface ActivePresentation {
@@ -749,6 +751,8 @@ const handleInbound = (
         break;
       }
       case "close": {
+        // The iframe controller sends `paywall_close` before posting this.
+        ctx.onPaywallTrackedClose?.();
         cleanup();
         resolve({ type: "declined" });
         return;
@@ -793,10 +797,16 @@ const handleInbound = (
       case "stripe_checkout_start": {
         const productId = readProductId(evt);
         ctx.onPurchaseEvent?.({ type: "start", productId: String(productId) });
-        ctx.emit("transaction_start", {
-          product: { id: String(productId), store: "stripe", entitlements: [] },
-          paywall_info: info,
-        });
+        // Collector event comes from the iframe (or the server for
+        // server-started checkouts) — local listeners only.
+        ctx.emit(
+          "transaction_start",
+          {
+            product: { id: String(productId), store: "stripe", entitlements: [] },
+            paywall_info: info,
+          },
+          { wireEmit: false },
+        );
         break;
       }
       case "stripe_checkout_submit": {
@@ -833,10 +843,15 @@ const handleInbound = (
       case "stripe_checkout_abandon": {
         const productId = readProductId(evt);
         ctx.onPurchaseEvent?.({ type: "abandon", productId: String(productId) });
-        ctx.emit("transaction_abandon", {
-          product: { id: String(productId), store: "stripe", entitlements: [] },
-          paywall_info: info,
-        });
+        // The iframe sends `transaction_abandon` itself — local listeners only.
+        ctx.emit(
+          "transaction_abandon",
+          {
+            product: { id: String(productId), store: "stripe", entitlements: [] },
+            paywall_info: info,
+          },
+          { wireEmit: false },
+        );
         break;
       }
       // Terminal success signal from the paywall's WebPaywallController on
@@ -998,10 +1013,15 @@ const handlePurchase = (
   resolve: (r: PaywallResult) => void,
   cleanup: () => void,
 ): void => {
-  ctx.emit("transaction_start", {
-    product,
-    paywall_info: _info,
-  });
+  // The iframe sends `transaction_start` for `purchase` clicks itself.
+  ctx.emit(
+    "transaction_start",
+    {
+      product,
+      paywall_info: _info,
+    },
+    { wireEmit: false },
+  );
 
   const finalize = (kind: "purchased" | "declined") => {
     if (kind === "purchased") {

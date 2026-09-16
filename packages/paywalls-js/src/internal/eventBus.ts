@@ -11,6 +11,7 @@ import {
   SuperwallEventTarget,
 } from "../events.ts";
 import type { JsonValue } from "../types.ts";
+import { toWireParameters } from "./analyticsParams.ts";
 import { ComputedProperties } from "./computed.ts";
 import { NetworkService } from "./network.ts";
 
@@ -103,7 +104,7 @@ const make = (target: SuperwallEventTarget) =>
           event_name: name,
           parameters: {
             ...context,
-            ...(detail as unknown as Record<string, JsonValue>),
+            ...toWireParameters(name, detail),
           },
           created_at: new Date().toISOString(),
         };

@@ -109,6 +109,14 @@ import {
   mergeFirstTouch,
   type AttributionAttributes,
 } from "./internal/attributionAttributes.ts";
+import {
+  encodeSlice,
+  experimentSliceFields,
+  PAYWALL_AUDIENCE_KEYS,
+  paywallSliceFields,
+  PLACEMENT_PARAMS_AUDIENCE_KEYS,
+  PRESENTMENT_AUDIENCE_KEYS,
+} from "./internal/analyticsParams.ts";
 import { createMemoryStorage, StorageService } from "./internal/storage.ts";
 // Safe to import statically — DOM access is `typeof`-guarded, no top-level use.
 import { createBrowserStorage } from "./browser/storage.ts";
@@ -464,6 +472,7 @@ interface InitPayloadInput {
   aliasId: string | undefined;
   appUserId: string | undefined;
   deviceId: string | undefined;
+  vendorId: string | undefined;
   email: string | undefined;
   userAttributes: Record<string, unknown>;
   deviceAttributes: Record<string, unknown>;
@@ -499,6 +508,7 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
     aliasId,
     appUserId,
     deviceId,
+    vendorId,
     email,
     userAttributes,
     deviceAttributes,
@@ -516,19 +526,9 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
     ...(aliasId && { aliasId }),
     ...(appUserId && { appUserId }),
   };
-  const productIds = info.productIds ?? [];
   const products = info.productsV2 ?? [];
-  const paywallSlice = {
-    paywallId: info.identifier,
-    paywallIdentifier: info.identifier,
-    paywallName: info.name,
-    paywallProductIds: productIds.join(","),
-    paywallUrl: info.url,
-  };
-  const experimentSlice = {
-    experimentId: decision.experiment.id,
-    variantId: decision.experiment.variant.id,
-  };
+  const paywallSlice = paywallSliceFields(info);
+  const experimentSlice = experimentSliceFields(decision.experiment);
   const presentmentSlice = {
     // Free-trial availability defaults to false when no v2 product
     // declares `trial_days`; refined once product variables resolve.
@@ -554,18 +554,25 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
       "x-public-api-key": bootstrap.apiKey,
       "x-alias-id": aliasId ?? "",
       "x-device-id": deviceId ?? "",
+      // The collector derives `meta.vendorId` from this header only.
+      "x-vendor-id": vendorId ?? "",
       "x-platform": "web",
       "x-sdk-version": bootstrap.sdkVersion,
     },
     placementEventId,
     identity: { userId, deviceId: deviceId ?? "" },
     userAttributes,
-    deviceAttributes,
-    experimentSlice,
-    paywallSlice,
+    // The iframe spreads these slices into events as-is, so they must already
+    // be in the collector's `$snake_case` shape (paywall-next `EventSlice`).
+    // `checkoutContext` below keeps the camelCase objects.
+    deviceAttributes: Object.fromEntries(
+      Object.entries(deviceAttributes).map(([k, v]) => [`$${k}`, v]),
+    ),
+    experimentSlice: encodeSlice(experimentSlice),
+    paywallSlice: encodeSlice(paywallSlice, PAYWALL_AUDIENCE_KEYS),
     productSlice: {},
-    presentmentSlice,
-    placementParamsSlice,
+    presentmentSlice: encodeSlice(presentmentSlice, PRESENTMENT_AUDIENCE_KEYS),
+    placementParamsSlice: encodeSlice(placementParamsSlice, PLACEMENT_PARAMS_AUDIENCE_KEYS),
   };
   const checkoutContext: Record<string, unknown> = {
     paywall: paywallSlice,
@@ -1225,7 +1232,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   /** Snapshot device attributes from current identity + sub state. Called
    *  by enrichment and audience eval. */
-  const snapshotDeviceAttributes = (): Record<string, JsonValue> => {
+  /** Pass the identity snapshot to fill `vendorId` / `deviceId`; they live in
+   *  the identity service rather than in signals, so they're blank otherwise. */
+  const snapshotDeviceAttributes = (
+    identity: IdentitySnapshot | null = null,
+  ): Record<string, JsonValue> => {
     const id = idSig.value;
     const alias = aliasSig.value;
     const customer = customerSig.value;
@@ -1248,8 +1259,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       publicApiKey: opts.apiKey,
       aliasId: alias,
       appUserId: id,
-      vendorId: "",
-      deviceId: "",
+      vendorId: identity?.vendorId ?? "",
+      deviceId: identity?.deviceId ?? "",
       bundleId: opts.options?.bundleId ?? "",
       appVersion: opts.options?.appVersion ?? "",
       isSandbox: isSandbox(env),
@@ -1275,15 +1286,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const idSnap = yield* IdentityService.current().pipe(
         Effect.catchAll(() => Effect.succeed(null as IdentitySnapshot | null)),
       );
-      const baseDevice = snapshotDeviceAttributes();
-      const device =
-        idSnap !== null
-          ? {
-              ...baseDevice,
-              vendorId: idSnap.vendorId,
-              deviceId: idSnap.deviceId,
-            }
-          : baseDevice;
+      const device = snapshotDeviceAttributes(idSnap);
       const result = yield* network
         .postEnrichment({
           user: attrsSig.value,
@@ -1547,6 +1550,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       products.push(product);
     }
     return {
+      ...(result.paywall.databaseId !== undefined && {
+        databaseId: result.paywall.databaseId,
+      }),
       identifier: result.paywall.identifier,
       name: result.paywall.name,
       url: result.paywall.url,
@@ -1696,6 +1702,16 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           evaluatePlacement(placement, (params ?? {}) as PlacementParams),
         );
 
+        // Resolve the presenter for THIS call before any event goes out:
+        //   args.presenter (full override) > args.paywall (custom renderer)
+        //   > default browser iframe presenter (lazy-loaded singleton).
+        // A presenter that tracks lifecycle events itself (the browser
+        // iframe, however it was wired in) means the SDK publishes
+        // trigger_fire (present) and paywall_open to local listeners only.
+        const presenter =
+          decision.kind === "paywall" ? await resolvePresenter(args) : null;
+        const paywallTracksLifecycle = presenter?.tracksLifecycleEvents === true;
+
         if (decision.kind !== "placementNotFound") {
           const triggerResult: TriggerResult =
             decision.kind === "paywall"
@@ -1708,10 +1724,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             "trigger_fire publish failed",
             Effect.gen(function* () {
               const bus = yield* EventBus;
-              yield* bus.publish("trigger_fire", {
-                placementName: placement,
-                result: triggerResult,
-              });
+              yield* bus.publish(
+                "trigger_fire",
+                { placementName: placement, result: triggerResult },
+                paywallTracksLifecycle ? { wireEmit: false } : undefined,
+              );
             }),
           );
         }
@@ -1734,10 +1751,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           return { type: "skipped", reason };
         }
 
-        // Resolve the presenter for THIS call:
-        //   args.presenter (full override) > args.paywall (custom renderer)
-        //   > default browser iframe presenter (lazy-loaded singleton).
-        const presenter = await resolvePresenter(args);
         if (!presenter) {
           throw new NoPresenterRegisteredError(placement);
         }
@@ -1758,7 +1771,12 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             "no_paywall_in_config",
           );
         }
-        let info: PaywallInfo = infoResult;
+        let info: PaywallInfo = {
+          ...infoResult,
+          presentedByPlacementWithName: placement,
+          presentedBy: "placement",
+          presentationSourceType: "register",
+        };
 
         // No URL derivation — every paywall iframes its own editor URL
         // (`paywall_responses[].url` / `url_config.endpoints`). The
@@ -1766,7 +1784,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         // and adds the `#init=...` hash with identity + apiBase /
         // collector / hostOrigin / cancelUrl.
 
-        const wireOpts = undefined;
+        const openWireOpts = paywallTracksLifecycle ? { wireEmit: false } : undefined;
 
         // Try/finally so a failure here (e.g. collector outage during
         // `paywall_open`) doesn't leave presentedSig stuck true and lock
@@ -1786,7 +1804,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
               });
               const bus = yield* EventBus;
               yield* bus.withDelegate((d) => d.onPaywallWillPresent?.(info));
-              yield* bus.publish("paywall_open", { paywall_info: info }, wireOpts);
+              yield* bus.publish("paywall_open", { paywall_info: info }, openWireOpts);
               yield* bus.withDelegate((d) => d.onPaywallDidPresent?.(info));
               yield* recordPaywallView();
             }).pipe(Effect.withSpan("Superwall.register.open")),
@@ -1844,7 +1862,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         // controller uses it as the discriminator for userId.type
         // ("appUserId" vs "aliasId"). Falling back to alias here would
         // misreport every anonymous session as a logged-in user.
-        // vendorId == deviceId == raw UUID.
         const appUserIdRaw =
           idSnap?.appUserId && idSnap.appUserId !== ""
             ? (idSnap.appUserId as string)
@@ -1878,28 +1895,37 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           aliasId: idSnap?.aliasId as string | undefined,
           appUserId: appUserIdRaw,
           deviceId: idSnap?.vendorId as string | undefined,
+          vendorId: idSnap?.vendorId as string | undefined,
           email: emailAttr,
           userAttributes: userAttrs,
-          deviceAttributes: snapshotDeviceAttributes() as Record<string, unknown>,
+          deviceAttributes: snapshotDeviceAttributes(idSnap) as Record<string, unknown>,
         });
 
+        let closeTrackedByPaywall = false;
         const ctx: PresentationContext = {
           placement,
           params: (params ?? ({} as PlacementParams)),
           signal: ac.signal,
-          emit: <K extends keyof AllSuperwallEvents>(name: K, detail: AllSuperwallEvents[K]) => {
+          emit: <K extends keyof AllSuperwallEvents>(
+            name: K,
+            detail: AllSuperwallEvents[K],
+            emitOpts?: { wireEmit?: boolean },
+          ) => {
             // Fire-and-forget — presenter shouldn't block on event delivery.
             runFireAndForget(
               "paywallEvents",
               `bus.publish(${String(name)}) failed`,
               Effect.gen(function* () {
                 const bus = yield* EventBus;
-                yield* bus.publish(name, detail);
+                yield* bus.publish(name, detail, emitOpts);
               }),
             );
           },
+          onPaywallTrackedClose: () => {
+            closeTrackedByPaywall = true;
+          },
           user: attrsSig.value as Record<string, unknown>,
-          device: snapshotDeviceAttributes(),
+          device: snapshotDeviceAttributes(idSnap),
           onPurchaseEvent: (ev) => {
             // Capture the signed entitlements JWT from the terminal success
             // message so `sw.entitlementsToken` is populated for the web-sdk
@@ -1948,11 +1974,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
               yield* Effect.annotateCurrentSpan({ "superwall.close_reason": reason });
               const bus = yield* EventBus;
               yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
-              yield* bus.publish(
-                "paywall_close",
-                { paywall_info: info, close_reason: reason },
-                wireOpts,
-              );
+              yield* bus.publish("paywall_close", {
+                paywall_info: info,
+                close_reason: reason,
+              });
               yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
             }).pipe(Effect.withSpan("Superwall.register.close")),
           );
@@ -1991,12 +2016,15 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
             const bus = yield* EventBus;
             yield* bus.withDelegate((d) => d.onPaywallWillDismiss?.(info));
             if (result.type === "declined") {
-              yield* bus.publish("paywall_decline", { paywall_info: info }, wireOpts);
+              yield* bus.publish("paywall_decline", { paywall_info: info });
             }
             yield* bus.publish(
               "paywall_close",
               { paywall_info: info, close_reason: closeReason },
-              wireOpts,
+              // Only the paywall's own close button is tracked by the iframe;
+              // closes from the host (sw.dismiss, backdrop, Escape, purchase)
+              // are still reported here.
+              closeTrackedByPaywall ? { wireEmit: false } : undefined,
             );
             yield* bus.withDelegate((d) => d.onPaywallDidDismiss?.(info));
           }).pipe(Effect.withSpan("Superwall.register.close")),

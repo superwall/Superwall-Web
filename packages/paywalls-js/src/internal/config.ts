@@ -88,6 +88,8 @@ export interface RawExperimentRef {
 }
 
 export interface RawPaywallResponse {
+  /** Paywall database id — the wire `id`. `identifier` is the slug. */
+  readonly databaseId?: string;
   readonly identifier: string;
   readonly name: string;
   readonly url: string;
@@ -356,6 +358,7 @@ const toProduct = (
 const ProductSlotWire = Schema.Struct({ product_id: Schema.String });
 const UrlConfigWire = Schema.Struct({ endpoints: Schema.optional(Schema.Unknown) });
 const PaywallWire = Schema.Struct({
+  id: Schema.optionalWith(Schema.Union(Schema.String, Schema.Number), { nullable: true }),
   identifier: Schema.String,
   name: optStr,
   url: optStr,
@@ -399,6 +402,7 @@ const toPaywall = (
         ? ("nonGated" as const)
         : undefined;
   return {
+    ...(w.id !== undefined && { databaseId: String(w.id) }),
     identifier: w.identifier,
     name: w.name ?? w.identifier,
     url: w.url ?? "",

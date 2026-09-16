@@ -305,6 +305,9 @@ export const closeReasonShouldComplete = (r: PaywallCloseReason): boolean =>
   r !== "forNextPaywall" && r !== "none";
 
 export interface PaywallInfo {
+  /** Paywall database id (static config `paywall_responses[].id`). Sent as
+   *  `$paywall_id` in analytics; `identifier` is the slug. */
+  databaseId?: string;
   identifier: string;
   name: string;
   url: string;
