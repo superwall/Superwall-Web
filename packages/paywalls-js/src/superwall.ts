@@ -772,6 +772,19 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     yield* IdentityService.hydrate(seed);
 
+    const storage = yield* StorageService;
+    const storedAttrs = yield* storage.get(
+      asStorageKey(STORAGE_KEYS.userAttributes),
+    );
+    if (storedAttrs !== null) {
+      try {
+        const parsed: unknown = JSON.parse(storedAttrs);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          attrsSig.set(parsed as UserAttributes);
+        }
+      } catch {}
+    }
+
     // Bridge identity changes onto the public signals. forkDaemon so it
     // outlives configure() and keeps propagating across the runtime.
     const identityStream = yield* IdentityService.observe();
@@ -798,6 +811,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       if (next === prevAttrs) return;
       const changed = next;
       prevAttrs = next;
+      runFireAndForget(
+        "superwallCore",
+        "userAttributes persist failed",
+        storage.set(
+          asStorageKey(STORAGE_KEYS.userAttributes),
+          JSON.stringify(next),
+        ),
+      );
       runFireAndForget(
         "superwallCore",
         "userAttributes bridge effect failed",
@@ -916,7 +937,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     });
 
     // Replay last-restore timestamp so consumers can read it pre-restore.
-    const storage = yield* StorageService;
     const cachedRestoreAt = yield* storage.get(
       asStorageKey(STORAGE_KEYS.lastRestoreAt),
     );
@@ -1367,6 +1387,25 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       .catch((cause: unknown) => logViaRuntime(scope, label, cause));
   };
 
+  const mergeAttributes = (
+    next: Partial<UserAttributes>,
+    wireEmit: boolean,
+  ): void => {
+    attrsSig.update((prev) => ({ ...prev, ...next }) as UserAttributes);
+    runFireAndForget(
+      "identityManager",
+      "setAttributes(): user_attributes publish failed",
+      Effect.gen(function* () {
+        const bus = yield* EventBus;
+        yield* bus.publish(
+          "user_attributes",
+          { attributes: attrsSig.value },
+          { wireEmit },
+        );
+      }),
+    );
+  };
+
   const user: UserNamespace = {
     id: asReadable(idSig),
     aliasId: asReadable(aliasSig),
@@ -1381,6 +1420,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           // Capture the appUserId before the identity mutation so we can detect
           // whether the user actually changed (empty = anonymous).
           const prevAppUserId = idSig.value;
+          if (prevAppUserId !== "" && userId !== prevAppUserId) {
+            attrsSig.set({} as UserAttributes);
+          }
 
           // Pending bracket — register() blocks on phase=Ready until both
           // Identification and Seed clear. Closes the race where an in-flight
@@ -1460,21 +1502,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }),
       ),
 
-    setAttributes: (next) => {
-      attrsSig.update((prev) => ({ ...prev, ...next }) as UserAttributes);
-      // Wire-emit user_attributes so analytics + paywall templates see
-      // the change (Android `MergeAttributes` action).
-      runFireAndForget(
-        "identityManager",
-        "setAttributes(): user_attributes publish failed",
-        Effect.gen(function* () {
-          const bus = yield* EventBus;
-          yield* bus.publish("user_attributes", {
-            attributes: attrsSig.value,
-          });
-        }),
-      );
-    },
+    // Wire-emit user_attributes so analytics + paywall templates see
+    // the change (Android `MergeAttributes` action).
+    setAttributes: (next) => mergeAttributes(next, true),
 
     setIntegrationAttribute: (attr, value) => {
       intAttrsSig.update((prev) => {
@@ -1937,6 +1967,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
               try { h(ev); } catch {}
             });
           },
+          // The iframe already sends `user_attributes` to the collector.
+          onUserAttributesUpdate: (attrs) => mergeAttributes(attrs, false),
           bootstrap,
           initPayload,
           testMode: isTestMode(),

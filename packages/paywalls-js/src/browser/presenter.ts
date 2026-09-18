@@ -983,6 +983,21 @@ const handleInbound = (
         ctx.emit("customPaywallAction", { name: actionName });
         break;
       }
+      case "user_attribute_updated": {
+        const raw = evt["attributes"];
+        if (!Array.isArray(raw)) break;
+        const attributes: Record<string, JsonValue> = {};
+        for (const entry of raw) {
+          if (!entry || typeof entry !== "object") continue;
+          const { key, value } = entry as { key?: unknown; value?: unknown };
+          if (typeof key !== "string" || key === "" || value === undefined) continue;
+          attributes[key] = value as JsonValue;
+        }
+        if (Object.keys(attributes).length > 0) {
+          ctx.onUserAttributesUpdate?.(attributes);
+        }
+        break;
+      }
       case "custom_placement": {
         // paywall_info is the ACTIVE paywall, captured at present() time.
         const placementName =

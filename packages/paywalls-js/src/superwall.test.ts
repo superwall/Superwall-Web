@@ -547,6 +547,41 @@ it("setAttributes merges into the attributes signal", async () => {
   await sw.dispose();
 });
 
+it("user attributes persist across sessions; reset and user switch clear them", async () => {
+  const adapter = newAdapter();
+  const storedAge = () =>
+    JSON.parse((adapter.get("superwall.userAttributes") as string | null) ?? "{}").age;
+  const age = (sw: Superwall) => (sw.user.attributes.value as { age?: string }).age;
+
+  const sw1 = make({ storage: adapter });
+  await sw1.ready;
+  await sw1.user.identify("user_a");
+  sw1.user.setAttributes({ age: "32" } as never);
+  await waitFor(() => storedAge() === "32");
+  await sw1.dispose();
+
+  const sw2 = make({ storage: adapter });
+  await sw2.ready;
+  expect(age(sw2)).toBe("32");
+
+  // Same user keeps them; a different user starts clean.
+  await sw2.user.identify("user_a");
+  expect(age(sw2)).toBe("32");
+  await sw2.user.identify("user_b");
+  expect(age(sw2)).toBeUndefined();
+
+  sw2.user.setAttributes({ age: "40" } as never);
+  await waitFor(() => storedAge() === "40");
+  await sw2.reset();
+  await waitFor(() => storedAge() === undefined);
+  await sw2.dispose();
+
+  const sw3 = make({ storage: adapter });
+  await sw3.ready;
+  expect(age(sw3)).toBeUndefined();
+  await sw3.dispose();
+});
+
 it("setIntegrationAttribute writes + null clears", async () => {
   const sw = make();
   await sw.ready;
