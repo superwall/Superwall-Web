@@ -703,6 +703,44 @@ it("legacy `custom` message is forwarded via ctx.emit as customPaywallAction", a
   await presentation;
 });
 
+it("user_attribute_updated (flat + envelope) reaches ctx.onUserAttributesUpdate", async () => {
+  const updates: unknown[] = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_a"),
+    newCtx({ onUserAttributesUpdate: (attrs) => updates.push(attrs) }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  globalThis.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        event_name: "user_attribute_updated",
+        attributes: [{ key: "answer", value: "flat" }],
+      },
+      source: iframe.contentWindow,
+      origin: new URL(iframe.src).origin,
+    }),
+  );
+  dispatchFromPaywall(iframe, [
+    {
+      event_name: "user_attribute_updated",
+      attributes: [{ key: "answer", value: "envelope" }, { key: 1 }, null],
+    },
+  ]);
+  // Malformed payloads must be ignored.
+  dispatchFromPaywall(iframe, [
+    { event_name: "user_attribute_updated", attributes: "nope" },
+    { event_name: "user_attribute_updated", attributes: [{ value: "no-key" }] },
+  ]);
+  await flushMessages();
+
+  expect(updates).toEqual([{ answer: "flat" }, { answer: "envelope" }]);
+
+  presenter.dismiss();
+  await presentation;
+});
+
 it("open_url_external calls globalThis.open with the url", async () => {
   const opened: Array<[string, string | undefined, string | undefined]> = [];
   const originalOpen = globalThis.open;

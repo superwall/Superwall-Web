@@ -3,6 +3,7 @@
 // consumers can supply any implementation.
 
 import type {
+  JsonValue,
   PaywallInfo,
   PaywallResult,
   PlacementParams,
@@ -44,6 +45,9 @@ export interface PresentationContext {
    *  NOT a public consumer event — the SDK routes these into the active
    *  `PurchaseController`. */
   readonly onPurchaseEvent?: (event: PaywallPurchaseEvent) => void;
+  /** Internal: merge attributes set inside the paywall into the host's
+   *  user attributes. */
+  readonly onUserAttributesUpdate?: (attributes: Record<string, JsonValue>) => void;
   /** Bootstrap params injected into the iframe URL so the paywall's SSR
    *  loader can mint the placement token + identify the host. Forwarded
    *  verbatim by the default browser presenter; custom presenters can
