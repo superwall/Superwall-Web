@@ -108,6 +108,29 @@ const resolveInterfaceStyle = (
 // so an unbounded wait here would stall the whole SDK behind a slow server.
 const ENRICHMENT_TIMEOUT = Duration.seconds(1);
 
+// Ceiling on one collector POST. Delivery runs on the EventBus queue, off the
+// readiness path, so this only stops a hung request from stalling the events
+// queued behind it.
+const COLLECTOR_TIMEOUT = Duration.seconds(10);
+
+export interface PostEventsOptions {
+  /** Headers captured when the events were published, so a queued event keeps
+   *  the identity it was tracked under. Built fresh when omitted. */
+  readonly headers?: Record<string, string>;
+  /** Let the request outlive the page. Defaults to on for small bodies — see
+   *  {@link KEEPALIVE_MAX_BYTES}; the pagehide / dispose flush decides per batch. */
+  readonly keepalive?: boolean;
+}
+
+// Browsers cap keepalive bodies at 64 KiB (UTF-8 bytes) across all in-flight
+// requests and reject anything over. Delivery no longer holds up `register()`,
+// so a host may navigate while a batch is on the wire; keepalive lets it land.
+// Staying under half the quota leaves the other half to the pagehide flush.
+export const KEEPALIVE_MAX_BYTES = 30_000;
+
+export const utf8ByteLength = (s: string): number =>
+  new TextEncoder().encode(s).length;
+
 const make = (config: NetworkConfig) =>
   Effect.gen(function* () {
     const identity = yield* IdentityService;
@@ -163,6 +186,9 @@ const make = (config: NetworkConfig) =>
       }
       return fetchImpl;
     };
+
+    const collectorEventsUrl = (): string =>
+      `https://${resolveHosts(config.environment).collector}/api/v1/events`;
 
     /** GET /api/v1/static_config?pk={apiKey} on the base host. */
     const getStaticConfig = Effect.fn("NetworkService.getStaticConfig")(
@@ -225,51 +251,85 @@ const make = (config: NetworkConfig) =>
       },
     );
 
-    /** POST /api/v1/events on the collector host. */
-    const postEvents = Effect.fn("NetworkService.postEvents")(function* (
-      events: ReadonlyArray<EventEnvelope>,
-    ) {
-      const hosts = resolveHosts(config.environment);
-      const url = `https://${hosts.collector}/api/v1/events`;
-      yield* Effect.annotateCurrentSpan({
-        "http.url": url,
-        "http.method": "POST",
-        "superwall.event_count": events.length,
-      });
-      const headers = yield* buildHeaders();
-
-      const response = yield* Effect.tryPromise({
-        try: async () =>
-          requireFetch()(url, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ events }),
-          }),
-        catch: (cause) =>
-          new NetworkRequestError({
-            method: "POST",
-            url,
-            message: `events network error: ${describe(cause)}`,
-            cause,
-          }),
-      });
-
-      if (!response.ok) {
+    /** POST /api/v1/events on the collector host. Bounded by
+     *  {@link COLLECTOR_TIMEOUT}; a timeout surfaces as `NetworkRequestError`. */
+    const postEvents = Effect.fn("NetworkService.postEvents")(
+      function* (
+        events: ReadonlyArray<EventEnvelope>,
+        options?: PostEventsOptions,
+      ) {
+        const url = collectorEventsUrl();
         yield* Effect.annotateCurrentSpan({
-          "http.status_code": response.status,
-          "error.type": "NetworkRequestError",
+          "http.url": url,
+          "http.method": "POST",
+          "superwall.event_count": events.length,
         });
-        return yield* Effect.fail(
-          new NetworkRequestError({
-            method: "POST",
-            url,
-            status: response.status,
-            message: `events returned ${response.status}`,
-          }),
+        const headers = options?.headers
+          ? { ...options.headers, "X-Current-Time": new Date().toISOString() }
+          : yield* buildHeaders();
+        const body = JSON.stringify({ events });
+        const keepalive =
+          options?.keepalive ?? utf8ByteLength(body) <= KEEPALIVE_MAX_BYTES;
+        // Abort the in-flight request when the timeout (or a dispose)
+        // interrupts us, instead of leaking the socket.
+        const controller =
+          typeof AbortController !== "undefined" ? new AbortController() : null;
+
+        const response = yield* Effect.tryPromise({
+          try: async () =>
+            requireFetch()(url, {
+              method: "POST",
+              headers,
+              body,
+              ...(keepalive ? { keepalive: true } : {}),
+              ...(controller ? { signal: controller.signal } : {}),
+            }),
+          catch: (cause) =>
+            new NetworkRequestError({
+              method: "POST",
+              url,
+              message: `events network error: ${describe(cause)}`,
+              cause,
+            }),
+        }).pipe(
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              try {
+                controller?.abort();
+              } catch {}
+            }),
+          ),
         );
-      }
-      yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
-    });
+
+        if (!response.ok) {
+          yield* Effect.annotateCurrentSpan({
+            "http.status_code": response.status,
+            "error.type": "NetworkRequestError",
+          });
+          return yield* Effect.fail(
+            new NetworkRequestError({
+              method: "POST",
+              url,
+              status: response.status,
+              message: `events returned ${response.status}`,
+            }),
+          );
+        }
+        yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
+      },
+      (effect) =>
+        effect.pipe(
+          Effect.timeoutFail({
+            duration: COLLECTOR_TIMEOUT,
+            onTimeout: () =>
+              new NetworkRequestError({
+                method: "POST",
+                url: collectorEventsUrl(),
+                message: "events timed out (10s limit)",
+              }),
+          }),
+        ),
+    );
 
     /** POST /api/v1/enrich on the enrichment host. Hard 1s timeout, no retries
      *  — see {@link ENRICHMENT_TIMEOUT}. A timeout surfaces as a
@@ -565,6 +625,7 @@ export interface NetworkServiceImpl {
   >;
   readonly postEvents: (
     events: ReadonlyArray<EventEnvelope>,
+    options?: PostEventsOptions,
   ) => Effect.Effect<void, NetworkRequestError | IdentityNotHydratedError>;
   readonly postEnrichment: (
     payload: EnrichmentRequest,

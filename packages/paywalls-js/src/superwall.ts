@@ -991,7 +991,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     yield* eagerAssign(config, assignments);
     yield* applyEntitlementsByProductId(config);
     yield* config.preload();
-    yield* warmPaywalls(config);
+    // Cache warming is speculative — never hold readiness on it.
+    yield* Effect.forkDaemon(warmPaywalls(config));
 
     const hydrated = yield* config.current();
     const enrichmentEffect = runEnrichment(bus).pipe(
@@ -1008,9 +1009,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       Effect.gen(function* () {
         yield* eagerAssign(config, assignments);
         yield* applyEntitlementsByProductId(config);
-        yield* confirmAssignments(assignments);
         yield* config.preload();
-        yield* warmPaywalls(config);
+        // Best-effort work stays off the readiness path: the local assignment
+        // cache is authoritative and warming is speculative.
+        yield* Effect.forkDaemon(confirmAssignments(assignments));
+        yield* Effect.forkDaemon(warmPaywalls(config));
       });
 
     // Track whether we have a usable config (cache OR fresh). Status flips
@@ -1195,6 +1198,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         );
     });
 
+  const warmedPaywallUrls = new Set<string>();
+
   /** Hand each cached paywall URL to the presenter's optional preload hook
    *  so the browser warms the HTTP cache before first present. Best-effort,
    *  bounded concurrency to avoid hammering on large catalogs. */
@@ -1205,8 +1210,15 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       if (!presenter?.preload) return;
       const cfg = yield* config.current();
       if (!cfg) return;
-      const infos = Arr.map(
+      // Skip URLs already warmed — the cached-config pass and the fresh-config
+      // pass overlap now that neither is awaited.
+      const fresh = Arr.filter(
         Arr.take(Arr.filter(cfg.paywallResponses, (p) => Boolean(p.url)), 6),
+        (p) => !warmedPaywallUrls.has(p.url),
+      );
+      for (const p of fresh) warmedPaywallUrls.add(p.url);
+      const infos = Arr.map(
+        fresh,
         (p): PaywallInfo => ({
           identifier: p.identifier,
           name: p.name,
@@ -1222,7 +1234,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       yield* Effect.all(
         Arr.map(infos, (info) =>
           Effect.tryPromise({
-            try: () => presenter.preload!(info),
+            // Runs in the background, so it can outlive the instance — don't
+            // mount iframes for a disposed SDK.
+            try: () => (disposed ? Promise.resolve() : presenter.preload!(info)),
             catch: () => undefined,
           }).pipe(Effect.catchAll(() => Effect.void)),
         ),
