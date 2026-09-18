@@ -3,6 +3,14 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## 0.2.9 — 2026-09-18
+
+### Fixed
+
+- Allow SDK readiness to complete without waiting for analytics uploads or paywall preloading. Analytics remain ordered and support page-exit delivery.
+- Apply user attributes set inside a paywall to the SDK user object, React state, delegate callbacks, and local `user_attributes` events without sending duplicate analytics.
+- Persist user attributes across page reloads. Reset clears stored attributes, and switching from one identified user to another clears the previous user's attributes.
+
 ## 0.2.8 — 2026-09-16
 
 ### Changed
