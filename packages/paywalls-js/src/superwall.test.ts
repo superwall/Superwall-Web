@@ -1446,6 +1446,119 @@ it("preloadAll / preloadFor are no-ops without config (do not throw)", async () 
 // dispose idempotence
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// readiness must not wait on analytics, cache warming or confirmation
+// ---------------------------------------------------------------------------
+
+const never = () => new Promise<Response>(() => {});
+
+/** "ready" if `sw.ready` settles within `ms`, else "timeout". */
+const readyWithin = (sw: Superwall, ms = 1500): Promise<"ready" | "timeout"> =>
+  Promise.race([
+    sw.ready.then(() => "ready" as const),
+    new Promise<"timeout">((r) => setTimeout(() => r("timeout"), ms)),
+  ]);
+
+/** Fetch serving CHECKOUT_STATIC_CONFIG; `hang` picks the URLs that never answer. */
+const fetchHanging = (hang: (url: string) => boolean) => {
+  const calls: Array<{ url: string; body: string | undefined }> = [];
+  const impl = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push({ url, body: init?.body as string | undefined });
+    if (hang(url)) return never();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(JSON.stringify(CHECKOUT_STATIC_CONFIG)));
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(new Response(JSON.stringify({ user: {}, device: {} })));
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  return { fetch: impl, calls };
+};
+
+/** Make preload iframes inert so they never fire load/error (only the
+ *  presenter's 8s fallback would settle them). */
+const stubInertIframes = () => {
+  const realCreate = document.createElement.bind(document);
+  return vi.spyOn(document, "createElement").mockImplementation(((
+    tag: string,
+  ) => realCreate(tag === "iframe" ? "div" : tag)) as typeof document.createElement);
+};
+
+it("a collector that never answers blocks neither the config fetch nor sw.ready (cold)", async () => {
+  const { fetch, calls } = fetchHanging((url) => url.includes("/api/v1/events"));
+  const sw = createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+
+  expect(await readyWithin(sw)).toBe("ready");
+  expect(sw.configurationStatus.value).toBe("configured");
+  expect(calls.some((c) => c.url.includes("/api/v1/static_config"))).toBe(true);
+  // Lifecycle events were still handed to the collector, first_seen first.
+  const posted = calls.find((c) => c.url.includes("/api/v1/events"));
+  expect(JSON.parse(posted!.body!).events[0].event_name).toBe("first_seen");
+  await sw.dispose();
+});
+
+it("a collector that never answers does not block sw.ready (cached config)", async () => {
+  const storage = newAdapter();
+  const first = makeWithPaywall({ storage });
+  await first.ready;
+  await first.dispose();
+
+  const { fetch } = fetchHanging((url) => url.includes("/api/v1/events"));
+  const sw = createSuperwall({ apiKey: "pk_test", fetch, storage });
+  expect(await readyWithin(sw)).toBe("ready");
+  expect(sw.configurationStatus.value).toBe("configured");
+  await sw.dispose();
+});
+
+it("sw.ready does not wait for paywall cache warming (cold + cached)", async () => {
+  const spy = stubInertIframes();
+  try {
+    const storage = newAdapter();
+    const cold = makeWithPaywall({ storage });
+    expect(await readyWithin(cold)).toBe("ready");
+    // Warming still starts, in the background.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.querySelectorAll("[data-sw-preload]").length).toBe(1);
+    await cold.dispose();
+
+    const cached = makeWithPaywall({ storage });
+    expect(await readyWithin(cached)).toBe("ready");
+    await cached.dispose();
+  } finally {
+    spy.mockRestore();
+    document.querySelectorAll("[data-sw-preload]").forEach((n) => n.remove());
+  }
+});
+
+it("sw.ready does not wait for confirm_assignments", async () => {
+  const { fetch, calls } = fetchHanging((url) =>
+    url.includes("/api/v1/confirm_assignments"),
+  );
+  const sw = createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  expect(await readyWithin(sw)).toBe("ready");
+  await new Promise((r) => setTimeout(r, 20));
+  expect(calls.some((c) => c.url.includes("/api/v1/confirm_assignments"))).toBe(true);
+  await sw.dispose();
+});
+
+it("a failed config fetch still reports failed, not ready-and-configured", async () => {
+  const fetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response("nope", { status: 500 }));
+    }
+    if (url.includes("/api/v1/events")) return never();
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof globalThis.fetch;
+  const sw = createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  await readyWithin(sw, 5000);
+  expect(sw.isConfigured.value).toBe(false);
+  expect(sw.configurationStatus.value).toBe("failed");
+  await sw.dispose();
+}, 10_000);
+
 it("dispose is idempotent + safe to call multiple times", async () => {
   const sw = make();
   await sw.ready;

@@ -1,5 +1,5 @@
 import { it, expect } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, TestClock } from "effect";
 import { computedPropertiesLayer } from "./computed.ts";
 import type { PaywallInfo, SubscriptionStatus } from "../types.ts";
 import {
@@ -99,6 +99,7 @@ it.effect("publish posts wire-bound events to the collector", () => {
       paywall_info: stubPaywall("pw_1"),
       close_reason: "manualClose",
     });
+    yield* settle;
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://collector.superwall.com/api/v1/events");
     const body = JSON.parse(calls[0]!.body!);
@@ -324,6 +325,7 @@ it.effect("publishCustom POSTs to collector with event_name = caller's event nam
     yield* IdentityService.hydrate();
     const bus = yield* EventBus;
     yield* bus.publishCustom("purchase_intent", { product: "pro_yearly", price: 99 });
+    yield* settle;
     expect(calls).toHaveLength(1);
     const body = JSON.parse(calls[0]!.body!);
     expect(body.events[0].event_name).toBe("purchase_intent");
@@ -366,6 +368,313 @@ it.effect("publishCustom absorbs collector failures without throwing", () => {
     const bus = yield* EventBus;
     yield* bus.publishCustom("some_event", {});
   }).pipe(Effect.provide(stack));
+});
+
+// ---------------------------------------------------------------------------
+// collector delivery queue
+// ---------------------------------------------------------------------------
+
+interface CollectorRequest {
+  names: string[];
+  events: Array<{ event_name: string; parameters: Record<string, unknown> }>;
+  bytes: number;
+  headers: Record<string, string>;
+  keepalive: boolean;
+  respond: (r: Response) => void;
+  fail: (e: unknown) => void;
+}
+
+/** Collector whose responses the test settles by hand. */
+const manualCollector = (): { fetch: typeof fetch; requests: CollectorRequest[] } => {
+  const requests: CollectorRequest[] = [];
+  const fn = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((respond, fail) => {
+      const body = JSON.parse(init!.body as string) as {
+        events: CollectorRequest["events"];
+      };
+      requests.push({
+        names: body.events.map((e) => e.event_name),
+        events: body.events,
+        bytes: new TextEncoder().encode(init!.body as string).length,
+        headers: init!.headers as Record<string, string>,
+        keepalive: init?.keepalive === true,
+        respond,
+        fail,
+      });
+    })) as unknown as typeof fetch;
+  return { fetch: fn, requests };
+};
+
+/** Let the drainer fiber and any settled fetch promises run. */
+const settle = Effect.promise(
+  () => new Promise<void>((r) => setTimeout(r, 0)),
+);
+
+const ok = () => new Response("", { status: 204 });
+
+it.effect("publish resolves without waiting for the collector response", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    // The collector never answers. Before the queue this hung forever.
+    yield* bus.publish("first_seen", {});
+    yield* bus.publish("session_start", {});
+    yield* bus.publishCustom("form_submit", {});
+    yield* settle;
+    expect(requests.length).toBeGreaterThanOrEqual(1);
+    expect(requests[0]!.names[0]).toBe("first_seen");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("events published while a request is in flight go out next, in order, as one batch", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    yield* bus.publish("session_start", {});
+    yield* bus.publish("app_launch", {});
+    yield* bus.publishCustom("form_submit", {});
+    yield* settle;
+    // One request in flight at a time keeps wire order deterministic.
+    expect(requests.map((r) => r.names)).toEqual([["first_seen"]]);
+
+    requests[0]!.respond(ok());
+    yield* settle;
+    expect(requests.map((r) => r.names)).toEqual([
+      ["first_seen"],
+      ["session_start", "app_launch", "form_submit"],
+    ]);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("a queued event keeps the identity it was published under", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    // Both wait behind the in-flight request; identify() lands between them.
+    yield* bus.publish("session_start", {});
+    yield* IdentityService.identify("user_b");
+    yield* bus.publish("app_launch", {});
+    requests[0]!.respond(ok());
+    yield* settle;
+    requests[1]!.respond(ok());
+    yield* settle;
+
+    expect(requests.map((r) => r.names)).toEqual([
+      ["first_seen"],
+      ["session_start"],
+      ["app_launch"],
+    ]);
+    expect(requests[1]!.headers["X-App-User-ID"]).toBe("");
+    expect(requests[2]!.headers["X-App-User-ID"]).toBe("user_b");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("a failed collector request does not stop later events", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    yield* bus.publish("session_start", {});
+    requests[0]!.fail(new TypeError("offline"));
+    yield* settle;
+    expect(requests.map((r) => r.names)).toEqual([
+      ["first_seen"],
+      ["session_start"],
+    ]);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("a collector request that never settles times out and the next batch goes out", () => {
+  const target = new SuperwallEventTarget();
+  const signals: AbortSignal[] = [];
+  const names: string[][] = [];
+  const hang = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    signals.push(init!.signal!);
+    names.push(
+      (JSON.parse(init!.body as string).events as Array<{ event_name: string }>).map(
+        (e) => e.event_name,
+      ),
+    );
+    return new Promise<Response>(() => {});
+  }) as unknown as typeof fetch;
+  const stack = buildStack(hang, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    yield* bus.publish("session_start", {});
+    yield* TestClock.adjust("10 seconds");
+    yield* settle;
+    expect(signals[0]!.aborted).toBe(true);
+    expect(names).toEqual([["first_seen"], ["session_start"]]);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("pagehide flushes waiting events with keepalive", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    yield* bus.publish("paywall_decline", { paywall_info: stubPaywall("pw_1") });
+    yield* settle;
+    expect(requests).toHaveLength(1);
+
+    globalThis.dispatchEvent(new Event("pagehide"));
+    yield* settle;
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.names).toEqual(["paywall_decline"]);
+    expect(requests[1]!.keepalive).toBe(true);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("a queued event is a snapshot — later caller mutation does not reach the wire", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    const props = { quiz: ["original"], nested: { answer: "a" } };
+    yield* bus.publishCustom("quiz_answer", props);
+    props.quiz[0] = "mutated";
+    props.nested.answer = "b";
+    requests[0]!.respond(ok());
+    yield* settle;
+    expect(requests[1]!.events[0]!.parameters.quiz).toEqual(["original"]);
+    expect(requests[1]!.events[0]!.parameters.nested).toEqual({ answer: "a" });
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("pagehide with a large backlog splits it and keeps keepalive within the browser quota", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    // ~115 KB waiting behind the held request; multibyte so chars != bytes.
+    for (let i = 0; i < 100; i++) {
+      yield* bus.publishCustom("answer", { i, pad: "答".repeat(350) });
+    }
+    globalThis.dispatchEvent(new Event("pagehide"));
+    yield* settle;
+
+    const flushed = requests.slice(1);
+    // Every event was started in this tick, in order, none dropped.
+    expect(flushed.flatMap((r) => r.events.map((e) => e.parameters.i))).toEqual(
+      Array.from({ length: 100 }, (_, i) => i),
+    );
+    const keepaliveBytes = flushed
+      .filter((r) => r.keepalive)
+      .reduce((n, r) => n + r.bytes, 0);
+    expect(keepaliveBytes).toBeGreaterThan(0);
+    // The held first request is keepalive too; together they stay under 64 KiB.
+    expect(keepaliveBytes + requests[0]!.bytes).toBeLessThanOrEqual(65_536);
+    for (const r of flushed) {
+      expect(r.events.length).toBeLessThanOrEqual(50);
+      if (r.keepalive) expect(r.bytes).toBeLessThan(32_000);
+    }
+    // The oldest waiting events get the keepalive share.
+    expect(flushed[0]!.keepalive).toBe(true);
+    expect(flushed[flushed.length - 1]!.keepalive).toBe(false);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("pagehide also flushes identity groups the drainer dequeued but has not sent", () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const bus = yield* EventBus;
+    yield* bus.publish("first_seen", {});
+    yield* settle;
+    yield* bus.publishCustom("anonymous_event", {});
+    yield* IdentityService.identify("user_b");
+    yield* bus.publishCustom("identified_event", {});
+    // The drainer dequeues both groups in one batch; the anonymous one goes
+    // on the wire and the identified one waits behind it.
+    requests[0]!.respond(ok());
+    yield* settle;
+    expect(requests.map((r) => r.names)).toEqual([["first_seen"], ["anonymous_event"]]);
+
+    globalThis.dispatchEvent(new Event("pagehide"));
+    yield* settle;
+    expect(requests.map((r) => r.names)).toEqual([
+      ["first_seen"],
+      ["anonymous_event"],
+      ["identified_event"],
+    ]);
+    expect(requests[2]!.keepalive).toBe(true);
+    expect(requests[2]!.headers["X-App-User-ID"]).toBe("user_b");
+
+    // The drainer must not send it a second time once it resumes.
+    requests[1]!.respond(ok());
+    yield* bus.publishCustom("later_event", {});
+    yield* settle;
+    expect(requests.slice(3).map((r) => r.names)).toEqual([["later_event"]]);
+  }).pipe(Effect.provide(stack));
+});
+
+it("closing the scope flushes waiting events and detaches the pagehide listener", async () => {
+  const target = new SuperwallEventTarget();
+  const { fetch, requests } = manualCollector();
+  const stack = buildStack(fetch, target);
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const bus = yield* EventBus;
+      yield* bus.publish("first_seen", {});
+      yield* settle;
+      yield* bus.publish("session_start", {});
+    }).pipe(Effect.provide(stack)),
+  );
+  await Effect.runPromise(settle);
+  expect(requests.map((r) => r.names)).toEqual([
+    ["first_seen"],
+    ["session_start"],
+  ]);
+  expect(requests[1]!.keepalive).toBe(true);
+
+  globalThis.dispatchEvent(new Event("pagehide"));
+  await Effect.runPromise(settle);
+  expect(requests).toHaveLength(2);
 });
 
 // Suppress unused-import warning when the test file shrinks

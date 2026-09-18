@@ -1,5 +1,5 @@
 import { it, expect } from "@effect/vitest";
-import { Effect, Either } from "effect";
+import { Effect, Either, Fiber, TestClock } from "effect";
 import { SDK_VERSION } from "../version.ts";
 import {
   NetworkDecodingError,
@@ -384,6 +384,67 @@ it.effect("postEvents on non-2xx returns NetworkRequestError with status", () =>
     if (Either.isLeft(result)) {
       expect((result.left as NetworkRequestError).status).toBe(429);
     }
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("postEvents times out after 10s and aborts the request", () => {
+  const { fetch, calls } = mockFetch(() => new Promise<Response>(() => {}));
+  const stack = buildStack(fetch);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const fiber = yield* Effect.fork(net.postEvents([]).pipe(Effect.either));
+    yield* TestClock.adjust("10 seconds");
+    const result = yield* Fiber.join(fiber);
+
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect((result.left as NetworkRequestError).message).toContain("timed out");
+    }
+    expect(calls[0]!.init!.signal!.aborted).toBe(true);
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("postEvents uses keepalive only while the body fits the browser quota", () => {
+  const { fetch, calls } = mockFetch(() => new Response("", { status: 204 }));
+  const stack = buildStack(fetch);
+  const event = (pad: string): EventEnvelope => ({
+    event_id: "evt_1",
+    event_name: "custom",
+    parameters: { pad },
+    created_at: "2026-04-26T12:00:00.000Z",
+  });
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.postEvents([event("x")]);
+    yield* net.postEvents([event("x".repeat(40_000))]);
+    // 22k characters but ~66 KB on the wire — the quota counts UTF-8 bytes.
+    yield* net.postEvents([event("答".repeat(22_000))]);
+    expect(calls[0]!.init!.keepalive).toBe(true);
+    expect(calls[1]!.init!.keepalive).toBeUndefined();
+    expect(calls[2]!.init!.keepalive).toBeUndefined();
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("postEvents sends caller-captured headers and keepalive as given", () => {
+  const { fetch, calls } = mockFetch(() => new Response("", { status: 204 }));
+  const stack = buildStack(fetch);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const captured = yield* net.buildHeaders();
+    // Identity changes after capture must not leak into the request.
+    yield* IdentityService.identify("someone_else");
+    yield* net.postEvents([], { headers: captured, keepalive: true });
+
+    const sent = calls[0]!.init!.headers as Record<string, string>;
+    expect(sent["X-App-User-ID"]).toBe("");
+    expect(sent["X-Alias-ID"]).toBe(captured["X-Alias-ID"]);
+    expect(calls[0]!.init!.keepalive).toBe(true);
   }).pipe(Effect.provide(stack));
 });
 
