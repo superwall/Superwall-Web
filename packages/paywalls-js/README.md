@@ -38,9 +38,6 @@ createSuperwall({
     logging: { level: "info" },
     networkEnvironment: "release",   // or { custom: { base, collector, ... } }
     isSandbox: true,                 // purchases aren't real money — see below
-    paywalls: {
-      postPurchaseRedirect: "navigate", // or "newTab" — see Post-purchase behaviors
-    },
   },
 });
 ```
@@ -151,76 +148,107 @@ are only rewritten for `forever` coupons — `once`/`repeating` keep the recurri
 price and expose `discountedPrice` separately so templates don't overstate the
 discount.
 
-## Post-purchase behaviors
+## After a purchase
 
-Each paywall's checkout is configured in the dashboard with what happens after a
-successful purchase. The SDK acts on it when the purchase completes:
+When a web checkout completes, the paywall hands the SDK one payload and then
+does nothing else — the SDK owns everything that follows, including closing the
+paywall. Out of the box:
 
-| Behavior | What the SDK does |
-|---|---|
-| `GRANT_ACCESS` | Nothing extra — access comes through web entitlements. |
-| `REDIRECT` | Navigates the current tab to your configured URL. |
-| `REDEEM` | Hands you redemption codes to attach the purchase to a user in your app. |
-| `CUSTOM` | Hands you redemption codes; you decide what to do with them. No navigation. |
+1. **Entitlements.** If the server already bound the purchase to this device and
+   user (`claimed: true`), the SDK applies the signed `entitlementsToken` and
+   refreshes entitlements. It does **not** redeem the purchase's redemption
+   codes, so they stay usable in your mobile app. If the server could only mint
+   codes (`claimed: false`), the SDK redeems them for the current user.
+2. **Close** the paywall and fire `handler.onDismiss` / resolve `register()`.
 
-Whatever the behavior, the SDK refreshes entitlements after every successful
-purchase, so `subscriptionStatus` reflects what the backend actually granted.
+The SDK never navigates the page. If the checkout has a `redirectUrl` — the
+purchase button's redirect, else your app-level redirect, else the redemption
+page, carrying `redemption_code=` and the checkout context as query params —
+it's on the payload for you to follow:
 
-The resolved behavior and any codes ride the purchased result, so they reach
-both `register()`'s return value and `handler.onDismiss`:
+```ts
+handler: {
+  onDismiss: (info, result) => {
+    if (result.type === "purchased" && result.checkout?.redirectUrl) {
+      location.assign(result.checkout.redirectUrl); // or router.push(...)
+    }
+  },
+}
+```
+
+The purchased result carries the whole payload as `checkout`:
 
 ```ts
 const result = await sw.register({ placement: "upgrade" });
 if (result.type === "presented" && result.result.type === "purchased") {
-  const { postPurchaseBehavior, redemptionCodes } = result.result;
-  // postPurchaseBehavior: "GRANT_ACCESS" | "REDIRECT" | "REDEEM" | "CUSTOM"
-  if (redemptionCodes) sendToYourApp(redemptionCodes); // ["redemption_…"]
+  const { transaction, redemptionCodes, claimed } = result.result.checkout ?? {};
+  // transaction: { transactionId, productIdentifier, currency?, value? }
 }
 ```
 
-Codes also arrive through the `redemptionCodesReceived` event and the
-`onRedemptionCodesReceived` delegate method — useful when purchases can start
-from places other than your own `register()` call:
+### Taking over: `handler.onPurchase`
+
+Supply `onPurchase` to **replace the default entirely** — the SDK won't touch
+entitlements, redeem codes, or close the paywall. It's built for
+buy-on-web, redeem-in-app: the codes are fresh and unclaimed, so show them, or
+hand a deep link to an "Open in app" button.
 
 ```ts
-sw.events.addEventListener("redemptionCodesReceived", (e) => {
-  const { codes, productId, checkoutContextId, paywallInfo, behavior } = e.detail;
+sw.register({
+  placement: "upgrade",
+  handler: {
+    onPurchase: (info, checkout) => {
+      // checkout: { productId, checkoutContextId, claimed, transaction?,
+      //   redemptionCodes, redirectUrl?, deepLinks?, entitlementsToken? }
+      sw.dismiss(); // the paywall is inert after checkout — closing is on you
+      showOpenInApp({
+        ios: checkout.deepLinks?.ios,
+        android: checkout.deepLinks?.android,
+        codes: checkout.redemptionCodes, // ["redemption_…"], pass along as-is
+      });
+    },
+  },
 });
 ```
 
-Codes are prefixed `redemption_…` — pass them along as-is. The event is
-local-only: it's never sent to Superwall's collector, since the backend already
-records the redemption itself. `postPurchaseBehavior` and `behavior` are absent
-on paywalls that predate the field.
+`register()` stays pending until you call `sw.dismiss()`, and then resolves as
+`purchased` (not `declined`). To also grant access on the web, call
+`sw.redeem(code)` when `checkout.claimed` is `false`, or
+`sw.purchases.refreshCustomerInfo()` when it's `true`.
 
-### Redirects
-
-`REDIRECT` navigates the **current tab** by default. The SDK resolves the
-purchase before it starts navigating, but the page is on its way out — do
-anything that must finish before leaving (saving state, analytics) in a
-`paywallWillOpenURL` listener, which fires first.
-
-A new tab isn't the default because the completion message arrives without a
-user gesture, so browsers popup-block `window.open` — the redirect would silently
-vanish. If your page can't afford to lose state, opt in anyway and accept that
-some browsers will block it:
+To just observe completed checkouts — logging, analytics — without changing
+what the SDK does, use the `onCheckoutCompleted` delegate method (or the
+`checkoutCompleted` event). It gets the same payload, fires before the default
+handling or your `onPurchase` runs, and is never sent to Superwall's collector:
 
 ```ts
-createSuperwall({ apiKey, options: { paywalls: { postPurchaseRedirect: "newTab" } } });
+sw.setDelegate({
+  onCheckoutCompleted: (checkout, info) =>
+    console.log("checkout completed", info.identifier, checkout),
+});
 ```
 
-Or route it yourself — `paywallWillOpenURL` (and the `onPaywallWillOpenURL`
-delegate method) fires with the URL before the SDK navigates:
+Codes also arrive through the `redemptionCodesReceived` event and the
+`onRedemptionCodesReceived` delegate method, for claimed and unclaimed
+purchases alike — useful for logging, or when you don't own the `register()`
+call:
 
 ```ts
-sw.events.addEventListener("paywallWillOpenURL", (e) => router.push(e.detail.url));
+sw.events.addEventListener("redemptionCodesReceived", (e) => {
+  const { codes, claimed, productId, checkoutContextId, paywallInfo } = e.detail;
+});
 ```
+
+Mind `claimed` before handing a code out: with the default handling, codes from
+an unclaimed purchase are redeemed by the SDK itself. The event is local-only —
+it's never sent to Superwall's collector, since the backend already records the
+redemption.
 
 ### Redeeming a code
 
 `sw.redeem(code)` redeems a `redemption_…` code for the current user — for codes
-you received from a `REDEEM` / `CUSTOM` purchase, from another device, or from
-your own backend:
+you received in `onPurchase`, from another device, or from your own backend (the
+default post-purchase handling already redeems unclaimed codes for you):
 
 ```ts
 const r = await sw.redeem("redemption_abc123");
@@ -265,11 +293,12 @@ const delegate = {
   onPaywallDidPresent(info) {},
   onPaywallWillDismiss(info) {},
   onPaywallDidDismiss(info) {},
-  onPaywallWillOpenURL(url) {},               // also fires before a REDIRECT
+  onPaywallWillOpenURL(url) {},               // paywall asked to open a URL
   onPaywallWillOpenDeepLink(url) {},          // you route it into your app
 
-  // redemption
-  onRedemptionCodesReceived(codes, info) {},  // REDEEM / CUSTOM purchase completed
+  // checkout + redemption
+  onCheckoutCompleted(checkout, info) {},     // web checkout completed — full payload, notification only
+  onRedemptionCodesReceived(codes, info) {},  // a completed checkout carried codes (claimed or not)
   onWillRedeemLink() {},                      // about to redeem a code
   onDidRedeemLink(result) {},                 // { type: "success" | "expired" | "invalid" | "error", code, … }
 
@@ -284,7 +313,7 @@ const delegate = {
 and the automatic `?code=redemption_…` redeem at startup (default controller
 only). `onEvent` receives
 every event that's sent to Superwall's collector, including your own
-`sw.track(...)` calls. It skips local-only events —
+`sw.track(...)` calls. It skips local-only events — `checkoutCompleted`,
 `redemptionCodesReceived`, `paywallWillOpenURL`, `paywallWillOpenDeepLink`,
 `customPaywallAction` — which have their own delegate methods above.
 

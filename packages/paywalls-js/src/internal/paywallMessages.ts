@@ -92,35 +92,39 @@ export interface StripeCheckoutAbandonMessage {
 
 /** Terminal "checkout completed AND post-checkout server work is done" message
  *  emitted by the paywall's WebPaywallController when `client_surface=web-sdk`.
- *  Replaces the controller's `window.location.href = redirectUrl` step (which
- *  would otherwise trap navigation inside the SDK's iframe).
+ *  The one message that ends a checkout: the paywall posts it and then does
+ *  nothing else — no `close`, no navigation. The SDK owns tearing down the
+ *  overlay and everything after (see `internal/postCheckout.ts`); it never
+ *  navigates to `redirect_url`, only surfaces it. The paywall
+ *  has already called the complete-webapp endpoint itself before posting.
  *
+ *  - `claimed` is the switch: `true` = the server already bound the
+ *    subscription to this device + app user id; `false` = it minted codes but
+ *    could not claim.
  *  - `transaction_data` is enrichment; it can be absent on success (e.g. one-
  *    time prices). The SDK resolves the in-flight purchase promise from the
  *    product passed to `purchase()`, not from this field.
- *  - `redirect_url` is only present when the merchant configured a post-purchase
- *    URL in dashboard (REDIRECT behavior). Internal Superwall paths (/redeem,
- *    /manage, /app-link) are filtered server-side and never appear here.
+ *  - `redirect_url` is the purchase button's redirect, else the app-level
+ *    redirect, else the redemption page when the button asked for it. It
+ *    carries `redemption_code=` and the checkout context as query params.
  */
 export interface PostCheckoutCompleteMessage {
   event_name: "post_checkout_complete";
   checkout_context_id: string;
   product_identifier: string;
+  status: "completed";
+  claimed: boolean;
   transaction_data?: {
     transaction_id: string;
     product_identifier: string;
     currency?: string;
     value?: number;
   };
-  redirect_url?: string;
-  /** Prefixed (`redemption_…`) codes, sent for the REDEEM and CUSTOM
-   *  post-purchase behaviors. Pass one to `redeem()` as-is. */
+  /** Prefixed (`redemption_…`) codes, fresh and unclaimed. */
   redemption_codes?: string[];
-  /** Which post-purchase behavior the paywall resolved. Enrichment for the
-   *  fields above: REDIRECT pairs with `redirect_url`, REDEEM / CUSTOM with
-   *  `redemption_codes`, GRANT_ACCESS with neither. Absent on paywalls that
-   *  predate the field. */
-  post_purchase_behavior?: "GRANT_ACCESS" | "REDIRECT" | "REDEEM" | "CUSTOM";
+  redirect_url?: string;
+  /** Deep links for the buy-on-web, redeem-in-app case. */
+  deep_links?: { ios?: string; android?: string };
   /** Short-lived Superwall-signed entitlements JWT for offline server-side
    *  verification (`@superwall/verify`). Best-effort — absent when signing is
    *  unavailable. The steady-state `/entitlements` read also carries it, so a

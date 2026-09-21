@@ -392,28 +392,55 @@ export interface ConfirmedAssignment {
   variant: Variant;
 }
 
-/** Post-purchase behavior resolved by the paywall's checkout flow (unified
- *  webapp/web2app config). GRANT_ACCESS grants web entitlements directly;
- *  REDIRECT carries a merchant URL; REDEEM and CUSTOM carry redemption
- *  codes. Absent on older paywalls that predate the field. */
-export type PostPurchaseBehavior =
-  | "GRANT_ACCESS"
-  | "REDIRECT"
-  | "REDEEM"
-  | "CUSTOM";
+/** Payload of a completed web checkout — what the paywall posts once Stripe
+ *  checkout AND its server-side post-checkout work are done. Handed to
+ *  `handler.onPurchase` (which replaces the SDK's default handling) and
+ *  carried on the purchased `PaywallResult` as `checkout`. */
+export interface CheckoutCompletion {
+  productId: string;
+  checkoutContextId: string;
+  /** `true`: the server already bound the purchase to this device + app user
+   *  id, so the codes below are still unspent — don't `redeem()` them here if
+   *  the buyer should use one in your mobile app. `false`: the server minted
+   *  codes but couldn't claim; `sw.redeem(code)` attaches the purchase to the
+   *  current user (idempotent for the same identity, so safe to retry). */
+  claimed: boolean;
+  /** Revenue enrichment. Can be absent on success (e.g. one-time prices). */
+  transaction?: {
+    transactionId: string;
+    productIdentifier: string;
+    /** ISO 4217 currency code (e.g. "USD"). */
+    currency?: string;
+    value?: number;
+  };
+  /** Prefixed (`redemption_…`) codes, fresh and unclaimed. Show them, or pass
+   *  one to `sw.redeem(code)` / the mobile SDK's redeem as-is. Empty when the
+   *  checkout minted none. */
+  redemptionCodes: string[];
+  /** Where the checkout suggests the buyer lands next: the purchase button's
+   *  redirect, else the app-level redirect, else the redemption page when the
+   *  button asked for it. Carries `redemption_code=` + the checkout context
+   *  as query params. The SDK never navigates here — follow it yourself if
+   *  you want it. */
+  redirectUrl?: string;
+  /** Deep links into your mobile app for the buy-on-web, redeem-in-app case —
+   *  hand one to an "Open in app" button. */
+  deepLinks?: { ios?: string; android?: string };
+  /** Signed entitlements JWT for offline server-side verification
+   *  (`@superwall/verify`). Best-effort — absent when the BE didn't sign. */
+  entitlementsToken?: string;
+}
 
 export type PaywallResult =
   | {
       type: "purchased";
       productId: string;
       transaction?: StoreTransaction;
-      /** Prefixed (`redemption_…`) codes minted by the REDEEM / CUSTOM
-       *  post-purchase behaviors. Hand one to `sw.redeem(code)` (or the
-       *  mobile SDK's redeem) as-is to attach the purchase to a user.
-       *  Absent for paywalls without those behaviors. */
-      redemptionCodes?: string[];
-      /** Which post-purchase behavior the paywall resolved. */
-      postPurchaseBehavior?: PostPurchaseBehavior;
+      /** The completed web checkout behind this purchase (codes, redirect,
+       *  deep links, revenue data). Absent for purchases that didn't go
+       *  through the paywall's Stripe checkout (test mode, custom
+       *  `PurchaseController`). */
+      checkout?: CheckoutCompletion;
     }
   | { type: "declined" }
   | { type: "restored" };
@@ -529,11 +556,6 @@ export interface PaywallOptions {
   automaticallyDismiss?: boolean;
   /** Test-mode override. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
-  /** How the default presenter follows a post-purchase `redirect_url`
-   *  (REDIRECT behavior). `"navigate"` (default) redirects the current tab;
-   *  `"newTab"` preserves page state but is subject to popup blocking.
-   *  Listen for `paywallWillOpenURL` to route it yourself instead. */
-  postPurchaseRedirect?: "navigate" | "newTab";
 }
 
 export interface SuperwallOptions {

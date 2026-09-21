@@ -2,10 +2,10 @@
 // Mounts an iframe overlay and bridges the v1 postMessage contract (API.md §7.2).
 
 import type {
+  CheckoutCompletion,
   PaywallInfo,
   PaywallPresentationStyle,
   PaywallResult,
-  PostPurchaseBehavior,
   Product,
 } from "../types.ts";
 import type {
@@ -42,13 +42,6 @@ export interface BrowserPresenterOptions {
    *  with custom UI: resolve `"purchased"` to simulate success or
    *  `"declined"` to cancel. */
   onTestPurchase?: (product: Product) => Promise<"purchased" | "declined">;
-  /** How to follow a post-purchase `redirect_url` (REDIRECT behavior).
-   *  `"navigate"` (default) redirects the current tab — reliable, since the
-   *  message arrives without user activation and `window.open` gets popup-
-   *  blocked. `"newTab"` preserves the host page's state but only works when
-   *  the browser allows the popup. Either way `paywallWillOpenURL` fires
-   *  first, so a consumer can route it themselves. */
-  postPurchaseRedirect?: "navigate" | "newTab";
 }
 
 const DEFAULT_Z_INDEX = 2147483000;
@@ -85,12 +78,13 @@ export const createBrowserPresenter = (
         onTearDown,
       );
       active = a;
-      // sw.dismiss / sw.dispose → tear down and resolve declined.
+      // sw.dismiss / sw.dispose → tear down; declined unless a checkout
+      // already completed on this presentation.
       const onAbort = () => {
         if (active === a) {
           active = null;
           tearDown(a);
-          resolve({ type: "declined" });
+          resolve(a.completed ?? { type: "declined" });
         }
       };
       ctx.signal.addEventListener("abort", onAbort, { once: true });
@@ -102,7 +96,7 @@ export const createBrowserPresenter = (
     const a = active;
     active = null;
     tearDown(a);
-    a.resolve({ type: "declined" });
+    a.resolve(a.completed ?? { type: "declined" });
   };
 
   const redeemDiscount: NonNullable<PaywallPresenter["redeemDiscount"]> = (
@@ -187,6 +181,10 @@ interface ActivePresentation {
   readonly keydownListener: (e: KeyboardEvent) => void;
   readonly resolve: (r: PaywallResult) => void;
   readonly ctx: PresentationContext;
+  /** Set on `post_checkout_complete` when the SDK owns teardown: the paywall
+   *  stays up until the SDK (or the developer's `onPurchase`) dismisses it,
+   *  and every close path resolves this instead of `declined`. */
+  completed: PaywallResult | null;
   /** Set once the iframe has requested its templates (`ping` /
    *  `template_params_and_user_attributes`) — i.e. it's mounted and ready to
    *  accept host commands like `redeem_discount`. */
@@ -577,7 +575,7 @@ const mount = (
       if (target && iframe.contains(target)) return;
       const a = slot.a;
       cleanupOnce();
-      a.resolve({ type: "declined" });
+      a.resolve(a.completed ?? { type: "declined" });
     });
   }
   // Escape key as a backup close — useful when the backdrop click handler
@@ -588,7 +586,7 @@ const mount = (
     if (!slot.a) return;
     const a = slot.a;
     cleanupOnce();
-    a.resolve({ type: "declined" });
+    a.resolve(a.completed ?? { type: "declined" });
   };
   globalEvents().addEventListener(
     "keydown",
@@ -624,6 +622,7 @@ const mount = (
     keydownListener: onKeydown,
     resolve,
     ctx,
+    completed: null,
     ready: false,
     pendingDiscountCode: null,
     pendingDiscountOnPosted: null,
@@ -680,6 +679,61 @@ function readTransactionField(
   if (typeof v !== "string") return null;
   return key === "product_identifier" ? asProductIdentifier(v) : asTransactionId(v);
 }
+
+/** Parse a `post_checkout_complete` message into the public payload. Every
+ *  field is read defensively — a malformed optional field is dropped, never
+ *  thrown on. */
+const readCheckoutCompletion = (
+  evt: { [k: string]: unknown },
+): CheckoutCompletion => {
+  const productId = String(
+    readString(evt, "product_identifier") ??
+      readTransactionField(evt, "product_identifier") ??
+      "",
+  );
+  const transactionId = readTransactionField(evt, "transaction_id");
+  const td = (evt["transaction_data"] ?? {}) as Record<string, unknown>;
+  const rawCodes = evt["redemption_codes"];
+  const rawLinks = evt["deep_links"];
+  const links =
+    rawLinks && typeof rawLinks === "object"
+      ? (rawLinks as Record<string, unknown>)
+      : null;
+  const ios = links && typeof links["ios"] === "string" ? links["ios"] : null;
+  const android =
+    links && typeof links["android"] === "string" ? links["android"] : null;
+  const redirectUrl = readString(evt, "redirect_url");
+  const entitlementsToken = readString(evt, "entitlements_token");
+  return {
+    productId,
+    checkoutContextId: readString(evt, "checkout_context_id") ?? "",
+    // Only an explicit `false` means "minted but not claimed". A paywall that
+    // predates the field granted access server-side, and redeeming its codes
+    // here would spend one the buyer could use on their phone.
+    claimed: evt["claimed"] !== false,
+    ...(transactionId !== null && {
+      transaction: {
+        transactionId: String(transactionId),
+        productIdentifier: String(
+          readTransactionField(evt, "product_identifier") ?? productId,
+        ),
+        ...(typeof td["currency"] === "string" && { currency: td["currency"] }),
+        ...(typeof td["value"] === "number" && { value: td["value"] }),
+      },
+    }),
+    redemptionCodes: Array.isArray(rawCodes)
+      ? rawCodes.filter((c): c is string => typeof c === "string")
+      : [],
+    ...(redirectUrl !== null && { redirectUrl }),
+    ...((ios !== null || android !== null) && {
+      deepLinks: {
+        ...(ios !== null && { ios }),
+        ...(android !== null && { android }),
+      },
+    }),
+    ...(entitlementsToken !== null && { entitlementsToken }),
+  };
+};
 
 /** Read the product identifier from an iframe event, returning a branded type. */
 const readProductId = (evt: { [k: string]: unknown }): ProductIdentifier =>
@@ -741,6 +795,13 @@ const handleInbound = (
     const name = evt.event_name;
     if (typeof name !== "string") continue;
 
+    // TEMP(post-checkout-rollout): raw dump of every message the paywall
+    // posts, to verify the new `post_checkout_complete` contract against the
+    // live paywall (is `close` really gone? does `claimed` arrive?). Payloads
+    // can carry redemption codes + the entitlements token — remove before
+    // release.
+    console.log(`[Superwall][temp] paywall → sdk: ${name}`, evt);
+
     switch (name) {
       case "ping":
       case "template_params_and_user_attributes": {
@@ -762,7 +823,7 @@ const handleInbound = (
         // The iframe controller sends `paywall_close` before posting this.
         ctx.onPaywallTrackedClose?.();
         cleanup();
-        resolve({ type: "declined" });
+        resolve(active.completed ?? { type: "declined" });
         return;
       }
       case "restore": {
@@ -863,9 +924,10 @@ const handleInbound = (
         break;
       }
       // Terminal success on the `client_surface=web-sdk` branch: the paywall's
-      // WebPaywallController has finished its post-checkout server work (POST
-      // /checkout/session/complete, redemption resolution) and would otherwise
-      // have done a top-frame navigation. We resolve the purchase here.
+      // WebPaywallController has finished its post-checkout server work (it
+      // calls the complete-webapp endpoint itself) and posts this one message,
+      // then does nothing else — no `close`, no navigation. Everything after
+      // is the SDK's: entitlements / redemption and teardown.
       //
       // Distinct from the `purchase` case above, which is a bare intent
       // message from non-Stripe paywalls (the consumer drives their own
@@ -874,82 +936,41 @@ const handleInbound = (
       case "post_checkout_complete": {
         // The backend emits `transaction_complete` server-side before posting
         // this, so re-emitting it locally would double up consumer events.
-        // The APC handler reads `/entitlements` after this fires to populate
-        // the entitlement set + transaction details.
-        const rawProductId = readString(evt, "product_identifier");
-        const productId: ProductIdentifier = rawProductId
-          ? asProductIdentifier(rawProductId)
-          : (readTransactionField(evt, "product_identifier") ?? asProductIdentifier(""));
-        const checkoutContextId = readString(evt, "checkout_context_id") ?? "";
-        const entitlementsToken = readString(evt, "entitlements_token");
-        const redirectUrl = readString(evt, "redirect_url");
-        const rawCodes = evt["redemption_codes"];
-        const redemptionCodes =
-          Array.isArray(rawCodes) && rawCodes.every((c) => typeof c === "string")
-            ? (rawCodes as string[])
-            : null;
-        const rawBehavior = readString(evt, "post_purchase_behavior");
-        const postPurchaseBehavior: PostPurchaseBehavior | null =
-          rawBehavior === "GRANT_ACCESS" ||
-          rawBehavior === "REDIRECT" ||
-          rawBehavior === "REDEEM" ||
-          rawBehavior === "CUSTOM"
-            ? rawBehavior
-            : null;
+        const checkout = readCheckoutCompletion(evt);
+        const result: PaywallResult = {
+          type: "purchased",
+          productId: checkout.productId,
+          checkout,
+        };
+        // Notify first — `onPurchaseEvent` kicks off the SDK's default
+        // handling / the developer's override, and a logging delegate should
+        // see the payload before either acts on it.
+        ctx.emit("checkoutCompleted", { checkout, paywallInfo: info });
         ctx.onPurchaseEvent?.({
           type: "postCheckout",
-          productId: String(productId),
-          checkoutContextId,
-          ...(entitlementsToken !== null && { entitlementsToken }),
-          ...(redemptionCodes !== null && { redemptionCodes }),
-          ...(postPurchaseBehavior !== null && { postPurchaseBehavior }),
+          productId: checkout.productId,
+          checkout,
         });
-        // REDEEM / CUSTOM behaviors: surface the codes to the merchant.
-        // They also ride the purchased PaywallResult below.
-        if (redemptionCodes !== null && redemptionCodes.length > 0) {
+        // Fires for claimed and unclaimed codes alike — `claimed` tells the
+        // listener whether the SDK's default handling will redeem them.
+        if (checkout.redemptionCodes.length > 0) {
           ctx.emit("redemptionCodesReceived", {
-            codes: redemptionCodes,
-            productId: String(productId),
-            checkoutContextId,
+            codes: checkout.redemptionCodes,
+            claimed: checkout.claimed,
+            productId: checkout.productId,
+            checkoutContextId: checkout.checkoutContextId,
             paywallInfo: info,
-            ...(postPurchaseBehavior !== null && {
-              behavior: postPurchaseBehavior,
-            }),
           });
         }
-        // REDIRECT behavior: the merchant's own URL. This postMessage
-        // handler runs without transient user activation, so `window.open`
-        // is routinely popup-blocked — same-tab navigation is the reliable
-        // default. `paywallWillOpenURL` fires before either so the consumer
-        // can route it themselves.
-        if (redirectUrl) {
-          ctx.emit("paywallWillOpenURL", { url: redirectUrl });
+        if (ctx.ownsCheckoutTeardown) {
+          // Stay up: the SDK dismisses once its default handling is done, or
+          // the developer's `onPurchase` does. Any close path from here on
+          // resolves the purchase, never `declined`.
+          active.completed = result;
+          break;
         }
         cleanup();
-        resolve({
-          type: "purchased",
-          productId: String(productId),
-          ...(redemptionCodes !== null &&
-            redemptionCodes.length > 0 && { redemptionCodes }),
-          ...(postPurchaseBehavior !== null && { postPurchaseBehavior }),
-        });
-        if (redirectUrl) {
-          if (options.postPurchaseRedirect === "newTab") {
-            if (typeof globalThis.open === "function") {
-              try {
-                globalThis.open(redirectUrl, "_blank", "noopener");
-              } catch {}
-            }
-          } else {
-            // Deferred a tick so the resolved purchase (onDismiss,
-            // paywall_close, event dispatches) flushes before unload starts.
-            setTimeout(() => {
-              try {
-                globalThis.location?.assign(redirectUrl);
-              } catch {}
-            }, 0);
-          }
-        }
+        resolve(result);
         return;
       }
       case "open_url_external": {

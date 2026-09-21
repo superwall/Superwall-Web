@@ -20,7 +20,6 @@ const stubDeps = (overrides: {
   redeem?: (code: string) => Promise<RedemptionOutcome>;
   refresh?: () => Promise<Entitlement[] | null>;
   location?: { search: string; href: string };
-  entitlementsByProduct?: Record<string, string[]>;
 }): Stub => {
   const handlers = new Set<(ev: PaywallPurchaseEvent) => void>();
   const stub: Stub = {
@@ -50,18 +49,14 @@ const stubDeps = (overrides: {
       logWarn: (msg) => {
         stub.warnings.push(msg);
       },
-      resolveEntitlementsForProduct: (productId) =>
-        overrides.entitlementsByProduct?.[productId] ?? [],
       ...(overrides.location && { location: overrides.location }),
     },
   };
   return stub;
 };
 
-it("purchase() resolves on post_checkout_complete + ACTIVE flip uses entitlement ids from config", async () => {
-  const stub = stubDeps({
-    entitlementsByProduct: { pro_yearly: ["pro", "premium"] },
-  });
+it("purchase() resolves on post_checkout_complete and leaves entitlements to the post-checkout handler", async () => {
+  const stub = stubDeps({});
   const controller = createAutomaticPurchaseController(stub.deps);
   const promise = controller.purchase({
     id: "pro_yearly",
@@ -80,52 +75,21 @@ it("purchase() resolves on post_checkout_complete + ACTIVE flip uses entitlement
     stub.fire({
       type: "postCheckout",
       productId: "pro_yearly",
-      checkoutContextId: "ckctx_test",
-    });
-  });
-  const r = await promise;
-  expect(r.type).toBe("purchased");
-  expect(stub.setStatuses).toHaveLength(1);
-  expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
-  if (stub.setStatuses[0]!.status === "ACTIVE") {
-    // Entitlement ids come from config, NOT a synthesized fallback.
-    expect(stub.setStatuses[0]!.entitlements.map((e) => e.id)).toEqual([
-      "pro",
-      "premium",
-    ]);
-  }
-});
-
-it("purchase() with no config entry for product falls back to refreshEntitlements()", async () => {
-  const stub = stubDeps({
-    refresh: async () => [
-      {
-        id: "fallback_ent",
-        type: "SERVICE_LEVEL" as const,
-        isActive: true,
-        productIds: ["unmapped_product"],
+      checkout: {
+        productId: "pro_yearly",
+        checkoutContextId: "ckctx_test",
+        claimed: false,
+        redemptionCodes: ["redemption_abc"],
       },
-    ],
-  });
-  const controller = createAutomaticPurchaseController(stub.deps);
-  const promise = controller.purchase({
-    id: "unmapped_product",
-    store: "stripe",
-    entitlements: [],
-  });
-  queueMicrotask(() => {
-    stub.fire({
-      type: "postCheckout",
-      productId: "unmapped_product",
-      checkoutContextId: "ckctx_x",
     });
   });
   const r = await promise;
   expect(r.type).toBe("purchased");
-  // Wait for the fallback refresh.
-  await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  expect(stub.refreshes).toBe(1);
-  expect(stub.setStatuses[0]!.status).toBe("ACTIVE");
+  // Status + redemption are `internal/postCheckout.ts`'s job (or the
+  // developer's `onPurchase`) — the controller must not pre-empt either.
+  expect(stub.setStatuses).toHaveLength(0);
+  expect(stub.redeems).toHaveLength(0);
+  expect(stub.refreshes).toBe(0);
 });
 
 it("purchase() resolves cancelled on stripe_checkout_abandon", async () => {
@@ -156,12 +120,22 @@ it("purchase() ignores events for other products", async () => {
     stub.fire({
       type: "postCheckout",
       productId: "other_product",
-      checkoutContextId: "ckctx_other",
+      checkout: {
+        productId: "other_product",
+        checkoutContextId: "ckctx_other",
+        claimed: true,
+        redemptionCodes: [],
+      },
     });
     stub.fire({
       type: "postCheckout",
       productId: "pro_yearly",
-      checkoutContextId: "ckctx_test",
+      checkout: {
+        productId: "pro_yearly",
+        checkoutContextId: "ckctx_test",
+        claimed: true,
+        redemptionCodes: [],
+      },
     });
   });
   const r = await promise;

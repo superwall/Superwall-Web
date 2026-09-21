@@ -4,10 +4,10 @@
 
 import type {
   JsonValue,
+  CheckoutCompletion,
   PaywallInfo,
   PaywallResult,
   PlacementParams,
-  PostPurchaseBehavior,
   Product,
 } from "./types.ts";
 import type { AllSuperwallEvents } from "./events.ts";
@@ -49,6 +49,13 @@ export interface PresentationContext {
   /** Internal: merge attributes set inside the paywall into the host's
    *  user attributes. */
   readonly onUserAttributesUpdate?: (attributes: Record<string, JsonValue>) => void;
+  /** Internal: the SDK owns what happens after `post_checkout_complete` —
+   *  its default handling, or the developer's `handler.onPurchase` — including
+   *  tearing the overlay down (the paywall no longer posts `close` after a
+   *  purchase). When set, the presenter keeps the paywall up after forwarding
+   *  the `postCheckout` event and resolves `purchased` on the next
+   *  `dismiss()` / close. When absent it closes itself. */
+  readonly ownsCheckoutTeardown?: boolean;
   /** Bootstrap params injected into the iframe URL so the paywall's SSR
    *  loader can mint the placement token + identify the host. Forwarded
    *  verbatim by the default browser presenter; custom presenters can
@@ -177,26 +184,7 @@ export type PaywallPurchaseEvent =
    *  the `client_surface=web-sdk` branch. The presenter resolves the
    *  active purchase promise here; `complete` is kept as an in-flight
    *  signal but is NOT terminal. */
-  | {
-      type: "postCheckout";
-      productId: string;
-      checkoutContextId: string;
-      transactionData?: {
-        transactionId: string;
-        productIdentifier: string;
-        currency?: string;
-        value?: number;
-      };
-      redirectUrl?: string;
-      /** Prefixed (`redemption_…`) codes from the REDEEM and CUSTOM
-       *  post-purchase behaviors. Pass one to `redeem()` as-is. */
-      redemptionCodes?: string[];
-      /** Which post-purchase behavior the paywall resolved. */
-      postPurchaseBehavior?: PostPurchaseBehavior;
-      /** Signed entitlements JWT for offline server-side verification
-       *  (`@superwall/verify`). Best-effort — absent when the BE didn't sign. */
-      entitlementsToken?: string;
-    };
+  | { type: "postCheckout"; productId: string; checkout: CheckoutCompletion };
 
 export interface PaywallPresenter {
   /** Show the paywall; resolves when the user dismisses it. Single-paywall

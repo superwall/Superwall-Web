@@ -2,6 +2,7 @@
 // EventTarget, and the global delegate interface.
 
 import type {
+  CheckoutCompletion,
   ConfirmedAssignment,
   CustomerInfo,
   DiscountRedemptionReason,
@@ -12,7 +13,6 @@ import type {
   PaywallPresentationRequestStatusReason,
   PaywallPresentationRequestStatusType,
   PaywallResult,
-  PostPurchaseBehavior,
   Product,
   RedemptionResult,
   RestoreType,
@@ -213,20 +213,29 @@ export interface LocalSuperwallEventMap {
    *  mobile SDKs' paywall.js bridge). Bridged to
    *  `SuperwallDelegate.onCustomPaywallAction`. */
   customPaywallAction: { name: string };
-  /** A completed checkout carried redemption codes (REDEEM / CUSTOM
-   *  post-purchase behaviors). The same codes also arrive on the purchased
-   *  `PaywallResult` (`handler.onDismiss` / `register()`'s return value).
+  /** A web checkout completed — the parsed `post_checkout_complete` payload,
+   *  exactly as `handler.onPurchase` / the purchased `PaywallResult` see it.
+   *  Notification only: fires for every completed checkout, whether the SDK's
+   *  default handling or a `handler.onPurchase` override takes it from there,
+   *  and before either runs. Bridged to
+   *  `SuperwallDelegate.onCheckoutCompleted`. Local-only. */
+  checkoutCompleted: { checkout: CheckoutCompletion; paywallInfo: PaywallInfo };
+  /** A completed checkout carried redemption codes. Fires whether or not
+   *  the server already claimed the purchase — check `claimed` before
+   *  assuming a code is still yours to hand out: when `claimed` is `false`
+   *  and `handler.onPurchase` isn't overriding, the SDK redeems the codes for
+   *  the current user itself. The same codes also arrive on
+   *  `handler.onPurchase` and on the purchased `PaywallResult`'s `checkout`.
    *  Bridged to `SuperwallDelegate.onRedemptionCodesReceived`. Local-only —
    *  the backend already records the redemption server-side. */
   redemptionCodesReceived: {
     codes: string[];
+    /** Whether the server already bound the purchase to this device + user.
+     *  See `CheckoutCompletion.claimed`. */
+    claimed: boolean;
     productId: string;
     checkoutContextId: string;
     paywallInfo: PaywallInfo;
-    /** REDEEM (codes meant for the mobile SDK's redeem / a deep link) or
-     *  CUSTOM (merchant handles them their own way). Absent on paywalls
-     *  that predate the field. */
-    behavior?: PostPurchaseBehavior;
   };
 }
 
@@ -329,9 +338,13 @@ export interface SuperwallDelegate {
   // finished POSTing it.
   onWillRedeemLink?(): void;
   onDidRedeemLink?(result: RedemptionResult): void;
-  /** A completed checkout carried redemption codes (REDEEM / CUSTOM
-   *  post-purchase behaviors). Typed convenience around the local-only
-   *  `redemptionCodesReceived` event. */
+  /** A web checkout completed. Notification only — log it, forward it to
+   *  analytics; to change what the SDK does next, use `handler.onPurchase` on
+   *  the `register()` call instead. Typed convenience around the local-only
+   *  `checkoutCompleted` event. */
+  onCheckoutCompleted?(checkout: CheckoutCompletion, info: PaywallInfo): void;
+  /** A completed checkout carried redemption codes (claimed or not). Typed
+   *  convenience around the local-only `redemptionCodesReceived` event. */
   onRedemptionCodesReceived?(codes: string[], info: PaywallInfo): void;
 
   // logging
@@ -356,5 +369,6 @@ export const LOCAL_ONLY: ReadonlySet<string> = new Set<keyof LocalSuperwallEvent
   "paywallWillOpenURL",
   "paywallWillOpenDeepLink",
   "customPaywallAction",
+  "checkoutCompleted",
   "redemptionCodesReceived",
 ]);
