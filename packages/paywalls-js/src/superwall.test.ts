@@ -3500,9 +3500,11 @@ it("default post-checkout, claimed: applies token + flips ACTIVE, leaves the cod
       transaction: { transactionId: "txn_1", productIdentifier: "pro_yearly" },
     };
     rig.complete(checkout);
+    // Granted + torn down synchronously, inside the completion message.
+    expect(rig.dismissCalls).toBe(1);
+    expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
 
     const r = await reg;
-    expect(rig.dismissCalls).toBe(1);
     expect(r.type).toBe("presented");
     if (r.type === "presented") {
       // The purchase callback (`onDismiss` / register()'s result) carries
@@ -3534,50 +3536,49 @@ it("default post-checkout, claimed: applies token + flips ACTIVE, leaves the cod
   }
 });
 
-it("default post-checkout, unclaimed: redeems the codes BEFORE closing, and feature() sees the granted entitlements", async () => {
+it("default post-checkout, unclaimed: never redeems the codes — grants nothing, just closes the paywall and hands the codes over", async () => {
   const redeemPosts: Array<Record<string, unknown>> = [];
+  const willRedeem: number[] = [];
   const rig = checkoutPresenter();
-  const nav = recordNavigation();
-  try {
-    const sw = makeWithPaywall({
-      presenter: rig.presenter,
-      fetch: checkoutFetch(redeemPosts),
-    });
-    await sw.ready;
-    let statusAtFeature: string | null = null;
-    const reg = sw.register({
-      placement: "checkout",
-      feature: () => {
-        statusAtFeature = sw.subscriptionStatus.value.status;
-      },
-    });
-    await pollValue(() => sw.activePaywall.value);
+  const sw = makeWithPaywall({
+    presenter: rig.presenter,
+    fetch: checkoutFetch(redeemPosts),
+    delegate: { onWillRedeemLink: () => willRedeem.push(1) },
+  });
+  await sw.ready;
+  let featureRan = false;
+  const reg = sw.register({
+    placement: "checkout",
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  await pollValue(() => sw.activePaywall.value);
 
-    rig.complete({
-      productId: "pro_yearly",
-      checkoutContextId: "ckctx_unclaimed",
-      claimed: false,
-      redemptionCodes: ["redemption_abc"],
-    });
-    // Not torn down synchronously — the redeem POST is in flight.
-    expect(rig.dismissCalls).toBe(0);
+  const checkout: CheckoutCompletion = {
+    productId: "pro_yearly",
+    checkoutContextId: "ckctx_unclaimed",
+    claimed: false,
+    redemptionCodes: ["redemption_abc"],
+  };
+  rig.complete(checkout);
+  // Torn down synchronously — nothing to wait on.
+  expect(rig.dismissCalls).toBe(1);
 
-    const r = await reg;
-    expect(r.type === "presented" && r.result.type).toBe("purchased");
-    expect(redeemPosts).toHaveLength(1);
-    expect(redeemPosts[0]?.codes).toMatchObject([{ code: "redemption_abc" }]);
-    expect(rig.dismissCalls).toBe(1);
-    expect(statusAtFeature).toBe("ACTIVE");
-    const status = sw.subscriptionStatus.value;
-    if (status.status === "ACTIVE") {
-      expect(status.entitlements.map((e) => e.id)).toEqual(["pro"]);
-    }
-    await new Promise((res) => setTimeout(res, 5));
-    expect(nav.assigns).toEqual([]);
-    await sw.dispose();
-  } finally {
-    nav.restore();
-  }
+  const r = await reg;
+  expect(r.type === "presented" && r.result).toEqual({
+    type: "purchased",
+    productId: "pro_yearly",
+    checkout,
+  });
+  expect(featureRan).toBe(true);
+  await new Promise((res) => setTimeout(res, 10));
+  // The codes stay unspent: no redeem POST, no redeem-link delegate calls.
+  expect(redeemPosts).toEqual([]);
+  expect(willRedeem).toEqual([]);
+  // Not claimed for this user → the SDK grants nothing locally.
+  expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
+  await sw.dispose();
 });
 
 it("handler.onPurchase replaces the default entirely: no entitlements, no redeem, no teardown — until the developer calls sw.dismiss()", async () => {
@@ -3674,5 +3675,107 @@ it("a throwing / rejecting onPurchase is contained and the paywall stays dismiss
   sw.dismiss();
   const r = await reg;
   expect(r.type === "presented" && r.result.type).toBe("purchased");
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// post_checkout_complete — REAL browser presenter wired to the REAL SDK.
+// The stub above can't catch ordering bugs between the two; these post actual
+// MessageEvents from the iframe.
+// ---------------------------------------------------------------------------
+
+const paywallIframe = (): HTMLIFrameElement | null =>
+  document.querySelector('iframe[data-sw-presenter="iframe"]');
+
+const postFromPaywall = (data: Record<string, unknown>): void => {
+  const iframe = paywallIframe()!;
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data,
+      origin: new URL(iframe.src).origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+};
+
+const CLAIMED_CHECKOUT_MESSAGE = {
+  event_name: "post_checkout_complete",
+  checkout_context_id: "ckctx_real",
+  product_identifier: "pro_yearly",
+  status: "completed",
+  claimed: true,
+};
+
+it("real presenter: sw.dismiss() called synchronously inside onPurchase resolves purchased, not declined", async () => {
+  // No `presenter` → the default browser presenter.
+  const sw = makeWithPaywall();
+  await sw.ready;
+  const declines: unknown[] = [];
+  sw.events.addEventListener("paywall_decline", (e) => declines.push(e.detail));
+  let dismissed: PaywallResult | null = null;
+  let featureRan = false;
+  const reg = sw.register({
+    placement: "checkout",
+    handler: {
+      // The documented usage: the paywall is inert, so close it right away.
+      onPurchase: () => sw.dismiss(),
+      onDismiss: (_info, result) => (dismissed = result),
+    },
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  await pollValue(() => paywallIframe());
+
+  postFromPaywall(CLAIMED_CHECKOUT_MESSAGE);
+  const r = await reg;
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  expect(dismissed).toMatchObject({ type: "purchased", productId: "pro_yearly" });
+  expect(featureRan).toBe(true);
+  expect(declines).toEqual([]);
+  expect(paywallIframe()).toBeNull();
+  // Override ⇒ the SDK granted nothing.
+  expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
+  await sw.dispose();
+});
+
+it("real presenter: sw.dismiss() from a checkoutCompleted listener resolves purchased, and the default handling still grants", async () => {
+  const sw = makeWithPaywall();
+  await sw.ready;
+  sw.events.addEventListener("checkoutCompleted", () => sw.dismiss());
+  const declines: unknown[] = [];
+  sw.events.addEventListener("paywall_decline", (e) => declines.push(e.detail));
+  let featureRan = false;
+  const reg = sw.register({
+    placement: "checkout",
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  await pollValue(() => paywallIframe());
+
+  postFromPaywall(CLAIMED_CHECKOUT_MESSAGE);
+  const r = await reg;
+  // Result and entitlement state agree: purchased AND active.
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  expect(featureRan).toBe(true);
+  expect(declines).toEqual([]);
+  await sw.dispose();
+});
+
+it("real presenter: default handling closes the overlay itself on post_checkout_complete — no `close` from the paywall needed", async () => {
+  const sw = makeWithPaywall();
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() => paywallIframe());
+
+  postFromPaywall(CLAIMED_CHECKOUT_MESSAGE);
+  // Torn down within the message itself.
+  expect(paywallIframe()).toBeNull();
+  const r = await reg;
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  expect(sw.isPaywallPresented.value).toBe(false);
   await sw.dispose();
 });

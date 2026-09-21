@@ -205,10 +205,12 @@ export interface PaywallPresentationHandler {
    * `sw.redeem(code)` when `checkout.claimed` is `false`, or
    * `sw.purchases.refreshCustomerInfo()` when it's `true`.
    *
-   * Without it, the default: `claimed` ⇒ apply `entitlementsToken` + refresh
-   * entitlements (codes are left unspent); unclaimed ⇒ `redeem()` the codes;
-   * then close the paywall and fire `onDismiss`. The SDK never navigates —
-   * `checkout.redirectUrl` is yours to follow, here or from `onDismiss`.
+   * Calling `sw.dismiss()` right here, synchronously, is fine.
+   *
+   * Without it, the default: when `claimed`, apply `entitlementsToken` +
+   * grant / refresh entitlements; then close the paywall and fire
+   * `onDismiss`. The SDK never redeems the codes and never navigates — the
+   * codes and `checkout.redirectUrl` are yours, here or from `onDismiss`.
    */
   onPurchase?(info: PaywallInfo, checkout: CheckoutCompletion): void | Promise<void>;
   onError?(error: Error): void;
@@ -365,8 +367,8 @@ export interface Superwall {
    * Codes come from a completed web checkout — via `handler.onPurchase`, the
    * purchased `PaywallResult`'s `checkout`, the `redemptionCodesReceived`
    * event, or your own channel — and from web checkout links. Pass the code
-   * verbatim, prefix included. The SDK's default post-checkout handling
-   * already redeems unclaimed codes; call this when you override it.
+   * verbatim, prefix included. The SDK never redeems a checkout's codes on
+   * its own — this is how you do it.
    *
    * On success the code's purchase attaches to the current user:
    * `customerInfo` is seeded from the response and `subscriptionStatus`
@@ -2065,14 +2067,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         });
 
         let closeTrackedByPaywall = false;
-        /** Set when the SDK's default post-checkout handling took a completed
-         *  checkout (i.e. no `handler.onPurchase` override). */
-        const defaultCheckout: {
-          // Holder object: assigned from the `onPurchaseEvent` closure, which
-          // TS control-flow narrowing of a bare `let` can't see.
-          current: { settled: Promise<void> } | null;
-        } = { current: null };
-
         const ctx: PresentationContext = {
           placement,
           params: (params ?? ({} as PlacementParams)),
@@ -2113,19 +2107,14 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
               );
               return;
             }
-            // Default: entitlements (claimed) or redemption (unclaimed), then
-            // close the overlay — the paywall no longer posts `close` itself.
-            // The SDK never navigates: `checkout.redirectUrl` is the
-            // developer's to follow (`onDismiss` / `onPurchase`).
-            defaultCheckout.current = {
-              settled: applyCheckoutEntitlements(checkout, postCheckoutDeps).finally(
-                () => {
-                  try {
-                    presenter.dismiss();
-                  } catch {}
-                },
-              ),
-            };
+            // Default: grant entitlements when the server claimed the
+            // purchase for this user, then close the overlay — the paywall no
+            // longer posts `close` itself. The SDK never redeems the codes and
+            // never navigates: both are the developer's, on the payload.
+            applyCheckoutEntitlements(checkout, postCheckoutDeps);
+            try {
+              presenter.dismiss();
+            } catch {}
           },
           // The iframe already sends `user_attributes` to the collector.
           onUserAttributesUpdate: (attrs) => mergeAttributes(attrs, false),
@@ -2153,10 +2142,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         let result: PaywallResult;
         try {
           result = await presenter.present(info, ctx);
-          // The user can close the overlay (Escape / backdrop) while an
-          // unclaimed purchase is still redeeming — let it settle so
-          // `onDismiss` / `feature` observe the granted entitlements.
-          await defaultCheckout.current?.settled;
         } catch (cause) {
           const err =
             cause instanceof Error
@@ -2785,7 +2770,6 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
    *  `PurchaseController` is installed (same as the public `sw.redeem()`). */
   const postCheckoutDeps: PostCheckoutDeps = {
     ...entitlementDeps,
-    redeem: async (code) => (await redeemCode(code)).outcome,
     refreshEntitlements: refreshWebEntitlements,
     setEntitlementsToken: (token) => entitlementsTokenSig.set(token),
   };

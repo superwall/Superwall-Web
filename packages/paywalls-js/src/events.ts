@@ -221,10 +221,9 @@ export interface LocalSuperwallEventMap {
    *  `SuperwallDelegate.onCheckoutCompleted`. Local-only. */
   checkoutCompleted: { checkout: CheckoutCompletion; paywallInfo: PaywallInfo };
   /** A completed checkout carried redemption codes. Fires whether or not
-   *  the server already claimed the purchase — check `claimed` before
-   *  assuming a code is still yours to hand out: when `claimed` is `false`
-   *  and `handler.onPurchase` isn't overriding, the SDK redeems the codes for
-   *  the current user itself. The same codes also arrive on
+   *  the server already claimed the purchase (`claimed` says which). The SDK
+   *  never redeems them itself, so they're yours to show, deep-link into
+   *  your app, or `sw.redeem()`. The same codes also arrive on
    *  `handler.onPurchase` and on the purchased `PaywallResult`'s `checkout`.
    *  Bridged to `SuperwallDelegate.onRedemptionCodesReceived`. Local-only —
    *  the backend already records the redemption server-side. */

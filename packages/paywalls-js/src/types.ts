@@ -400,10 +400,11 @@ export interface CheckoutCompletion {
   productId: string;
   checkoutContextId: string;
   /** `true`: the server already bound the purchase to this device + app user
-   *  id, so the codes below are still unspent — don't `redeem()` them here if
-   *  the buyer should use one in your mobile app. `false`: the server minted
-   *  codes but couldn't claim; `sw.redeem(code)` attaches the purchase to the
-   *  current user (idempotent for the same identity, so safe to retry). */
+   *  id — the SDK's default handling grants the entitlements locally. `false`:
+   *  the server minted codes but didn't claim, and the SDK grants nothing.
+   *  Either way the SDK never redeems the codes below itself, so they're
+   *  still unspent; `sw.redeem(code)` attaches the purchase to the current
+   *  web user if that's what you want (idempotent for the same identity). */
   claimed: boolean;
   /** Revenue enrichment. Can be absent on success (e.g. one-time prices). */
   transaction?: {

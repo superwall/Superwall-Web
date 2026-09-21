@@ -942,17 +942,17 @@ const handleInbound = (
           productId: checkout.productId,
           checkout,
         };
-        // Notify first — `onPurchaseEvent` kicks off the SDK's default
-        // handling / the developer's override, and a logging delegate should
-        // see the payload before either acts on it.
+        // Record the purchase BEFORE telling anyone. Event listeners and the
+        // developer's `onPurchase` run synchronously inside the calls below,
+        // and the obvious thing to do in them is `sw.dismiss()` — which reads
+        // `completed` on its way out. Set any later and a paid checkout
+        // resolves `declined`.
+        if (ctx.ownsCheckoutTeardown) active.completed = result;
+        // Notifications first (logging delegate, codes — for claimed and
+        // unclaimed alike), then the routing that kicks off the SDK's default
+        // handling / the developer's override, either of which may tear this
+        // presentation down.
         ctx.emit("checkoutCompleted", { checkout, paywallInfo: info });
-        ctx.onPurchaseEvent?.({
-          type: "postCheckout",
-          productId: checkout.productId,
-          checkout,
-        });
-        // Fires for claimed and unclaimed codes alike — `claimed` tells the
-        // listener whether the SDK's default handling will redeem them.
         if (checkout.redemptionCodes.length > 0) {
           ctx.emit("redemptionCodesReceived", {
             codes: checkout.redemptionCodes,
@@ -962,13 +962,14 @@ const handleInbound = (
             paywallInfo: info,
           });
         }
-        if (ctx.ownsCheckoutTeardown) {
-          // Stay up: the SDK dismisses once its default handling is done, or
-          // the developer's `onPurchase` does. Any close path from here on
-          // resolves the purchase, never `declined`.
-          active.completed = result;
-          break;
-        }
+        ctx.onPurchaseEvent?.({
+          type: "postCheckout",
+          productId: checkout.productId,
+          checkout,
+        });
+        // Owned: stay up until the SDK's default handling dismisses, or the
+        // developer's `onPurchase` does. Every close path resolves `completed`.
+        if (ctx.ownsCheckoutTeardown) break;
         cleanup();
         resolve(result);
         return;

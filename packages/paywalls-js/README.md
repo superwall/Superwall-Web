@@ -156,10 +156,14 @@ paywall. Out of the box:
 
 1. **Entitlements.** If the server already bound the purchase to this device and
    user (`claimed: true`), the SDK applies the signed `entitlementsToken` and
-   refreshes entitlements. It does **not** redeem the purchase's redemption
-   codes, so they stay usable in your mobile app. If the server could only mint
-   codes (`claimed: false`), the SDK redeems them for the current user.
+   grants / refreshes entitlements. If it didn't (`claimed: false`), the SDK
+   grants nothing — that's the server's call.
 2. **Close** the paywall and fire `handler.onDismiss` / resolve `register()`.
+
+The SDK never redeems the purchase's redemption codes itself, claimed or not —
+they stay unspent, so the buyer can use one in your mobile app. They're on the
+payload if you want them (`sw.redeem(code)` attaches the purchase to the current
+web user).
 
 The SDK never navigates the page. If the checkout has a `redirectUrl` — the
 purchase button's redirect, else your app-level redirect, else the redemption
@@ -211,8 +215,9 @@ sw.register({
 });
 ```
 
-`register()` stays pending until you call `sw.dismiss()`, and then resolves as
-`purchased` (not `declined`). To also grant access on the web, call
+`register()` stays pending until you call `sw.dismiss()` — right there inside
+`onPurchase` is fine — and then resolves as `purchased` (not `declined`). To
+also grant access on the web, call
 `sw.redeem(code)` when `checkout.claimed` is `false`, or
 `sw.purchases.refreshCustomerInfo()` when it's `true`.
 
@@ -239,16 +244,14 @@ sw.events.addEventListener("redemptionCodesReceived", (e) => {
 });
 ```
 
-Mind `claimed` before handing a code out: with the default handling, codes from
-an unclaimed purchase are redeemed by the SDK itself. The event is local-only —
-it's never sent to Superwall's collector, since the backend already records the
-redemption.
+The event is local-only — it's never sent to Superwall's collector, since the
+backend already records the redemption.
 
 ### Redeeming a code
 
 `sw.redeem(code)` redeems a `redemption_…` code for the current user — for codes
-you received in `onPurchase`, from another device, or from your own backend (the
-default post-purchase handling already redeems unclaimed codes for you):
+you received from a completed checkout, from another device, or from your own
+backend (the SDK never redeems a checkout's codes on its own):
 
 ```ts
 const r = await sw.redeem("redemption_abc123");
