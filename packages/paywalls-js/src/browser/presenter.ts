@@ -795,13 +795,6 @@ const handleInbound = (
     const name = evt.event_name;
     if (typeof name !== "string") continue;
 
-    // TEMP(post-checkout-rollout): raw dump of every message the paywall
-    // posts, to verify the new `post_checkout_complete` contract against the
-    // live paywall (is `close` really gone? does `claimed` arrive?). Payloads
-    // can carry redemption codes + the entitlements token — remove before
-    // release.
-    console.log(`[Superwall][temp] paywall → sdk: ${name}`, evt);
-
     switch (name) {
       case "ping":
       case "template_params_and_user_attributes": {
