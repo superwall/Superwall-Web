@@ -42,6 +42,7 @@ import {
   type PartialSuperwallOptions,
   closeReasonShouldComplete,
   type PaywallCloseReason,
+  type CheckoutCompletion,
   type PaywallInfo,
   type PaywallPresentationStyle,
   type PaywallResult,
@@ -75,6 +76,7 @@ import {
   extractEntitlementsByProductId,
   extractEntitlementsByReferenceName,
   type ConfigServiceImpl,
+  type ConfigState,
 } from "./internal/config.ts";
 import {
   AudienceEvaluator,
@@ -128,7 +130,14 @@ import {
   subscriptionStatusFromEntitlements,
   type RedemptionServiceImpl,
 } from "./internal/redemption.ts";
-import { createAutomaticPurchaseController } from "./internal/automaticPurchaseController.ts";
+import {
+  createAutomaticPurchaseController,
+  type RedemptionOutcome,
+} from "./internal/automaticPurchaseController.ts";
+import {
+  applyCheckoutEntitlements,
+  type PostCheckoutDeps,
+} from "./internal/postCheckout.ts";
 import type { PaywallPurchaseEvent } from "./presenter.ts";
 
 // ---------------------------------------------------------------------------
@@ -182,6 +191,28 @@ export interface UserNamespace {
 export interface PaywallPresentationHandler {
   onPresent?(info: PaywallInfo): void;
   onDismiss?(info: PaywallInfo, result: PaywallResult): void;
+  /**
+   * Take over what happens when a web checkout completes. Supplying this
+   * REPLACES the SDK's default handling entirely — the SDK will not apply
+   * entitlements, redeem codes or close the paywall.
+   * The paywall itself is inert after checkout, so the overlay stays up (and
+   * `register()` stays pending) until you call `sw.dismiss()`; the result
+   * then resolves as `purchased`, carrying the same `checkout`.
+   *
+   * Built for buy-on-web, redeem-in-app: `checkout.redemptionCodes` are fresh
+   * and unclaimed, so show them, or hand `checkout.deepLinks.ios` / `.android`
+   * to an "Open in app" button. To grant access on the web yourself, call
+   * `sw.redeem(code)` when `checkout.claimed` is `false`, or
+   * `sw.purchases.refreshCustomerInfo()` when it's `true`.
+   *
+   * Calling `sw.dismiss()` right here, synchronously, is fine.
+   *
+   * Without it, the default: when `claimed`, apply `entitlementsToken` +
+   * grant / refresh entitlements; then close the paywall and fire
+   * `onDismiss`. The SDK never redeems the codes and never navigates — the
+   * codes and `checkout.redirectUrl` are yours, here or from `onDismiss`.
+   */
+  onPurchase?(info: PaywallInfo, checkout: CheckoutCompletion): void | Promise<void>;
   onError?(error: Error): void;
   onSkip?(reason: PaywallSkippedReason): void;
 }
@@ -258,12 +289,11 @@ export interface PurchasesNamespace {
    *  1h `exp`. Best-effort: `null` when the backend isn't issuing tokens. For
    *  reactive reads, see `sw.entitlementsToken`. */
   getEntitlementsToken(): string | null;
-  // NOTE: `purchase(product)` is intentionally hidden for now. With the default
+  // `purchase(product)` is deliberately absent: under the default
   // automaticPurchaseController it only resolves while a paywall is presenting
-  // and the user completes Stripe checkout in parallel — standalone it does
-  // nothing useful, so it's not part of the public surface yet. The
-  // implementation lives on internally as `directPurchase` (the custom-paywall
-  // render path needs it); re-expose here once it can initiate checkout itself.
+  // and the user completes Stripe checkout in parallel, so standalone it does
+  // nothing useful. The internal `directPurchase` serves the custom-paywall
+  // render path.
 }
 
 export interface EntitlementsNamespace {
@@ -331,6 +361,25 @@ export interface Superwall {
   register(args: RegisterPlacementArgs): Promise<RegisterPlacementResult>;
   readonly purchases: PurchasesNamespace;
   readonly entitlements: EntitlementsNamespace;
+
+  /**
+   * Redeem a Superwall redemption code (`redemption_…`) for the current user.
+   * Codes come from a completed web checkout — via `handler.onPurchase`, the
+   * purchased `PaywallResult`'s `checkout`, the `redemptionCodesReceived`
+   * event, or your own channel — and from web checkout links. Pass the code
+   * verbatim, prefix included. The SDK never redeems a checkout's codes on
+   * its own — this is how you do it.
+   *
+   * On success the code's purchase attaches to the current user:
+   * `customerInfo` is seeded from the response and `subscriptionStatus`
+   * flips to ACTIVE when entitlements were granted. Fires the
+   * `onWillRedeemLink` / `onDidRedeemLink` delegate callbacks; never throws —
+   * failures resolve as `{ type: "error" | "expired" | "invalid" }`.
+   *
+   * A returning `?code=redemption_…` URL is still redeemed automatically at
+   * configure time; call this only for codes you receive some other way.
+   */
+  redeem(code: string): Promise<RedemptionResult>;
 
   readonly subscriptionStatus: Readable<SubscriptionStatus>;
   readonly customerInfo: Readable<CustomerInfo | null>;
@@ -667,13 +716,32 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   ): NetworkConfig["environment"] =>
     (env ?? "release") as NetworkConfig["environment"];
 
+  // Config metadata mirrored out of ConfigService for the header set. The
+  // network layer is built before ConfigService (which depends on it), so
+  // these are kept current by a subscription to `config.stateRef` in
+  // `configure` rather than read through the service.
+  let staticConfigBuildId = "";
+  let configRetryCount = 0;
+
   const networkConfig: NetworkConfig = {
     apiKey: opts.apiKey,
     environment: resolveNetworkEnvironment(opts.options?.networkEnvironment),
     ...(opts.options?.appVersion !== undefined && { appVersion: opts.options.appVersion }),
     ...(opts.options?.bundleId !== undefined && { bundleId: opts.options.bundleId }),
     ...(opts.fetch !== undefined && { fetch: opts.fetch }),
+    ...(opts.options?.platformWrapper !== undefined && {
+      platformWrapper: opts.options.platformWrapper,
+    }),
     interfaceStyleOverride: () => interfaceStyleOverride,
+    // Test mode is the only sandbox signal available in a browser; an app on
+    // Stripe test keys sets `options.isSandbox` explicitly.
+    isSandbox: () => opts.options?.isSandbox ?? isTestMode(),
+    staticConfigBuildId: () => staticConfigBuildId,
+    configRetryCount: () => configRetryCount,
+    activeEntitlementIds: () => {
+      const s = subStatusSig.value;
+      return s.status === "ACTIVE" ? s.entitlements.map((e) => e.id) : [];
+    },
   };
   const networkLayer = networkServiceLayer(networkConfig, identityLayer);
   const computedLayer = computedPropertiesLayer(storageLayer);
@@ -882,6 +950,39 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         ),
       );
     });
+    // Completed web checkout — the parsed `post_checkout_complete` payload.
+    target.addEventListener("checkoutCompleted", (e) => {
+      runFireAndForget(
+        "paywallEvents",
+        "checkoutCompleted bridge effect failed",
+        bus.withDelegate(
+          (d) => d.onCheckoutCompleted?.(e.detail.checkout, e.detail.paywallInfo),
+          (cause) =>
+            logViaRuntime(
+              "paywallEvents",
+              "delegate.onCheckoutCompleted threw",
+              cause,
+            ),
+        ),
+      );
+    });
+    // Redemption codes carried by a completed checkout, surfaced by the
+    // presenter alongside `checkoutCompleted`.
+    target.addEventListener("redemptionCodesReceived", (e) => {
+      runFireAndForget(
+        "paywallEvents",
+        "redemptionCodesReceived bridge effect failed",
+        bus.withDelegate(
+          (d) => d.onRedemptionCodesReceived?.(e.detail.codes, e.detail.paywallInfo),
+          (cause) =>
+            logViaRuntime(
+              "paywallEvents",
+              "delegate.onRedemptionCodesReceived threw",
+              cause,
+            ),
+        ),
+      );
+    });
 
     // Discount redemption results: resolve a matching in-flight
     // redeemDiscount(). The paywall's `discount_redemption_result` postMessage
@@ -1002,6 +1103,24 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     // network fetch revalidates.
     const config = yield* ConfigService;
     const assignments = yield* AssignmentService;
+
+    // Mirror config state onto the plain closure vars the network layer reads
+    // for `X-Static-Config-Build-Id` / `X-Retry-Count`. forkDaemon so it keeps
+    // tracking past configure(), including background revalidation.
+    yield* Effect.forkDaemon(
+      config.stateRef.changes.pipe(
+        Stream.runForEach((state: ConfigState) =>
+          Effect.sync(() => {
+            if (state._tag === "Retrieved") {
+              staticConfigBuildId = state.config.buildId;
+              configRetryCount = 0;
+            } else if (state._tag === "Failed") {
+              configRetryCount = state.retryCount;
+            }
+          }),
+        ),
+      ),
+    );
     yield* config.hydrateFromStorage().pipe(
       Effect.tapError((e) => Effect.logDebug("Config hydration from storage failed", { error: String(e) })),
       Effect.catchAll(() => Effect.void),
@@ -1241,6 +1360,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         fresh,
         (p): PaywallInfo => ({
           identifier: p.identifier,
+          ...(p.databaseId && { databaseId: p.databaseId }),
           name: p.name,
           url: p.url,
           productIds: [...p.productIds],
@@ -1598,6 +1718,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         databaseId: result.paywall.databaseId,
       }),
       identifier: result.paywall.identifier,
+      ...(result.paywall.databaseId && { databaseId: result.paywall.databaseId }),
       name: result.paywall.name,
       url: result.paywall.url,
       experiment,
@@ -1971,18 +2092,33 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           user: attrsSig.value as Record<string, unknown>,
           device: snapshotDeviceAttributes(idSnap),
           onPurchaseEvent: (ev) => {
-            // Capture the signed entitlements JWT from the terminal success
-            // message so `sw.entitlementsToken` is populated for the web-sdk
-            // checkout flow (the `/entitlements` read is best-effort about it).
-            if (ev.type === "postCheckout" && ev.entitlementsToken) {
-              entitlementsTokenSig.set(ev.entitlementsToken);
-            }
             paywallPurchaseEventHandlers.forEach((h) => {
               try { h(ev); } catch {}
             });
+            if (ev.type !== "postCheckout") return;
+            const { checkout } = ev;
+            const onPurchase = handler?.onPurchase;
+            if (onPurchase) {
+              // Developer override replaces the default entirely — including
+              // teardown: the paywall stays up until they call `sw.dismiss()`.
+              void (async () => onPurchase(info, checkout))().catch(
+                (cause: unknown) =>
+                  logViaRuntime("transactions", "handler.onPurchase threw", cause),
+              );
+              return;
+            }
+            // Default: grant entitlements when the server claimed the
+            // purchase for this user, then close the overlay — the paywall no
+            // longer posts `close` itself. The SDK never redeems the codes and
+            // never navigates: both are the developer's, on the payload.
+            applyCheckoutEntitlements(checkout, postCheckoutDeps);
+            try {
+              presenter.dismiss();
+            } catch {}
           },
           // The iframe already sends `user_attributes` to the collector.
           onUserAttributesUpdate: (attrs) => mergeAttributes(attrs, false),
+          ownsCheckoutTeardown: true,
           bootstrap,
           initPayload,
           testMode: isTestMode(),
@@ -2419,7 +2555,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
   /** Publish a CustomerInfo snapshot derived from an entitlement set.
    *  The `/entitlements` wire response carries no transaction history, so
-   *  `subscriptions` / `nonSubscriptions` stay empty on web for now.
+   *  `subscriptions` / `nonSubscriptions` stay empty on web.
    *  Structural dedupe — the 10-min poll re-applying an identical set must
    *  not re-fire `onCustomerInfoChange`. */
   const applyCustomerInfo = (ents: Entitlement[]): void => {
@@ -2483,6 +2619,161 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     return ents;
   };
 
+  /** Shared redemption-code POST behind both the automatic controller's
+   *  `?code=` auto-redeem and the public `sw.redeem()`. Fires the
+   *  `onWillRedeemLink` / `onDidRedeemLink` delegate pair and seeds the
+   *  `customerInfo` snapshot from a successful response. */
+  const redeemCode = async (
+    code: string,
+  ): Promise<{ outcome: RedemptionOutcome; result: RedemptionResult }> => {
+    runFireAndForget(
+      "transactions",
+      "delegate.onWillRedeemLink threw",
+      Effect.gen(function* () {
+        const bus = yield* EventBus;
+        yield* bus.withDelegate((d) => d.onWillRedeemLink?.());
+      }),
+    );
+    const res = await runtime
+      .runPromise(
+        Effect.gen(function* () {
+          const r = yield* RedemptionService;
+          return yield* r.redeem(RedeemType.Code(code));
+        }),
+      )
+      .catch((cause: unknown) => {
+        logViaRuntime("transactions", "redemption.redeem failed", cause);
+        return null;
+      });
+    const emitDidRedeem = (result: RedemptionResult): void => {
+      runFireAndForget(
+        "transactions",
+        "delegate.onDidRedeemLink threw",
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          yield* bus.withDelegate((d) => d.onDidRedeemLink?.(result));
+        }),
+      );
+    };
+    if (!res) {
+      const result: RedemptionResult = {
+        type: "error",
+        code,
+        error: "redemption request failed",
+      };
+      emitDidRedeem(result);
+      return { outcome: { status: "error", entitlements: [] }, result };
+    }
+    const codeResult = res.codes?.find((c) => c.code === code);
+    const ents: Entitlement[] = (res.customerInfo?.entitlements ?? [])
+      .filter((e) => e.isActive ?? true)
+      .map((e) => ({
+        id: e.id,
+        type: "SERVICE_LEVEL" as const,
+        isActive: e.isActive ?? true,
+        productIds: e.productIds ?? [],
+      }));
+    // A successful redeem carries the authoritative customerInfo — seed
+    // the public snapshot without waiting for the next /entitlements read.
+    if (res.customerInfo?.entitlements) {
+      applyCustomerInfo(ents);
+    }
+    const status =
+      codeResult?.status === "EXPIRED"
+        ? ("expired" as const)
+        : codeResult?.status === "INVALID"
+          ? ("invalid" as const)
+          : codeResult?.status === "ERROR"
+            ? ("error" as const)
+            : ("success" as const);
+    const result: RedemptionResult =
+      status === "success"
+        ? { type: "success", code, entitlements: ents }
+        : status === "expired"
+          ? { type: "expired", code }
+          : codeResult?.status === "INVALID"
+            ? { type: "invalid", code }
+            : {
+                type: "error",
+                code,
+                error: codeResult?.error?.message ?? "redemption failed",
+              };
+    emitDidRedeem(result);
+    return { outcome: { status, entitlements: ents }, result };
+  };
+
+  // Deps shared by the automatic PurchaseController and the default
+  // post-checkout handler (`internal/postCheckout.ts`).
+  const entitlementDeps: Pick<
+    PostCheckoutDeps,
+    "setSubscriptionStatus" | "logWarn" | "resolveEntitlementsForProduct"
+  > = {
+    setSubscriptionStatus: (s) => {
+      // Reuse the public-facing setter so delegate / event chain fires.
+      const prev = subStatusSig.value;
+      if (subscriptionStatusEqual(prev, s)) return;
+      subStatusSig.set(s);
+      persistSubscriptionStatus(s);
+      runFireAndForget(
+        "transactions",
+        "controller.setSubscriptionStatus delegate/publish failed",
+        Effect.gen(function* () {
+          const bus = yield* EventBus;
+          yield* bus.withDelegate(
+            (d) => d.onSubscriptionStatusChange?.(prev, s),
+            (cause) =>
+              logViaRuntime(
+                "transactions",
+                "delegate.onSubscriptionStatusChange threw",
+                cause,
+              ),
+          );
+          yield* bus.publish("subscriptionStatus_didChange", {});
+        }),
+      );
+    },
+    logWarn: (message, error) => {
+      void runtime
+        .runPromise(
+          Effect.gen(function* () {
+            const logger = yield* Logger;
+            yield* logger.warn("transactions", message, null, error ?? null);
+          }),
+        )
+        .catch(() => {});
+    },
+    resolveEntitlementsForProduct: (productId) => {
+      // `productId` here is what arrived in `post_checkout_complete.product_identifier`
+      // — by BE contract that's the slot reference_name (e.g. "primary"),
+      // NOT the Stripe product id. Look it up against the per-paywall
+      // `products_v2` map; fall back to the Stripe-id-keyed top-level
+      // products in case a caller (sw.purchases.purchase) passed a real
+      // product id. Synchronous Ref read — safe under runSync.
+      const cfg = runtime.runSync(
+        Effect.gen(function* () {
+          const config = yield* ConfigService;
+          return yield* config.current();
+        }).pipe(Effect.catchAll(() => Effect.succeed(null))),
+      );
+      if (!cfg) return [];
+      const byRef = extractEntitlementsByReferenceName(cfg.paywallResponses);
+      const fromRef = byRef.get(productId);
+      if (fromRef && fromRef.length > 0) return fromRef;
+      return (
+        extractEntitlementsByProductId(cfg.products).get(productId) ?? []
+      );
+    },
+  };
+
+  /** Default `post_checkout_complete` handling — runs for every completed
+   *  web checkout unless `handler.onPurchase` overrides it, whichever
+   *  `PurchaseController` is installed (same as the public `sw.redeem()`). */
+  const postCheckoutDeps: PostCheckoutDeps = {
+    ...entitlementDeps,
+    refreshEntitlements: refreshWebEntitlements,
+    setEntitlementsToken: (token) => entitlementsTokenSig.set(token),
+  };
+
   // Build the PurchaseController. Default = automatic (handles standard
   // Stripe paywall flow + ?code= redemption + web_entitlements polling).
   // Consumer-provided controllers take over fully.
@@ -2490,133 +2781,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     opts.purchaseController ??
     createAutomaticPurchaseController({
       subscribe: subscribeToPaywallPurchaseEvents,
-      redeem: async (code) => {
-        runFireAndForget(
-          "transactions",
-          "delegate.onWillRedeemLink threw",
-          Effect.gen(function* () {
-            const bus = yield* EventBus;
-            yield* bus.withDelegate((d) => d.onWillRedeemLink?.());
-          }),
-        );
-        const res = await runtime
-          .runPromise(
-            Effect.gen(function* () {
-              const r = yield* RedemptionService;
-              return yield* r.redeem(RedeemType.Code(code));
-            }),
-          )
-          .catch((cause: unknown) => {
-            logViaRuntime("transactions", "redemption.redeem failed", cause);
-            return null;
-          });
-        const emitDidRedeem = (result: RedemptionResult): void => {
-          runFireAndForget(
-            "transactions",
-            "delegate.onDidRedeemLink threw",
-            Effect.gen(function* () {
-              const bus = yield* EventBus;
-              yield* bus.withDelegate((d) => d.onDidRedeemLink?.(result));
-            }),
-          );
-        };
-        if (!res) {
-          emitDidRedeem({
-            type: "error",
-            code,
-            error: "redemption request failed",
-          });
-          return { status: "error", entitlements: [] };
-        }
-        const codeResult = res.codes?.find((c) => c.code === code);
-        const ents: Entitlement[] = (res.customerInfo?.entitlements ?? [])
-          .filter((e) => e.isActive ?? true)
-          .map((e) => ({
-            id: e.id,
-            type: "SERVICE_LEVEL" as const,
-            isActive: e.isActive ?? true,
-            productIds: e.productIds ?? [],
-          }));
-        // A successful redeem carries the authoritative customerInfo — seed
-        // the public snapshot without waiting for the next /entitlements read.
-        if (res.customerInfo?.entitlements) {
-          applyCustomerInfo(ents);
-        }
-        const status =
-          codeResult?.status === "EXPIRED"
-            ? ("expired" as const)
-            : codeResult?.status === "ERROR" || codeResult?.status === "INVALID"
-              ? ("error" as const)
-              : ("success" as const);
-        if (status === "success") {
-          emitDidRedeem({ type: "success", code, entitlements: ents });
-        } else if (status === "expired") {
-          emitDidRedeem({ type: "expired", code });
-        } else {
-          emitDidRedeem({
-            type: codeResult?.status === "INVALID" ? "invalid" : "error",
-            code,
-            error: codeResult?.error?.message ?? "redemption failed",
-          });
-        }
-        return { status, entitlements: ents };
-      },
+      redeem: async (code) => (await redeemCode(code)).outcome,
       refreshEntitlements: refreshWebEntitlements,
-      setSubscriptionStatus: (s) => {
-        // Reuse the public-facing setter so delegate / event chain fires.
-        const prev = subStatusSig.value;
-        if (subscriptionStatusEqual(prev, s)) return;
-        subStatusSig.set(s);
-        persistSubscriptionStatus(s);
-        runFireAndForget(
-          "transactions",
-          "controller.setSubscriptionStatus delegate/publish failed",
-          Effect.gen(function* () {
-            const bus = yield* EventBus;
-            yield* bus.withDelegate(
-              (d) => d.onSubscriptionStatusChange?.(prev, s),
-              (cause) =>
-                logViaRuntime(
-                  "transactions",
-                  "delegate.onSubscriptionStatusChange threw",
-                  cause,
-                ),
-            );
-            yield* bus.publish("subscriptionStatus_didChange", {});
-          }),
-        );
-      },
-      logWarn: (message, error) => {
-        void runtime
-          .runPromise(
-            Effect.gen(function* () {
-              const logger = yield* Logger;
-              yield* logger.warn("transactions", message, null, error ?? null);
-            }),
-          )
-          .catch(() => {});
-      },
-      resolveEntitlementsForProduct: (productId) => {
-        // `productId` here is what arrived in `post_checkout_complete.product_identifier`
-        // — by BE contract that's the slot reference_name (e.g. "primary"),
-        // NOT the Stripe product id. Look it up against the per-paywall
-        // `products_v2` map; fall back to the Stripe-id-keyed top-level
-        // products in case a caller (sw.purchases.purchase) passed a real
-        // product id. Synchronous Ref read — safe under runSync.
-        const cfg = runtime.runSync(
-          Effect.gen(function* () {
-            const config = yield* ConfigService;
-            return yield* config.current();
-          }).pipe(Effect.catchAll(() => Effect.succeed(null))),
-        );
-        if (!cfg) return [];
-        const byRef = extractEntitlementsByReferenceName(cfg.paywallResponses);
-        const fromRef = byRef.get(productId);
-        if (fromRef && fromRef.length > 0) return fromRef;
-        return (
-          extractEntitlementsByProductId(cfg.products).get(productId) ?? []
-        );
-      },
+      setSubscriptionStatus: entitlementDeps.setSubscriptionStatus,
+      logWarn: entitlementDeps.logWarn,
     });
 
   /** One-shot purchase through the active `PurchaseController`. Internal for
@@ -2629,10 +2797,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   ): Promise<
     { type: "purchased" } | { type: "declined" } | { type: "error"; error: Error }
   > => {
-    // directPurchase runs outside a register() call so no PaywallInfo is available,
-    // but the transaction events were designed with paywall_info as required. We cast
-    // here to emit the events with partial detail; the paywall_info field will be
-    // absent on non-register purchase paths (a known design debt, TODO: make optional).
+    // Runs outside a register() call, so there's no PaywallInfo to attach —
+    // the cast emits the transaction events with `paywall_info` absent, even
+    // though the event types declare it required.
     const emit = (
       name: "transaction_start" | "transaction_complete" | "transaction_abandon" | "transaction_fail" | "subscription_start",
       detail: Record<string, unknown>,
@@ -2844,6 +3011,20 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     register,
     purchases,
     entitlements,
+
+    redeem: async (code) => {
+      const { outcome, result } = await redeemCode(code);
+      // Mirror the automatic `?code=` path: a successful redeem that granted
+      // entitlements flips subscription status through the public setter so
+      // the delegate / event chain fires.
+      if (outcome.status === "success" && outcome.entitlements.length > 0) {
+        purchases.setSubscriptionStatus({
+          status: "ACTIVE",
+          entitlements: outcome.entitlements,
+        });
+      }
+      return result;
+    },
 
     subscriptionStatus: asReadable(subStatusSig),
     customerInfo: asReadable(customerSig),

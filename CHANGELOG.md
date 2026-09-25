@@ -3,6 +3,27 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## 0.3.0 — 2026-09-25
+
+### Added
+
+- `post_checkout_complete` is now the single end of a web checkout, and the SDK owns everything after it — the paywall no longer posts `close` after a purchase and no longer sends `post_purchase_behavior`. Default handling switches on the payload's `claimed` flag: `true` ⇒ apply `entitlements_token` + grant / refresh entitlements; `false` ⇒ grant nothing (the grant is the server's job). Either way the SDK never redeems the checkout's redemption codes itself — they stay unspent for the buyer's mobile app and are handed to the developer on the payload. Then the SDK closes the paywall and fires `onDismiss`. It never navigates: `redirect_url` is surfaced as `checkout.redirectUrl` for the developer to follow. This runs whichever `PurchaseController` is installed. **This release must be live before the paywall change ships** — older SDKs wait for a `close` that never comes
+- `handler.onPurchase(info, checkout)` on `register()` — replaces the default post-checkout handling entirely (no entitlements, redeem or teardown; call `sw.dismiss()` yourself, after which `register()` resolves `purchased`). Built for buy-on-web, redeem-in-app: show `checkout.redemptionCodes`, or hand `checkout.deepLinks.ios` / `.android` to an "Open in app" button
+- New `CheckoutCompletion` type — `productId`, `checkoutContextId`, `claimed`, `transaction`, `redemptionCodes`, `redirectUrl`, `deepLinks`, `entitlementsToken` — passed to `onPurchase` and carried on the purchased `PaywallResult` as `checkout` (`handler.onDismiss` / `register()`'s return value)
+- Local-only `checkoutCompleted` event, bridged to `SuperwallDelegate.onCheckoutCompleted(checkout, info)` — notification-only view of the same payload for logging / analytics; fires for every completed checkout (default handling or `onPurchase` override) before either acts on it
+- Local-only `redemptionCodesReceived` event with purchase context, bridged to `SuperwallDelegate.onRedemptionCodesReceived`. Fires for claimed and unclaimed codes alike; `claimed` on the detail says which
+- Public `sw.redeem(code)` — redeem a `redemption_…` code for the current user; seeds `customerInfo`, flips `subscriptionStatus` on success, fires `onWillRedeemLink` / `onDidRedeemLink`, and now also works with a custom `PurchaseController`
+- Four request headers the native SDKs already send: `X-Static-Config-Build-Id` (build id of the config in hand), `X-Request-Id` (fresh per request, for tracing a report back to one call), `X-Retry-Count` (config-fetch attempt), and `X-Entitlements` (comma-joined active entitlement ids)
+
+### Fixed
+
+- The paywall init payload now sends the paywall's database id (parsed from `paywall_responses[].id`, exposed as `PaywallInfo.databaseId`) as `paywallId`, keeping `paywallIdentifier` as the slug — matching what the native SDKs send; configs without the field fall back to the slug
+- Request headers now match the native SDKs, so backend audience filters actually match web traffic: `X-Device-Interface-Style` sends `Light`/`Dark` (was lowercase), `X-Device-Locale` sends the POSIX form `en_US` (was BCP-47 `en-US`), and `X-Platform` sends `web` (was `Web`, which also disagreed with the `web` the paywall iframe sent)
+- `X-Is-Sandbox` no longer reports which API host is configured. It now reports whether purchases are non-real — defaulting to the SDK's test-mode state and overridable via `options.isSandbox` for apps on Stripe test keys
+- `X-Platform-Wrapper` is configurable via `options.platformWrapper` (default `"Web"`); `@superwall/paywalls-react` now identifies itself as `"React"`
+- `post_checkout_complete` field names now match the wire (`transaction_data` / `redirect_url`, snake_case inner keys), so transaction enrichment is actually read
+- `sw.redeem()` resolves an INVALID code as `{ type: "invalid", code }` instead of stuffing an `error` field into the invalid variant
+
 ## 0.2.9 — 2026-09-18
 
 ### Fixed

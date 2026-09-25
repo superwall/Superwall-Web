@@ -1,5 +1,9 @@
 import { it, expect, beforeEach } from "@effect/vitest";
-import type { PaywallInfo } from "../types.ts";
+import type {
+  CheckoutCompletion,
+  PaywallInfo,
+  PaywallResult,
+} from "../types.ts";
 import type { PresentationContext } from "../presenter.ts";
 import { createBrowserPresenter } from "./presenter.ts";
 
@@ -255,50 +259,6 @@ it("post_checkout_complete (flat shape from controller's postMessageToHost) reso
   if (r.type === "purchased") expect(r.productId).toBe("pro_yearly");
 });
 
-it("redirect_required calls window.open and emits paywallWillOpenURL", async () => {
-  const emitted: Array<[string, unknown]> = [];
-  const opens: string[] = [];
-  const originalOpen = globalThis.open;
-  // happy-dom's window.open returns null and triggers navigation; stub it.
-  (globalThis as { open?: unknown }).open = (url: string) => {
-    opens.push(url);
-    return null;
-  };
-  try {
-    const presenter = createBrowserPresenter();
-    const info = stubInfo("pw_redir");
-    const ctx = newCtx({
-      emit: (name, detail) => emitted.push([name as string, detail]),
-    });
-    const presentation = presenter.present(info, ctx);
-    await tick();
-
-    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
-    const origin = new URL(iframe.src).origin;
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          version: 1,
-          payload: {
-            events: [
-              { event_name: "redirect_required", url: "https://stripe.com/checkout/abc" },
-            ],
-          },
-        },
-        origin,
-        source: iframe.contentWindow,
-      } as MessageEventInit),
-    );
-    await flushMessages();
-    expect(opens).toEqual(["https://stripe.com/checkout/abc"]);
-    expect(emitted.find(([n]) => n === "paywallWillOpenURL")).toBeDefined();
-    presenter.dismiss();
-    await presentation;
-  } finally {
-    (globalThis as { open?: unknown }).open = originalOpen;
-  }
-});
-
 it("post_checkout_complete resolves purchased + routes via onPurchaseEvent + does NOT emit transaction_complete (BE does it)", async () => {
   const emitted: Array<[string, unknown]> = [];
   const purchaseEvents: unknown[] = [];
@@ -340,10 +300,193 @@ it("post_checkout_complete resolves purchased + routes via onPurchaseEvent + doe
   // Internal channel still routes the postCheckout signal to APC.
   const pc = purchaseEvents.find(
     (e) => (e as { type: string }).type === "postCheckout",
-  ) as undefined | { type: string; productId: string; checkoutContextId: string };
+  ) as undefined | { type: string; productId: string; checkout: CheckoutCompletion };
   expect(pc).toBeDefined();
   expect(pc!.productId).toBe("pro_yearly");
-  expect(pc!.checkoutContextId).toBe("ckctx_42");
+  expect(pc!.checkout.checkoutContextId).toBe("ckctx_42");
+  // A paywall that predates `claimed` granted access server-side — only an
+  // explicit `false` may ever lead to the codes being redeemed here.
+  expect(pc!.checkout.claimed).toBe(true);
+  expect(pc!.checkout.redemptionCodes).toEqual([]);
+});
+
+const postCheckoutComplete = (
+  iframe: HTMLIFrameElement,
+  fields: Record<string, unknown>,
+): void => {
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        event_name: "post_checkout_complete",
+        product_identifier: "pro_yearly",
+        status: "completed",
+        ...fields,
+      },
+      origin: new URL(iframe.src).origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+};
+
+it("post_checkout_complete parses the full payload onto the result, the postCheckout event and redemptionCodesReceived — and never follows redirect_url itself", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const purchaseEvents: unknown[] = [];
+  const opens: string[] = [];
+  const assigns: string[] = [];
+  const originalOpen = globalThis.open;
+  const originalAssign = location.assign.bind(location);
+  (globalThis as { open?: unknown }).open = (url: string) => {
+    opens.push(url);
+    return null;
+  };
+  (location as { assign: (url: string) => void }).assign = (url: string) => {
+    assigns.push(String(url));
+  };
+  try {
+    const presenter = createBrowserPresenter();
+    const info = stubInfo("pw_pc_payload");
+    const ctx = newCtx({
+      emit: (name, detail) => emitted.push([name as string, detail]),
+      onPurchaseEvent: (ev) => purchaseEvents.push(ev),
+    });
+    const presentation = presenter.present(info, ctx);
+    await tick();
+
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    postCheckoutComplete(iframe, {
+      checkout_context_id: "ckctx_full",
+      claimed: false,
+      transaction_data: {
+        transaction_id: "txn_1",
+        product_identifier: "pro_yearly",
+        currency: "USD",
+        value: 49.99,
+      },
+      redemption_codes: ["redemption_abc123"],
+      redirect_url: "https://merchant.test/thanks?redemption_code=redemption_abc123",
+      deep_links: { ios: "myapp://redeem?code=redemption_abc123" },
+      entitlements_token: "jwt.token.sig",
+      // Gone from the wire — must be ignored, not surfaced.
+      post_purchase_behavior: "REDEEM",
+    });
+
+    const expected: CheckoutCompletion = {
+      productId: "pro_yearly",
+      checkoutContextId: "ckctx_full",
+      claimed: false,
+      transaction: {
+        transactionId: "txn_1",
+        productIdentifier: "pro_yearly",
+        currency: "USD",
+        value: 49.99,
+      },
+      redemptionCodes: ["redemption_abc123"],
+      redirectUrl: "https://merchant.test/thanks?redemption_code=redemption_abc123",
+      deepLinks: { ios: "myapp://redeem?code=redemption_abc123" },
+      entitlementsToken: "jwt.token.sig",
+    };
+    const r = await presentation;
+    expect(r).toEqual({
+      type: "purchased",
+      productId: "pro_yearly",
+      checkout: expected,
+    });
+    const pc = purchaseEvents.find(
+      (e) => (e as { type: string }).type === "postCheckout",
+    ) as undefined | { checkout: CheckoutCompletion };
+    expect(pc?.checkout).toEqual(expected);
+    // The notification event carries the parsed payload, and lands before
+    // the postCheckout routing kicks off any handling.
+    const completedEvt = emitted.find(([n]) => n === "checkoutCompleted");
+    expect(completedEvt?.[1]).toEqual({ checkout: expected, paywallInfo: info });
+    // The codes event fires for unclaimed codes…
+    const codesEvt = emitted.find(([n]) => n === "redemptionCodesReceived");
+    expect(codesEvt?.[1]).toEqual({
+      codes: ["redemption_abc123"],
+      claimed: false,
+      productId: "pro_yearly",
+      checkoutContextId: "ckctx_full",
+      paywallInfo: info,
+    });
+    // redirect_url is surfaced on the payload only — nothing in the SDK
+    // navigates there.
+    await flushMessages();
+    expect(opens).toEqual([]);
+    expect(assigns).toEqual([]);
+    expect(emitted.map(([n]) => n)).not.toContain("paywallWillOpenURL");
+  } finally {
+    (globalThis as { open?: unknown }).open = originalOpen;
+    (location as { assign: (url: string) => void }).assign = originalAssign;
+  }
+});
+
+it("redemptionCodesReceived also fires for claimed codes, flagged claimed: true", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const presenter = createBrowserPresenter();
+  const ctx = newCtx({
+    emit: (name, detail) => emitted.push([name as string, detail]),
+  });
+  const presentation = presenter.present(stubInfo("pw_pc_claimed"), ctx);
+  await tick();
+
+  postCheckoutComplete(document.querySelector("iframe") as HTMLIFrameElement, {
+    checkout_context_id: "ckctx_claimed",
+    claimed: true,
+    redemption_codes: ["redemption_fresh"],
+  });
+  await presentation;
+  const codesEvt = emitted.find(([n]) => n === "redemptionCodesReceived");
+  expect(codesEvt?.[1]).toMatchObject({
+    codes: ["redemption_fresh"],
+    claimed: true,
+  });
+});
+
+it("ownsCheckoutTeardown: the paywall stays up after post_checkout_complete and dismiss() resolves purchased, not declined", async () => {
+  const presenter = createBrowserPresenter();
+  const ctx = newCtx({ ownsCheckoutTeardown: true });
+  let settled: PaywallResult | null = null;
+  const presentation = presenter
+    .present(stubInfo("pw_pc_owned"), ctx)
+    .then((r) => (settled = r));
+  await tick();
+
+  postCheckoutComplete(document.querySelector("iframe") as HTMLIFrameElement, {
+    checkout_context_id: "ckctx_owned",
+    claimed: true,
+  });
+  await flushMessages();
+  // The paywall no longer posts `close` after a purchase and the presenter
+  // doesn't close itself — the SDK (or the developer's onPurchase) does.
+  expect(settled).toBeNull();
+  expect(document.querySelector("iframe")).not.toBeNull();
+
+  presenter.dismiss();
+  const r = await presentation;
+  expect(r.type).toBe("purchased");
+  if (r.type === "purchased") {
+    expect(r.checkout?.checkoutContextId).toBe("ckctx_owned");
+  }
+  expect(document.querySelector("iframe")).toBeNull();
+});
+
+it("ownsCheckoutTeardown: a `close` from an older paywall after post_checkout_complete resolves purchased", async () => {
+  const presenter = createBrowserPresenter();
+  const ctx = newCtx({ ownsCheckoutTeardown: true });
+  const presentation = presenter.present(stubInfo("pw_pc_legacy_close"), ctx);
+  await tick();
+
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  postCheckoutComplete(iframe, { checkout_context_id: "ckctx_legacy" });
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: { event_name: "close" },
+      origin: new URL(iframe.src).origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+  const r = await presentation;
+  expect(r.type).toBe("purchased");
 });
 
 it("custom container option mounts the overlay there instead of body", async () => {

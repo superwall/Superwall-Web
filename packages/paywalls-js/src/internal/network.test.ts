@@ -88,7 +88,7 @@ it.effect("buildHeaders includes the §11.3 header set with identity values", ()
     const headers = yield* net.buildHeaders();
     expect(headers.Authorization).toBe("Bearer pk_test_abc");
     expect(headers["Content-Type"]).toBe("application/json");
-    expect(headers["X-Platform"]).toBe("Web");
+    expect(headers["X-Platform"]).toBe("web");
     expect(headers["X-Platform-Wrapper"]).toBe("Web");
     expect(headers["X-App-User-ID"]).toBe("u_42");
     expect(headers["X-Alias-ID"]).toMatch(/^\$SuperwallAlias:/);
@@ -99,44 +99,97 @@ it.effect("buildHeaders includes the §11.3 header set with identity values", ()
     expect(headers["X-SDK-Version"]).toBe(SDK_VERSION);
     expect(headers["X-Is-Sandbox"]).toBe("false");
     expect(headers["X-Current-Time"]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(headers["X-Device-Locale"]).toBeTruthy();
+    // POSIX form (`en_US`), matching what the native SDKs report — backend
+    // audience filters compare against it.
+    expect(headers["X-Device-Locale"]).toMatch(/^[a-z]{2}(_[A-Za-z0-9]+)*$/);
     expect(headers["X-Device-Language-Code"]).toBeTruthy();
+    expect(headers["X-Device-Language-Code"]).not.toContain("-");
     expect(headers["X-Device-Timezone-Offset"]).toMatch(/^-?\d+$/);
-    expect(headers["X-Device-Interface-Style"]).toMatch(/^(light|dark)$/);
+    // Capitalized token — a backend audience-filter contract shared with native.
+    expect(headers["X-Device-Interface-Style"]).toMatch(/^(Light|Dark)$/);
+    expect(headers["X-Request-Id"]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(headers["X-Static-Config-Build-Id"]).toBe("");
+    expect(headers["X-Retry-Count"]).toBe("0");
+    expect(headers["X-Entitlements"]).toBe("");
   }).pipe(Effect.provide(stack));
 });
 
-it.effect("buildHeaders marks custom environments as PRODUCTION (P1)", () => {
+it.effect("X-Is-Sandbox does NOT follow the network environment", () => {
   const { fetch } = mockFetch(() => new Response("{}"));
-  const stack = buildStack(fetch, {
-    environment: {
-      custom: {
-        base: "api.proxy.example",
-        collector: "collector.proxy.example",
-        enrichment: "enrich.proxy.example",
-        subscriptions: "subs.proxy.example",
-      },
-    },
-  });
-  return Effect.gen(function* () {
-    yield* IdentityService.hydrate();
-    const net = yield* NetworkService;
-    const headers = yield* net.buildHeaders();
-    // Custom env defaults to production (sandbox=false). Dev sets up their
-    // own header override if they need it.
-    expect(headers["X-Is-Sandbox"]).toBe("false");
-  }).pipe(Effect.provide(stack));
-});
-
-it.effect("buildHeaders marks dev/RC environments as sandbox", () => {
-  const { fetch } = mockFetch(() => new Response("{}"));
+  // A non-release host says nothing about whether purchases are real — the
+  // header reports purchase state, not which API we're pointed at.
   const stack = buildStack(fetch, { environment: "developer" });
 
   return Effect.gen(function* () {
     yield* IdentityService.hydrate();
     const net = yield* NetworkService;
     const headers = yield* net.buildHeaders();
+    expect(headers["X-Is-Sandbox"]).toBe("false");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("X-Is-Sandbox reports the injected sandbox getter", () => {
+  const { fetch } = mockFetch(() => new Response("{}"));
+  const stack = buildStack(fetch, { isSandbox: () => true });
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders();
     expect(headers["X-Is-Sandbox"]).toBe("true");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("config metadata + entitlements headers read their getters", () => {
+  const { fetch } = mockFetch(() => new Response("{}"));
+  const stack = buildStack(fetch, {
+    platformWrapper: "React",
+    staticConfigBuildId: () => "build_abc",
+    configRetryCount: () => 3,
+    activeEntitlementIds: () => ["pro", "team"],
+  });
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders();
+    expect(headers["X-Platform-Wrapper"]).toBe("React");
+    expect(headers["X-Static-Config-Build-Id"]).toBe("build_abc");
+    expect(headers["X-Retry-Count"]).toBe("3");
+    expect(headers["X-Entitlements"]).toBe("pro,team");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("a throwing getter degrades to the header's default", () => {
+  const { fetch } = mockFetch(() => new Response("{}"));
+  const stack = buildStack(fetch, {
+    isSandbox: () => {
+      throw new Error("boom");
+    },
+    staticConfigBuildId: () => {
+      throw new Error("boom");
+    },
+  });
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const headers = yield* net.buildHeaders();
+    expect(headers["X-Is-Sandbox"]).toBe("false");
+    expect(headers["X-Static-Config-Build-Id"]).toBe("");
+  }).pipe(Effect.provide(stack));
+});
+
+it.effect("X-Request-Id is unique per call", () => {
+  const { fetch } = mockFetch(() => new Response("{}"));
+  const stack = buildStack(fetch);
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    const a = yield* net.buildHeaders();
+    const b = yield* net.buildHeaders();
+    expect(a["X-Request-Id"]).not.toBe(b["X-Request-Id"]);
   }).pipe(Effect.provide(stack));
 });
 

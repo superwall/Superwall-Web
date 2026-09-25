@@ -32,7 +32,43 @@ export interface NetworkConfig {
    *  detection. Wired so `sw.setInterfaceStyle(...)` can flip the SDK's
    *  reported style at runtime. */
   readonly interfaceStyleOverride?: () => "light" | "dark" | null;
+  /** `X-Platform-Wrapper`. `"Web"` for direct use of this SDK; a wrapper
+   *  package (e.g. `@superwall/paywalls-react`) supplies its own name. */
+  readonly platformWrapper?: string;
+  /** `X-Is-Sandbox`. Whether purchases on this surface are non-real. */
+  readonly isSandbox?: () => boolean;
+  /** `X-Static-Config-Build-Id` — build id of the config currently held.
+   *  Empty before the first config lands. */
+  readonly staticConfigBuildId?: () => string;
+  /** `X-Retry-Count` — config-fetch retry attempt the SDK is currently on. */
+  readonly configRetryCount?: () => number;
+  /** `X-Entitlements` — ids of the user's active entitlements. */
+  readonly activeEntitlementIds?: () => ReadonlyArray<string>;
 }
+
+const safeCall = <T>(read: (() => T) | undefined, fallback: T): T => {
+  if (!read) return fallback;
+  try {
+    return read() ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+/** Per-request id. Mirrors iOS's `X-Request-Id`; lets a support ticket be
+ *  traced to a single request in the backend logs. */
+const newRequestId = (): string => {
+  try {
+    if (typeof globalThis.crypto?.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+  } catch {}
+  return `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+};
 
 const safeReadString = (read: () => string | undefined): string => {
   try {
@@ -58,6 +94,13 @@ const resolveUrlScheme = (config: NetworkConfig): string =>
       : undefined,
   );
 
+/** BCP-47 (`en-US`) → the POSIX form the native SDKs report (`en_US`), which
+ *  is what backend audience filters match against. Only the header value is
+ *  converted — `Intl` throws on underscore tags, so everything that feeds a
+ *  formatter keeps the BCP-47 form. */
+const toNativeLocale = (locale: string): string => locale.replace(/-/g, "_");
+
+/** BCP-47, as the platform reports it. */
 const resolveLocale = (): string =>
   safeReadString(() =>
     typeof globalThis !== "undefined" && "navigator" in globalThis
@@ -79,13 +122,17 @@ const resolveCurrency = (locale: string): string => {
 const resolveTimezoneOffsetSeconds = (): number =>
   -new Date().getTimezoneOffset() * 60;
 
+/** Capitalized `Light` / `Dark` — a fixed token the backend's audience
+ *  filters match on, shared with the native SDKs. Not the lowercase value
+ *  used by `sw.setInterfaceStyle()`'s public API. */
 const resolveInterfaceStyle = (
   override?: () => "light" | "dark" | null,
-): "light" | "dark" => {
+): "Light" | "Dark" => {
   if (override) {
     try {
       const v = override();
-      if (v === "light" || v === "dark") return v;
+      if (v === "light") return "Light";
+      if (v === "dark") return "Dark";
     } catch {}
   }
   try {
@@ -96,14 +143,14 @@ const resolveInterfaceStyle = (
         "(prefers-color-scheme: dark)",
       ).matches
     ) {
-      return "dark";
+      return "Dark";
     }
   } catch {}
-  return "light";
+  return "Light";
 };
 
-// Enrichment is fire-and-forget with a hard 1s budget and no retries (matches
-// the native SDKs). It must never hold up `configure()`/`register()` readiness:
+// Enrichment is fire-and-forget with a hard 1s budget and no retries. It must
+// never hold up `configure()`/`register()` readiness:
 // on a cold load the enrichment effect is awaited alongside the config fetch,
 // so an unbounded wait here would stall the whole SDK behind a slow server.
 const ENRICHMENT_TIMEOUT = Duration.seconds(1);
@@ -151,15 +198,15 @@ const make = (config: NetworkConfig) =>
       const headers: Record<string, string> = {
         Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json",
-        "X-Platform": "Web",
+        "X-Platform": "web",
         "X-Platform-Environment": "SDK",
-        "X-Platform-Wrapper": "Web",
+        "X-Platform-Wrapper": config.platformWrapper ?? "Web",
         "X-App-User-ID": snap.appUserId,
         "X-Alias-ID": snap.aliasId,
         "X-URL-Scheme": resolveUrlScheme(config),
         "X-Vendor-ID": snap.vendorId,
         "X-App-Version": config.appVersion ?? "",
-        "X-Device-Locale": locale,
+        "X-Device-Locale": toNativeLocale(locale),
         "X-Device-Language-Code": resolveLanguageCode(locale),
         "X-Device-Currency-Code": resolveCurrency(locale),
         "X-Device-Timezone-Offset": String(resolveTimezoneOffsetSeconds()),
@@ -168,8 +215,15 @@ const make = (config: NetworkConfig) =>
         ),
         "X-SDK-Version": SDK_VERSION,
         "X-Bundle-ID": resolveBundleId(config),
-        "X-Is-Sandbox": String(isSandbox(config.environment)),
+        "X-Is-Sandbox": String(safeCall(config.isSandbox, false)),
         "X-Current-Time": new Date().toISOString(),
+        "X-Request-Id": newRequestId(),
+        "X-Static-Config-Build-Id": safeCall(config.staticConfigBuildId, ""),
+        "X-Retry-Count": String(safeCall(config.configRetryCount, 0)),
+        "X-Entitlements": safeCall<ReadonlyArray<string>>(
+          config.activeEntitlementIds,
+          [],
+        ).join(","),
         ...extra,
       };
       return headers;

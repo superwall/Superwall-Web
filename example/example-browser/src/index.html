@@ -297,6 +297,21 @@
       </section>
 
       <section class="panel">
+        <h2>Custom placement</h2>
+        <p style="margin: 0 0 8px; color: var(--muted); font-size: 12px;">
+          Register any placement by name. <b>Trigger</b> uses the SDK's default
+          post-checkout handling; the override button passes
+          <code>handler.onPurchase</code>, which replaces it — the payload is
+          logged and the paywall dismissed by hand.
+        </p>
+        <div class="actions">
+          <input id="placement-input" type="text" placeholder="Placement name" style="padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: inherit; font-size: 13px; flex: 1; min-width: 180px;" />
+          <button data-act="triggerPlacement" class="primary">⚡ Trigger</button>
+          <button data-act="triggerPlacementOverride">⚡ Trigger with onPurchase override</button>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Presentation style overrides</h2>
         <p style="margin: 0 0 8px; color: var(--muted); font-size: 12px;">
           Each button calls <code>register()</code> with a different

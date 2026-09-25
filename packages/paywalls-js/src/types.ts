@@ -343,9 +343,9 @@ export interface PaywallInfo {
    *  styles). Sent to the iframe as a separate `accept64` after the main
    *  templates bundle. */
   paywalljsEvent?: string;
-  /** Dashboard "web checkout destination" flag from config. SDK no longer
-   *  branches on it for URL derivation (every paywall iframes its own
-   *  editor URL), but kept on the type for downstream / analytics use. */
+  /** Dashboard "web checkout destination" flag from config, for downstream /
+   *  analytics use. Every paywall iframes its own editor URL, so the SDK
+   *  doesn't branch on this for URL derivation. */
   webCheckoutDestination?: string;
   /** Per-paywall presentation style from `presentation_style_v3`. The
    *  presenter selects dimensions, position, and animation from this.
@@ -392,8 +392,57 @@ export interface ConfirmedAssignment {
   variant: Variant;
 }
 
+/** Payload of a completed web checkout — what the paywall posts once Stripe
+ *  checkout AND its server-side post-checkout work are done. Handed to
+ *  `handler.onPurchase` (which replaces the SDK's default handling) and
+ *  carried on the purchased `PaywallResult` as `checkout`. */
+export interface CheckoutCompletion {
+  productId: string;
+  checkoutContextId: string;
+  /** `true`: the server already bound the purchase to this device + app user
+   *  id — the SDK's default handling grants the entitlements locally. `false`:
+   *  the server minted codes but didn't claim, and the SDK grants nothing.
+   *  Either way the SDK never redeems the codes below itself, so they're
+   *  still unspent; `sw.redeem(code)` attaches the purchase to the current
+   *  web user if that's what you want (idempotent for the same identity). */
+  claimed: boolean;
+  /** Revenue enrichment. Can be absent on success (e.g. one-time prices). */
+  transaction?: {
+    transactionId: string;
+    productIdentifier: string;
+    /** ISO 4217 currency code (e.g. "USD"). */
+    currency?: string;
+    value?: number;
+  };
+  /** Prefixed (`redemption_…`) codes, fresh and unclaimed. Show them, or pass
+   *  one to `sw.redeem(code)` / the mobile SDK's redeem as-is. Empty when the
+   *  checkout minted none. */
+  redemptionCodes: string[];
+  /** Where the checkout suggests the buyer lands next: the purchase button's
+   *  redirect, else the app-level redirect, else the redemption page when the
+   *  button asked for it. Carries `redemption_code=` + the checkout context
+   *  as query params. The SDK never navigates here — follow it yourself if
+   *  you want it. */
+  redirectUrl?: string;
+  /** Deep links into your mobile app for the buy-on-web, redeem-in-app case —
+   *  hand one to an "Open in app" button. */
+  deepLinks?: { ios?: string; android?: string };
+  /** Signed entitlements JWT for offline server-side verification
+   *  (`@superwall/verify`). Best-effort — absent when the BE didn't sign. */
+  entitlementsToken?: string;
+}
+
 export type PaywallResult =
-  | { type: "purchased"; productId: string; transaction?: StoreTransaction }
+  | {
+      type: "purchased";
+      productId: string;
+      transaction?: StoreTransaction;
+      /** The completed web checkout behind this purchase (codes, redirect,
+       *  deep links, revenue data). Absent for purchases that didn't go
+       *  through the paywall's Stripe checkout (test mode, custom
+       *  `PurchaseController`). */
+      checkout?: CheckoutCompletion;
+    }
   | { type: "declined" }
   | { type: "restored" };
 
@@ -513,6 +562,24 @@ export interface PaywallOptions {
 export interface SuperwallOptions {
   paywalls?: PaywallOptions;
   networkEnvironment?: NetworkEnvironment;
+  /**
+   * Reported as `X-Is-Sandbox`: whether purchases on this surface are not
+   * real money. The backend routes redemptions and transactions to its test
+   * environment when this is true.
+   *
+   * Defaults to whether the SDK is in test mode
+   * (`testModeBehavior: "always"`), which is the only sandbox signal the
+   * browser can observe — unlike native, there's no StoreKit receipt or
+   * debuggable-build flag to read. Set it explicitly when your checkout runs
+   * against Stripe test keys, since that lives server-side and the SDK can't
+   * detect it.
+   */
+  isSandbox?: boolean;
+  /**
+   * Reported as `X-Platform-Wrapper`. Defaults to `"Web"`; wrapper packages
+   * pass their own name (`@superwall/paywalls-react` sends `"React"`).
+   */
+  platformWrapper?: string;
   localeIdentifier?: string;
   logging?: { level?: LogLevel; scopes?: LogScope[] };
   testModeBehavior?: "automatic" | "whenEnabledForUser" | "never" | "always";

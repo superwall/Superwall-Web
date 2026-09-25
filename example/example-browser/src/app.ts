@@ -320,6 +320,18 @@ for (const name of watch) {
 // ---------------------------------------------------------------------------
 
 const lastResult = $<HTMLDivElement>("#last-result");
+const readPlacementInput = (): string | null => {
+  const input = document.getElementById(
+    "placement-input",
+  ) as HTMLInputElement | null;
+  const placement = input?.value.trim();
+  if (!placement) {
+    log("enter a placement name first");
+    return null;
+  }
+  return placement;
+};
+
 const setLastResult = (v: unknown) => {
   lastResult.textContent = fmtPretty(v);
 };
@@ -404,6 +416,49 @@ const handlers: Record<string, () => Promise<void> | void> = {
       placement: "ai_chat",
       feature: () => {
         log("ai_chat feature ran! super pro unlocked");
+      },
+    });
+    setLastResult(
+      result.type === "error"
+        ? { type: "error", error: result.error.name + ": " + result.error.message }
+        : result,
+    );
+  },
+
+  // Custom placement: register whatever is typed into the input.
+  triggerPlacement: async () => {
+    const placement = readPlacementInput();
+    if (!placement) return;
+    const result = await sw.register({
+      placement,
+      feature: () => log(`${placement} feature ran!`),
+    });
+    setLastResult(
+      result.type === "error"
+        ? { type: "error", error: result.error.name + ": " + result.error.message }
+        : result,
+    );
+  },
+  // Same, but `handler.onPurchase` replaces the SDK's default post-checkout
+  // handling: nothing is granted, and closing the paywall is on us. The
+  // buy-on-web, redeem-in-app shape.
+  triggerPlacementOverride: async () => {
+    const placement = readPlacementInput();
+    if (!placement) return;
+    const result = await sw.register({
+      placement,
+      handler: {
+        onPurchase: (_info, checkout) => {
+          log(
+            `${placement} onPurchase override — claimed:`,
+            checkout.claimed,
+            "| codes:",
+            checkout.redemptionCodes,
+            "| deep links:",
+            checkout.deepLinks ?? "(none)",
+          );
+          sw.dismiss();
+        },
       },
     });
     setLastResult(
@@ -499,6 +554,19 @@ document.querySelectorAll<HTMLButtonElement>("button[data-act]").forEach((btn) =
     { signal: ac.signal },
   );
 });
+
+// Enter in the placement input = click Trigger.
+document.getElementById("placement-input")?.addEventListener(
+  "keydown",
+  (e) => {
+    if ((e as KeyboardEvent).key === "Enter") {
+      document
+        .querySelector<HTMLButtonElement>('button[data-act="triggerPlacement"]')
+        ?.click();
+    }
+  },
+  { signal: ac.signal },
+);
 
 // ---------------------------------------------------------------------------
 // Boot

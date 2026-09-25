@@ -60,9 +60,13 @@ it("LOCAL_ONLY contains the documented local-only events", () => {
   expect(LOCAL_ONLY.has("paywallWillOpenURL")).toBe(true);
   expect(LOCAL_ONLY.has("paywallWillOpenDeepLink")).toBe(true);
   expect(LOCAL_ONLY.has("customPaywallAction")).toBe(true);
+  // Codes are sensitive + already recorded server-side, so never wire-bound.
+  expect(LOCAL_ONLY.has("redemptionCodesReceived")).toBe(true);
+  // Same for the full checkout payload (codes + the entitlements token).
+  expect(LOCAL_ONLY.has("checkoutCompleted")).toBe(true);
   expect(LOCAL_ONLY.has("paywall_open")).toBe(false);
   // Wire-bound (POST to the collector for analytics), so NOT local-only.
   expect(LOCAL_ONLY.has("discount_redeem_complete")).toBe(false);
   expect(LOCAL_ONLY.has("discount_redeem_fail")).toBe(false);
-  expect(LOCAL_ONLY.size).toBe(3);
+  expect(LOCAL_ONLY.size).toBe(5);
 });

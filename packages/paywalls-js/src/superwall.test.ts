@@ -58,7 +58,10 @@ const EMPTY_STATIC_CONFIG = JSON.stringify({
 // Default fetch for tests that don't exercise the network: returns a valid
 // empty static_config so configure() flips to "configured", and 204 for
 // everything else.
-import { buildInitPayload, resolvePaywallWorkerHost } from "./superwall.ts";
+import {
+  buildInitPayload,
+  resolvePaywallWorkerHost,
+} from "./superwall.ts";
 
 it("resolvePaywallWorkerHost maps each environment to its worker zone", () => {
   expect(resolvePaywallWorkerHost("release")).toBe("web-api.superwall.app");
@@ -197,6 +200,49 @@ it("buildInitPayload includes all controller-required slices + resolveVariables:
     "aliasId",
   );
   expect(cc["products"]).toEqual({});
+});
+
+it("buildInitPayload falls back to the slug for paywallId when the config has no database id", () => {
+  const payload = buildInitPayload({
+    info: {
+      identifier: "pw_legacy",
+      name: "Legacy",
+      url: "https://user-content.test/runtime/y",
+      productIds: [],
+      products: [],
+      productsV2: [],
+    },
+    placement: "checkout",
+    params: {} as PlacementParams,
+    decision: {
+      kind: "paywall",
+      experiment: {
+        id: "exp_1",
+        groupId: "grp_1",
+        variant: { id: "var_1", type: "treatment", paywallId: "pw_legacy" },
+      },
+    },
+    application: undefined,
+    bootstrap: {
+      apiKey: "pk_test",
+      sdkVersion: "1.0.0",
+      collector: "https://collector.superwall.com",
+      apiBase: "https://api.superwall.me",
+      clientSurface: "web-sdk",
+    },
+    aliasId: "$SuperwallAlias:abc",
+    appUserId: undefined,
+    deviceId: "11111111-1111-1111-1111-111111111111",
+    vendorId: "11111111-1111-1111-1111-111111111111",
+    email: undefined,
+    userAttributes: {},
+    deviceAttributes: {},
+  });
+  const c = payload["collector"] as Record<string, unknown>;
+  expect(c["paywallSlice"]).toMatchObject({
+    $paywall_id: "pw_legacy",
+    $paywall_identifier: "pw_legacy",
+  });
 });
 
 const noopFetch = ((input: RequestInfo | URL) => {
@@ -946,7 +992,12 @@ import type {
   PresentationContext,
 } from "./presenter.ts";
 import { PaywallAlreadyPresentedError, PresenterError } from "./errors.ts";
-import type { PaywallInfo, PaywallResult, PaywallSkippedReason } from "./types.ts";
+import type {
+  CheckoutCompletion,
+  PaywallInfo,
+  PaywallResult,
+  PaywallSkippedReason,
+} from "./types.ts";
 
 const presenterThatResolves = (
   result: PaywallResult,
@@ -3231,5 +3282,500 @@ it("default iframe presenter: the iframe's device_attributes carry the vendor / 
   expect(init.collector.deviceAttributes["$deviceId"]).not.toBe("");
   sw.dismiss();
   await reg;
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// public redeem() — redemption codes from a completed web checkout
+// ---------------------------------------------------------------------------
+
+it("sw.redeem() POSTs the code, resolves success, flips subscription status, and fires onDidRedeemLink", async () => {
+  const posted: Array<Record<string, unknown>> = [];
+  const redeemFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    }
+    if (url.includes("/subscriptions-api/public/v1/redeem")) {
+      posted.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            codes: [{ code: "redemption_abc", status: "SUCCESS" }],
+            customerInfo: {
+              entitlements: [
+                { id: "pro", isActive: true, productIds: ["pro_yearly"] },
+              ],
+            },
+          }),
+        ),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  const didRedeem: unknown[] = [];
+  const sw = make({
+    fetch: redeemFetch,
+    delegate: { onDidRedeemLink: (r) => didRedeem.push(r) },
+  });
+  await sw.ready;
+
+  const result = await sw.redeem("redemption_abc");
+  expect(result).toEqual({
+    type: "success",
+    code: "redemption_abc",
+    entitlements: [
+      { id: "pro", type: "SERVICE_LEVEL", isActive: true, productIds: ["pro_yearly"] },
+    ],
+  });
+  // The POST carries the code with first-redemption bookkeeping.
+  expect(posted[0]?.codes).toEqual([
+    { code: "redemption_abc", firstRedemption: true },
+  ]);
+  // Success with entitlements flips subscription status through the public
+  // setter (mirrors the automatic ?code= path).
+  await pollValue(() =>
+    sw.subscriptionStatus.value.status === "ACTIVE"
+      ? sw.subscriptionStatus.value
+      : null,
+  );
+  await pollValue(() => (didRedeem.length > 0 ? didRedeem : null));
+  expect(didRedeem[0]).toMatchObject({ type: "success", code: "redemption_abc" });
+  await sw.dispose();
+});
+
+it("sw.redeem() resolves { type: 'invalid' } for an INVALID code and leaves status alone", async () => {
+  const invalidFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    }
+    if (url.includes("/subscriptions-api/public/v1/redeem")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            codes: [{ code: "redemption_bad", status: "INVALID" }],
+            customerInfo: { entitlements: [] },
+          }),
+        ),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  const sw = make({ fetch: invalidFetch });
+  await sw.ready;
+  const result = await sw.redeem("redemption_bad");
+  expect(result).toEqual({ type: "invalid", code: "redemption_bad" });
+  expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// post_checkout_complete — default handling vs. handler.onPurchase override
+// ---------------------------------------------------------------------------
+
+/** Stub honoring the browser presenter's `ownsCheckoutTeardown` contract:
+ *  `complete()` forwards the postCheckout event and stays up; the next
+ *  `dismiss()` / abort resolves `purchased` (or `declined` if none landed). */
+const checkoutPresenter = () => {
+  let ctx: PresentationContext | null = null;
+  let resolve: ((r: PaywallResult) => void) | null = null;
+  let completed: PaywallResult | null = null;
+  const rig = {
+    dismissCalls: 0,
+    presenter: {
+      present: (_info, c) =>
+        new Promise<PaywallResult>((r) => {
+          ctx = c;
+          resolve = r;
+          c.signal.addEventListener("abort", () =>
+            r(completed ?? { type: "declined" }),
+          );
+        }),
+      dismiss: () => {
+        rig.dismissCalls++;
+        resolve?.(completed ?? { type: "declined" });
+      },
+    } as PaywallPresenter,
+    complete: (checkout: CheckoutCompletion, info = { identifier: "pw_default" }) => {
+      completed = { type: "purchased", productId: checkout.productId, checkout };
+      ctx!.emit("checkoutCompleted", { checkout, paywallInfo: info as PaywallInfo });
+      ctx!.onPurchaseEvent?.({
+        type: "postCheckout",
+        productId: checkout.productId,
+        checkout,
+      });
+    },
+    ownsTeardown: () => ctx?.ownsCheckoutTeardown,
+  };
+  return rig;
+};
+
+/** `makeWithPaywall`'s config + a recording redeem endpoint. */
+const checkoutFetch = (redeemPosts: Array<Record<string, unknown>>) =>
+  ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(JSON.stringify(CHECKOUT_STATIC_CONFIG)));
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(new Response(JSON.stringify({ user: {}, device: {} })));
+    }
+    if (url.includes("/subscriptions-api/public/v1/redeem")) {
+      const body = JSON.parse(String(init?.body)) as {
+        codes: Array<{ code: string }>;
+      };
+      redeemPosts.push(body);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            codes: body.codes.map((c) => ({ code: c.code, status: "SUCCESS" })),
+            customerInfo: {
+              entitlements: [
+                { id: "pro", isActive: true, productIds: ["pro_yearly"] },
+              ],
+            },
+          }),
+        ),
+      );
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+/** Record any attempt to navigate (same tab or new) — the SDK must never
+ *  follow `redirectUrl` on its own. */
+const recordNavigation = () => {
+  const assigns: string[] = [];
+  const opens: string[] = [];
+  const originalAssign = location.assign.bind(location);
+  const originalOpen = globalThis.open;
+  (location as { assign: (url: string) => void }).assign = (url: string) => {
+    assigns.push(String(url));
+  };
+  (globalThis as { open?: unknown }).open = (url: string) => {
+    opens.push(String(url));
+    return null;
+  };
+  return {
+    assigns,
+    opens,
+    restore: () => {
+      (location as { assign: (url: string) => void }).assign = originalAssign;
+      (globalThis as { open?: unknown }).open = originalOpen;
+    },
+  };
+};
+
+it("default post-checkout, claimed: applies token + flips ACTIVE, leaves the codes unspent, closes the paywall — and never navigates to redirectUrl", async () => {
+  const redeemPosts: Array<Record<string, unknown>> = [];
+  const rig = checkoutPresenter();
+  const nav = recordNavigation();
+  try {
+    const logged: CheckoutCompletion[] = [];
+    const sw = makeWithPaywall({
+      presenter: rig.presenter,
+      fetch: checkoutFetch(redeemPosts),
+      delegate: { onCheckoutCompleted: (c) => logged.push(c) },
+    });
+    await sw.ready;
+    const willOpen: string[] = [];
+    sw.events.addEventListener("paywallWillOpenURL", (e) => willOpen.push(e.detail.url));
+    let dismissed: PaywallResult | null = null;
+    const reg = sw.register({
+      placement: "checkout",
+      handler: { onDismiss: (_info, result) => (dismissed = result) },
+    });
+    await pollValue(() => sw.activePaywall.value);
+    // The SDK tells the presenter it owns teardown — the paywall no longer
+    // posts `close` after a purchase.
+    expect(rig.ownsTeardown()).toBe(true);
+
+    const checkout: CheckoutCompletion = {
+      productId: "pro_yearly",
+      checkoutContextId: "ckctx_claimed",
+      claimed: true,
+      redemptionCodes: ["redemption_for_the_phone"],
+      redirectUrl: "https://merchant.test/thanks?redemption_code=redemption_for_the_phone",
+      entitlementsToken: "jwt.token.sig",
+      transaction: { transactionId: "txn_1", productIdentifier: "pro_yearly" },
+    };
+    rig.complete(checkout);
+    // Granted + torn down synchronously, inside the completion message.
+    expect(rig.dismissCalls).toBe(1);
+    expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+
+    const r = await reg;
+    expect(r.type).toBe("presented");
+    if (r.type === "presented") {
+      // The purchase callback (`onDismiss` / register()'s result) carries
+      // transaction data + everything else on `checkout`.
+      expect(r.result).toEqual({
+        type: "purchased",
+        productId: "pro_yearly",
+        checkout,
+      });
+    }
+    expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+    expect(sw.entitlementsToken.value).toBe("jwt.token.sig");
+    // Redeeming here would spend a code the buyer could use on their phone.
+    expect(redeemPosts).toEqual([]);
+    // The logging delegate saw the payload.
+    await pollValue(() => (logged.length > 0 ? logged : null));
+    expect(logged).toEqual([checkout]);
+
+    // redirectUrl reaches the developer on the payload; the SDK itself never
+    // navigates, in this tab or a new one, and doesn't announce a URL open.
+    expect(dismissed).toEqual({ type: "purchased", productId: "pro_yearly", checkout });
+    await new Promise((res) => setTimeout(res, 10));
+    expect(nav.assigns).toEqual([]);
+    expect(nav.opens).toEqual([]);
+    expect(willOpen).toEqual([]);
+    await sw.dispose();
+  } finally {
+    nav.restore();
+  }
+});
+
+it("default post-checkout, unclaimed: never redeems the codes — grants nothing, just closes the paywall and hands the codes over", async () => {
+  const redeemPosts: Array<Record<string, unknown>> = [];
+  const willRedeem: number[] = [];
+  const rig = checkoutPresenter();
+  const sw = makeWithPaywall({
+    presenter: rig.presenter,
+    fetch: checkoutFetch(redeemPosts),
+    delegate: { onWillRedeemLink: () => willRedeem.push(1) },
+  });
+  await sw.ready;
+  let featureRan = false;
+  const reg = sw.register({
+    placement: "checkout",
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  await pollValue(() => sw.activePaywall.value);
+
+  const checkout: CheckoutCompletion = {
+    productId: "pro_yearly",
+    checkoutContextId: "ckctx_unclaimed",
+    claimed: false,
+    redemptionCodes: ["redemption_abc"],
+  };
+  rig.complete(checkout);
+  // Torn down synchronously — nothing to wait on.
+  expect(rig.dismissCalls).toBe(1);
+
+  const r = await reg;
+  expect(r.type === "presented" && r.result).toEqual({
+    type: "purchased",
+    productId: "pro_yearly",
+    checkout,
+  });
+  expect(featureRan).toBe(true);
+  await new Promise((res) => setTimeout(res, 10));
+  // The codes stay unspent: no redeem POST, no redeem-link delegate calls.
+  expect(redeemPosts).toEqual([]);
+  expect(willRedeem).toEqual([]);
+  // Not claimed for this user → the SDK grants nothing locally.
+  expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
+  await sw.dispose();
+});
+
+it("handler.onPurchase replaces the default entirely: no entitlements, no redeem, no teardown — until the developer calls sw.dismiss()", async () => {
+  const redeemPosts: Array<Record<string, unknown>> = [];
+  const rig = checkoutPresenter();
+  const nav = recordNavigation();
+  try {
+    const sw = makeWithPaywall({
+      presenter: rig.presenter,
+      fetch: checkoutFetch(redeemPosts),
+    });
+    await sw.ready;
+    const purchases: Array<{ info: PaywallInfo; checkout: CheckoutCompletion }> = [];
+    const logged: CheckoutCompletion[] = [];
+    sw.setDelegate({ onCheckoutCompleted: (c) => logged.push(c) });
+    let settled = false;
+    const reg = sw
+      .register({
+        placement: "checkout",
+        handler: {
+          onPurchase: (info, checkout) => {
+            purchases.push({ info, checkout });
+          },
+        },
+      })
+      .then((r) => {
+        settled = true;
+        return r;
+      });
+    await pollValue(() => sw.activePaywall.value);
+
+    const checkout: CheckoutCompletion = {
+      productId: "pro_yearly",
+      checkoutContextId: "ckctx_override",
+      claimed: false,
+      redemptionCodes: ["redemption_open_in_app"],
+      redirectUrl: "https://merchant.test/thanks",
+      deepLinks: { ios: "myapp://redeem", android: "myapp://redeem" },
+      entitlementsToken: "jwt.token.sig",
+    };
+    rig.complete(checkout);
+    await new Promise((res) => setTimeout(res, 10));
+
+    expect(purchases).toHaveLength(1);
+    expect(purchases[0]!.info.identifier).toBe("pw_default");
+    expect(purchases[0]!.checkout).toEqual(checkout);
+    // The logging delegate is notification-only — it fires alongside an
+    // override too, and doesn't count as one.
+    expect(logged).toEqual([checkout]);
+    // The SDK did none of the default…
+    expect(redeemPosts).toEqual([]);
+    expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
+    expect(sw.entitlementsToken.value).toBeNull();
+    expect(rig.dismissCalls).toBe(0);
+    expect(settled).toBe(false);
+    expect(sw.isPaywallPresented.value).toBe(true);
+
+    // …and the developer's own dismiss resolves the purchase, not a decline.
+    sw.dismiss();
+    const r = await reg;
+    expect(r.type === "presented" && r.result).toEqual({
+      type: "purchased",
+      productId: "pro_yearly",
+      checkout,
+    });
+    await new Promise((res) => setTimeout(res, 5));
+    expect(nav.assigns).toEqual([]);
+    await sw.dispose();
+  } finally {
+    nav.restore();
+  }
+});
+
+it("a throwing / rejecting onPurchase is contained and the paywall stays dismissable", async () => {
+  const rig = checkoutPresenter();
+  const sw = makeWithPaywall({ presenter: rig.presenter });
+  await sw.ready;
+  const reg = sw.register({
+    placement: "checkout",
+    handler: {
+      onPurchase: async () => {
+        throw new Error("boom");
+      },
+    },
+  });
+  await pollValue(() => sw.activePaywall.value);
+  rig.complete({
+    productId: "pro_yearly",
+    checkoutContextId: "ckctx_throw",
+    claimed: true,
+    redemptionCodes: [],
+  });
+  await new Promise((res) => setTimeout(res, 5));
+  sw.dismiss();
+  const r = await reg;
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  await sw.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// post_checkout_complete — REAL browser presenter wired to the REAL SDK.
+// The stub above can't catch ordering bugs between the two; these post actual
+// MessageEvents from the iframe.
+// ---------------------------------------------------------------------------
+
+const paywallIframe = (): HTMLIFrameElement | null =>
+  document.querySelector('iframe[data-sw-presenter="iframe"]');
+
+const postFromPaywall = (data: Record<string, unknown>): void => {
+  const iframe = paywallIframe()!;
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data,
+      origin: new URL(iframe.src).origin,
+      source: iframe.contentWindow,
+    } as MessageEventInit),
+  );
+};
+
+const CLAIMED_CHECKOUT_MESSAGE = {
+  event_name: "post_checkout_complete",
+  checkout_context_id: "ckctx_real",
+  product_identifier: "pro_yearly",
+  status: "completed",
+  claimed: true,
+};
+
+it("real presenter: sw.dismiss() called synchronously inside onPurchase resolves purchased, not declined", async () => {
+  // No `presenter` → the default browser presenter.
+  const sw = makeWithPaywall();
+  await sw.ready;
+  const declines: unknown[] = [];
+  sw.events.addEventListener("paywall_decline", (e) => declines.push(e.detail));
+  let dismissed: PaywallResult | null = null;
+  let featureRan = false;
+  const reg = sw.register({
+    placement: "checkout",
+    handler: {
+      // The documented usage: the paywall is inert, so close it right away.
+      onPurchase: () => sw.dismiss(),
+      onDismiss: (_info, result) => (dismissed = result),
+    },
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  await pollValue(() => paywallIframe());
+
+  postFromPaywall(CLAIMED_CHECKOUT_MESSAGE);
+  const r = await reg;
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  expect(dismissed).toMatchObject({ type: "purchased", productId: "pro_yearly" });
+  expect(featureRan).toBe(true);
+  expect(declines).toEqual([]);
+  expect(paywallIframe()).toBeNull();
+  // Override ⇒ the SDK granted nothing.
+  expect(sw.subscriptionStatus.value.status).not.toBe("ACTIVE");
+  await sw.dispose();
+});
+
+it("real presenter: sw.dismiss() from a checkoutCompleted listener resolves purchased, and the default handling still grants", async () => {
+  const sw = makeWithPaywall();
+  await sw.ready;
+  sw.events.addEventListener("checkoutCompleted", () => sw.dismiss());
+  const declines: unknown[] = [];
+  sw.events.addEventListener("paywall_decline", (e) => declines.push(e.detail));
+  let featureRan = false;
+  const reg = sw.register({
+    placement: "checkout",
+    feature: () => {
+      featureRan = true;
+    },
+  });
+  await pollValue(() => paywallIframe());
+
+  postFromPaywall(CLAIMED_CHECKOUT_MESSAGE);
+  const r = await reg;
+  // Result and entitlement state agree: purchased AND active.
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  expect(featureRan).toBe(true);
+  expect(declines).toEqual([]);
+  await sw.dispose();
+});
+
+it("real presenter: default handling closes the overlay itself on post_checkout_complete — no `close` from the paywall needed", async () => {
+  const sw = makeWithPaywall();
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  await pollValue(() => paywallIframe());
+
+  postFromPaywall(CLAIMED_CHECKOUT_MESSAGE);
+  // Torn down within the message itself.
+  expect(paywallIframe()).toBeNull();
+  const r = await reg;
+  expect(r.type === "presented" && r.result.type).toBe("purchased");
+  expect(sw.subscriptionStatus.value.status).toBe("ACTIVE");
+  expect(sw.isPaywallPresented.value).toBe(false);
   await sw.dispose();
 });
