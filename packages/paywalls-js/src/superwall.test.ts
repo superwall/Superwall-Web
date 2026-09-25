@@ -504,6 +504,41 @@ it("signOut clears the userId but keeps the alias", async () => {
   await sw.dispose();
 });
 
+it("identify() as a different signed-in user resets first, so the new user gets a fresh alias", async () => {
+  const adapter = newAdapter();
+  const sw = make({ storage: adapter });
+  await sw.ready;
+  await sw.user.identify("user_a");
+  await tick();
+  const aliasOfA = sw.user.aliasId.value;
+  const vendorOfA = await adapter.get("superwall.vendorId");
+
+  // The same user again keeps the alias.
+  await sw.user.identify("user_a");
+  await tick();
+  expect(sw.user.aliasId.value).toBe(aliasOfA);
+
+  // Account switch: the mobile SDKs reset before identifying.
+  await sw.user.identify("user_b");
+  await tick();
+  expect(sw.user.id.value).toBe("user_b");
+  expect(sw.user.aliasId.value).toMatch(/^\$SuperwallAlias:/);
+  expect(sw.user.aliasId.value).not.toBe(aliasOfA);
+  expect(await adapter.get("superwall.aliasId")).toBe(sw.user.aliasId.value);
+  expect(await adapter.get("superwall.vendorId")).not.toBe(vendorOfA);
+  await sw.dispose();
+});
+
+it("identify() after anonymous use keeps the alias the visitor already had", async () => {
+  const sw = make();
+  await sw.ready;
+  const anonymousAlias = sw.user.aliasId.value;
+  await sw.user.identify("user_a");
+  await tick();
+  expect(sw.user.aliasId.value).toBe(anonymousAlias);
+  await sw.dispose();
+});
+
 it("identify() triggers a background /entitlements refresh when the user ID changes", async () => {
   let entitlementsCalls = 0;
   const entFetch = ((input: RequestInfo | URL) => {

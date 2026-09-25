@@ -3,6 +3,12 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## Unreleased
+
+### Fixed
+
+- `identify()` with a different user while someone is already identified now resets first — fresh alias, vendor and device ids, subscription status, entitlements, attributes and assignments — exactly as the mobile SDKs do (iOS `reset(duringIdentify:)`). It used to keep the previous user's alias, and since subscriptions resolve through aliases, the next account signed in on a shared browser inherited the last one's subscription. Anonymous → identified still keeps the visitor's alias, and identifying the same user again changes nothing
+
 ## 0.3.0 — 2026-09-25
 
 ### Added

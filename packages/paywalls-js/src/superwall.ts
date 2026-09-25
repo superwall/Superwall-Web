@@ -1540,6 +1540,50 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     );
   };
 
+  /** Everything `sw.reset()` wipes: a fresh alias, vendor and device, and
+   *  every per-user signal and stored value. `identify()` runs it first
+   *  when a signed-in user becomes another one, as the mobile SDKs do
+   *  (iOS `IdentityManager.identify` → `reset(duringIdentify:)`), so the
+   *  new user never inherits the last one's alias, and with it their
+   *  subscription, attribution and assignments. */
+  const resetState = () =>
+    Effect.gen(function* () {
+      yield* IdentityService.beginPending(IdentityPending.Reset);
+      yield* IdentityService.reset();
+      subStatusSig.set({ status: "UNKNOWN" });
+      customerSig.set(null);
+      entitlementsTokenSig.set(null);
+      entitlementsByProductIdSig.set(new Map());
+      // firstSeenAt persists across reset (install-date semantics).
+      totalPaywallViewsSig.set(0);
+      lastPaywallViewAtSig.set(null);
+      latestPaywallSig.set(null);
+      presentedSig.set(false);
+      attrsSig.set({} as UserAttributes);
+      intAttrsSig.set({});
+      lastRestoreAtSig.set(null);
+      const assignments = yield* AssignmentService;
+      yield* assignments.reset();
+      const storage = yield* StorageService;
+      yield* storage.remove(asStorageKey(STORAGE_KEYS.lastRestoreAt));
+      yield* storage.remove(
+        asStorageKey(STORAGE_KEYS.totalPaywallViews),
+      );
+      yield* storage.remove(
+        asStorageKey(STORAGE_KEYS.lastPaywallViewAt),
+      );
+      // Clear cached sub status so a stale ACTIVE doesn't re-hydrate on
+      // the next configure() (reset just flipped it to UNKNOWN).
+      yield* storage.remove(
+        asStorageKey(STORAGE_KEYS.subscriptionStatus),
+      );
+      const computed = yield* ComputedProperties;
+      yield* computed.reset();
+      const bus = yield* EventBus;
+      yield* bus.publish("reset", {});
+      yield* IdentityService.endPending(IdentityPending.Reset);
+    });
+
   const user: UserNamespace = {
     id: asReadable(idSig),
     aliasId: asReadable(aliasSig),
@@ -1555,7 +1599,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           // whether the user actually changed (empty = anonymous).
           const prevAppUserId = idSig.value;
           if (prevAppUserId !== "" && userId !== prevAppUserId) {
-            attrsSig.set({} as UserAttributes);
+            yield* resetState();
           }
 
           // Pending bracket — register() blocks on phase=Ready until both
@@ -3066,42 +3110,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
 
     reset: async () => {
       await runPublic(
-        Effect.gen(function* () {
-          yield* IdentityService.beginPending(IdentityPending.Reset);
-          yield* IdentityService.reset();
-          subStatusSig.set({ status: "UNKNOWN" });
-          customerSig.set(null);
-          entitlementsTokenSig.set(null);
-          entitlementsByProductIdSig.set(new Map());
-          // firstSeenAt persists across reset (install-date semantics).
-          totalPaywallViewsSig.set(0);
-          lastPaywallViewAtSig.set(null);
-          latestPaywallSig.set(null);
-          presentedSig.set(false);
-          attrsSig.set({} as UserAttributes);
-          intAttrsSig.set({});
-          lastRestoreAtSig.set(null);
-          const assignments = yield* AssignmentService;
-          yield* assignments.reset();
-          const storage = yield* StorageService;
-          yield* storage.remove(asStorageKey(STORAGE_KEYS.lastRestoreAt));
-          yield* storage.remove(
-            asStorageKey(STORAGE_KEYS.totalPaywallViews),
-          );
-          yield* storage.remove(
-            asStorageKey(STORAGE_KEYS.lastPaywallViewAt),
-          );
-          // Clear cached sub status so a stale ACTIVE doesn't re-hydrate on
-          // the next configure() (reset just flipped it to UNKNOWN).
-          yield* storage.remove(
-            asStorageKey(STORAGE_KEYS.subscriptionStatus),
-          );
-          const computed = yield* ComputedProperties;
-          yield* computed.reset();
-          const bus = yield* EventBus;
-          yield* bus.publish("reset", {});
-          yield* IdentityService.endPending(IdentityPending.Reset);
-        }),
+        resetState(),
       );
       // Identity changed → re-run the post-configure entitlements check for
       // the new (anonymous) identity. Reset left status at UNKNOWN; this
