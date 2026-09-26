@@ -2629,6 +2629,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
    *  On success updates the signed-token + customerInfo signals and returns
    *  the parsed set; on failure returns `null` leaving prior state intact. */
   const refreshWebEntitlements = async (): Promise<Entitlement[] | null> => {
+    // An answer for a user who is no longer the effective one (a read
+    // started before `reset()` / `identify()` landing after it) must not
+    // overwrite the new user's state: that is how the next account on a
+    // browser read as subscribed and skipped its paywall.
+    const requestedFor = effectiveSig.value;
     const res = await runtime
       .runPromise(
         Effect.gen(function* () {
@@ -2637,7 +2642,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }),
       )
       .catch(() => null);
-    if (!res) return null;
+    if (!res || effectiveSig.value !== requestedFor) return null;
     // Surface the signed token to the host (best-effort). Only set when the
     // read succeeded — a null `res` above leaves the prior token intact.
     if (res.entitlementsToken !== undefined) {
