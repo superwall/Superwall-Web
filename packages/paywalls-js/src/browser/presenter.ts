@@ -14,6 +14,7 @@ import type {
   PresentationContext,
 } from "../presenter.ts";
 import type { JsonValue } from "../types.ts";
+import { createPaywallHost, type HostMessage, type PaywallHost } from "./host/index.ts";
 import {
   asProductIdentifier,
   asTransactionId,
@@ -196,6 +197,16 @@ interface ActivePresentation {
   /** `onPosted` callback paired with `pendingDiscountCode`, fired when the
    *  queued code is actually written to the iframe on flush. */
   pendingDiscountOnPosted: (() => void) | null;
+  /** Set when a framework paywall's `ping` asks for a host
+   *  (`host_controlled`): the SDK then does what the web paywall app's
+   *  controller does for a paywall.js paywall — priced templates, lifecycle
+   *  events, the post-checkout lookup. `null` for paywall.js paywalls, whose
+   *  controller does all three itself. */
+  host: PaywallHost | null;
+  /** Lifecycle messages that arrived before the paywall's `ping` said
+   *  whether it wants a host (a framework paywall reports its entry
+   *  `page_view` first); replayed to the host once it exists, else dropped. */
+  earlyHostMessages: HostMessage[];
 }
 
 const resolveContainer = (
@@ -626,6 +637,8 @@ const mount = (
     ready: false,
     pendingDiscountCode: null,
     pendingDiscountOnPosted: null,
+    host: null,
+    earlyHostMessages: [],
   };
   slot.a = a;
   return a;
@@ -799,6 +812,19 @@ const handleInbound = (
       case "ping":
       case "template_params_and_user_attributes": {
         sendTemplates(info, ctx, active);
+        if (evt["host_controlled"] === true && !active.host && ctx.initPayload) {
+          active.host = createPaywallHost({
+            initPayload: ctx.initPayload,
+            apiKey: ctx.bootstrap?.apiKey ?? "",
+            ...(ctx.bootstrap?.sdkVersion ? { sdkVersion: ctx.bootstrap.sdkVersion } : {}),
+            ...(ctx.user ? { user: ctx.user } : {}),
+            ...(ctx.device ? { device: ctx.device } : {}),
+            params: ctx.params as Record<string, unknown>,
+            send: (messages) => postAccept64(active, messages),
+          });
+        }
+        active.host?.open();
+        for (const early of active.earlyHostMessages.splice(0)) active.host?.observe(early);
         // The iframe is now mounted + ready for host commands. Flush any
         // discount redeem queued before this point (latest wins).
         active.ready = true;
@@ -813,7 +839,9 @@ const handleInbound = (
         break;
       }
       case "close": {
-        // The iframe controller sends `paywall_close` before posting this.
+        // The iframe controller sends `paywall_close` before posting this;
+        // for a hosted framework paywall the host does.
+        active.host?.observe(evt as HostMessage);
         ctx.onPaywallTrackedClose?.();
         cleanup();
         resolve(active.completed ?? { type: "declined" });
@@ -856,7 +884,14 @@ const handleInbound = (
       // start / abandon / fail even in the iframe-driven register() flow.
       // (`complete` is in-flight only; the terminal success event is emitted
       // from post_checkout_complete.)
+      case "stripe_checkout_prefetch":
+      case "page_view": {
+        if (active.host) active.host.observe(evt as HostMessage);
+        else if (!active.ready) active.earlyHostMessages.push(evt as HostMessage);
+        break;
+      }
       case "stripe_checkout_start": {
+        active.host?.observe(evt as HostMessage);
         const productId = readProductId(evt);
         ctx.onPurchaseEvent?.({ type: "start", productId: String(productId) });
         // Collector event comes from the iframe (or the server for
@@ -872,11 +907,20 @@ const handleInbound = (
         break;
       }
       case "stripe_checkout_submit": {
+        active.host?.observe(evt as HostMessage);
         const productId = readProductId(evt);
         ctx.onPurchaseEvent?.({ type: "submit", productId: String(productId) });
         break;
       }
       case "stripe_checkout_complete": {
+        if (active.host) {
+          // The controller's step: look the checkout up and hand the SDK its
+          // own `post_checkout_complete` (or `stripe_checkout_fail`).
+          active.host.observe(evt as HostMessage);
+          void active.host
+            .completeCheckout(evt as HostMessage)
+            .then((message) => handleInbound(message, info, ctx, options, resolve, cleanup, active));
+        }
         const productId = readProductId(evt);
         const sessionId = readString(evt, "session_id") ?? readString(evt, "checkout_session_id");
         const entitlements = readEntitlements(evt);
@@ -889,6 +933,7 @@ const handleInbound = (
         break;
       }
       case "stripe_checkout_fail": {
+        active.host?.observe(evt as HostMessage);
         const productId = readProductId(evt);
         const error = readString(evt, "error") ?? readString(evt, "message");
         ctx.onPurchaseEvent?.({
@@ -903,6 +948,7 @@ const handleInbound = (
         break;
       }
       case "stripe_checkout_abandon": {
+        active.host?.observe(evt as HostMessage);
         const productId = readProductId(evt);
         ctx.onPurchaseEvent?.({ type: "abandon", productId: String(productId) });
         // The iframe sends `transaction_abandon` itself — local listeners only.
@@ -1032,6 +1078,7 @@ const handleInbound = (
         break;
       }
       case "user_attribute_updated": {
+        active.host?.observe(evt as HostMessage);
         const raw = evt["attributes"];
         if (!Array.isArray(raw)) break;
         const attributes: Record<string, JsonValue> = {};

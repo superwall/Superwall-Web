@@ -909,6 +909,43 @@ it("refreshCustomerInfo() resolves with the prior snapshot when the read fails",
   await sw.dispose();
 });
 
+it("drops an entitlements answer for the user the SDK has since switched away from", async () => {
+  const held: Array<() => void> = [];
+  const racingFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config"))
+      return Promise.resolve(new Response(EMPTY_STATIC_CONFIG));
+    if (url.includes("/entitlements")) {
+      const forNewUser = url.includes("/users/user_b/");
+      const body = JSON.stringify({
+        customerInfo: {
+          entitlements: forNewUser ? [] : [{ identifier: "pro", isActive: true }],
+        },
+      });
+      if (forNewUser) return Promise.resolve(new Response(body));
+      return new Promise<Response>((resolve) => held.push(() => resolve(new Response(body))));
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+
+  const sw = make({ fetch: racingFetch });
+  await sw.ready;
+  await waitFor(() => held.length > 0);
+
+  await sw.user.identify("user_b");
+  await waitFor(() => sw.subscriptionStatus.value.status === "INACTIVE");
+
+  const released = held.length;
+  for (const release of held) release();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  expect(released).toBeGreaterThan(0);
+  expect(sw.subscriptionStatus.value.status).toBe("INACTIVE");
+  expect(sw.customerInfo.value?.userId).toBe("user_b");
+  expect(sw.customerInfo.value?.entitlements).toEqual([]);
+  await sw.dispose();
+});
+
 it("onCustomerInfoChange fires on a change between two non-null snapshots", async () => {
   let active = false;
   const changes: Array<[string[], string[]]> = [];
