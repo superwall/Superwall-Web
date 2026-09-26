@@ -14,7 +14,7 @@ import type {
   PresentationContext,
 } from "../presenter.ts";
 import type { JsonValue } from "../types.ts";
-import { createPaywallHost, type HostMessage, type PaywallHost } from "./host.ts";
+import { createPaywallHost, type HostMessage, type PaywallHost } from "./host/index.ts";
 import {
   asProductIdentifier,
   asTransactionId,
