@@ -268,7 +268,10 @@ export interface PlacementsNamespace {
 }
 
 export interface PurchasesNamespace {
-  restore(): Promise<void>;
+  /** Restore through the active `PurchaseController`, firing `restore_start`
+   *  then `restore_complete` / `restore_fail`. Resolves with the outcome;
+   *  never rejects — a throwing controller resolves as `failed`. */
+  restore(): Promise<RestorationResult>;
   /** Force a `/entitlements` read and reconcile `customerInfo`,
    *  `entitlementsToken` and `subscriptionStatus` from it. Resolves with the
    *  updated `CustomerInfo` snapshot; a failed read leaves prior state intact
@@ -2428,8 +2431,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const isTestMode = (): boolean =>
     opts.options?.testModeBehavior === "always";
   /** Restore through the active PurchaseController + fire restore lifecycle
-   *  events. Returns the outcome so callers (custom paywall controller) can
-   *  branch on it; `purchases.restore()` ignores the return. */
+   *  events. Returns the outcome for `purchases.restore()` and the custom
+   *  paywall controller. */
   const runRestore = async (): Promise<
     { type: "restored" } | { type: "failed"; error: Error }
   > => {
@@ -2893,9 +2896,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   };
 
   const purchases: PurchasesNamespace = {
-    restore: async () => {
-      await runRestore();
-    },
+    restore: () => runRestore(),
     refreshCustomerInfo: async () => {
       const ents = await refreshWebEntitlements();
       if (ents !== null) {

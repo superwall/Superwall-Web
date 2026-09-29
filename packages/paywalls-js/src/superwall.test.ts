@@ -1852,10 +1852,11 @@ it("purchases.restore() emits lifecycle events and persists lastRestoreAt", asyn
   sw.events.addEventListener("restore_complete", () => order.push("complete"));
 
   const before = Date.now();
-  await sw.purchases.restore();
+  const result = await sw.purchases.restore();
   await tick();
   const after = Date.now();
 
+  expect(result).toEqual({ type: "restored" });
   expect(order).toEqual(["start", "complete"]);
 
   const persisted = await adapter.get(STORAGE_KEYS.lastRestoreAt);
@@ -1863,6 +1864,32 @@ it("purchases.restore() emits lifecycle events and persists lastRestoreAt", asyn
   const ms = Number.parseInt(persisted!, 10);
   expect(ms).toBeGreaterThanOrEqual(before);
   expect(ms).toBeLessThanOrEqual(after);
+  await sw.dispose();
+});
+
+it("purchases.restore() resolves a throwing controller as failed", async () => {
+  const sw = createSuperwall({
+    apiKey: "pk_test",
+    fetch: noopFetch,
+    storage: newAdapter(),
+    purchaseController: {
+      purchase: async () => ({ type: "cancelled" }),
+      restorePurchases: async () => {
+        throw new Error("store unavailable");
+      },
+    },
+  });
+  await sw.ready;
+
+  const reasons: string[] = [];
+  sw.events.addEventListener("restore_fail", (e) => reasons.push(e.detail.reason));
+
+  const result = await sw.purchases.restore();
+  await tick();
+
+  expect(result.type).toBe("failed");
+  expect(result.type === "failed" && result.error.message).toBe("store unavailable");
+  expect(reasons).toEqual(["store unavailable"]);
   await sw.dispose();
 });
 

@@ -5,6 +5,10 @@ Versions apply to every published package in lockstep (see `scripts/version.ts`)
 
 ## Unreleased
 
+### Changed
+
+- `purchases.restore()` now resolves with the `RestorationResult` (`{ type: "restored" }` or `{ type: "failed", error }`) instead of `void`. It still never rejects, and still fires `restore_start` then `restore_complete` / `restore_fail`. Existing callers that ignore the value are unaffected
+
 ### Fixed
 
 - `identify()` with a different user while someone is already identified now resets first — fresh alias, vendor and device ids, subscription status, entitlements, attributes and assignments — exactly as the mobile SDKs do (iOS `reset(duringIdentify:)`). It used to keep the previous user's alias, and since subscriptions resolve through aliases, the next account signed in on a shared browser inherited the last one's subscription. Anonymous → identified still keeps the visitor's alias, and identifying the same user again changes nothing
