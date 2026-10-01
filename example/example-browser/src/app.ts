@@ -453,7 +453,7 @@ const handlers: Record<string, () => Promise<void> | void> = {
             `${placement} onPurchase override — claimed:`,
             checkout.claimed,
             "| codes:",
-            checkout.redemptionCodes,
+            checkout.redemptionCodes.map((c) => `${c.code} (claimed: ${c.claimed})`),
             "| deep links:",
             checkout.deepLinks ?? "(none)",
           );

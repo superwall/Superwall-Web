@@ -362,7 +362,7 @@ it("post_checkout_complete parses the full payload onto the result, the postChec
         currency: "USD",
         value: 49.99,
       },
-      redemption_codes: ["redemption_abc123"],
+      redemption_codes: [{ code: "redemption_abc123", claimed: false }],
       redirect_url: "https://merchant.test/thanks?redemption_code=redemption_abc123",
       deep_links: { ios: "myapp://redeem?code=redemption_abc123" },
       entitlements_token: "jwt.token.sig",
@@ -380,7 +380,7 @@ it("post_checkout_complete parses the full payload onto the result, the postChec
         currency: "USD",
         value: 49.99,
       },
-      redemptionCodes: ["redemption_abc123"],
+      redemptionCodes: [{ code: "redemption_abc123", claimed: false }],
       redirectUrl: "https://merchant.test/thanks?redemption_code=redemption_abc123",
       deepLinks: { ios: "myapp://redeem?code=redemption_abc123" },
       entitlementsToken: "jwt.token.sig",
@@ -402,7 +402,7 @@ it("post_checkout_complete parses the full payload onto the result, the postChec
     // The codes event fires for unclaimed codes…
     const codesEvt = emitted.find(([n]) => n === "redemptionCodesReceived");
     expect(codesEvt?.[1]).toEqual({
-      codes: ["redemption_abc123"],
+      codes: [{ code: "redemption_abc123", claimed: false }],
       claimed: false,
       productId: "pro_yearly",
       checkoutContextId: "ckctx_full",
@@ -432,14 +432,46 @@ it("redemptionCodesReceived also fires for claimed codes, flagged claimed: true"
   postCheckoutComplete(document.querySelector("iframe") as HTMLIFrameElement, {
     checkout_context_id: "ckctx_claimed",
     claimed: true,
-    redemption_codes: ["redemption_fresh"],
+    redemption_codes: [{ code: "redemption_fresh", claimed: true }],
   });
   await presentation;
   const codesEvt = emitted.find(([n]) => n === "redemptionCodesReceived");
   expect(codesEvt?.[1]).toMatchObject({
-    codes: ["redemption_fresh"],
+    codes: [{ code: "redemption_fresh", claimed: true }],
     claimed: true,
   });
+});
+
+it("post_checkout_complete reads each code's own claim and drops malformed entries", async () => {
+  const emitted: Array<[string, unknown]> = [];
+  const presenter = createBrowserPresenter();
+  const ctx = newCtx({
+    emit: (name, detail) => emitted.push([name as string, detail]),
+  });
+  const presentation = presenter.present(stubInfo("pw_pc_codes"), ctx);
+  await tick();
+
+  postCheckoutComplete(document.querySelector("iframe") as HTMLIFrameElement, {
+    checkout_context_id: "ckctx_codes",
+    claimed: true,
+    redemption_codes: [
+      { code: "redemption_claimed", claimed: true },
+      { code: "redemption_unclaimed", claimed: false },
+      { claimed: true },
+      "redemption_bare_string",
+      42,
+      null,
+    ],
+  });
+  const r = await presentation;
+  if (r.type !== "purchased") throw new Error(`expected purchased, got ${r.type}`);
+  const codes = [
+    { code: "redemption_claimed", claimed: true },
+    { code: "redemption_unclaimed", claimed: false },
+  ];
+  expect(r.checkout?.redemptionCodes).toEqual(codes);
+  const codesEvt = emitted.find(([n]) => n === "redemptionCodesReceived");
+  expect(codesEvt?.[1]).toMatchObject({ codes });
 });
 
 it("ownsCheckoutTeardown: the paywall stays up after post_checkout_complete and dismiss() resolves purchased, not declined", async () => {

@@ -5,12 +5,11 @@
 // checkout up (`/api/post-checkout-redirect`) and turns it into the
 // `post_checkout_complete` the SDK's post-checkout handling reads.
 
+import type { RedemptionCode } from "../../types.ts";
 import { storePrefixedOf, type HostedProduct } from "./products.ts";
 import { isRecord, stringOf } from "./values.ts";
 
 export type HostMessage = { event_name?: string; [key: string]: unknown };
-
-export type RedemptionCode = { code: string; claimed: boolean };
 
 type PostCheckoutAnswer = {
   behavior?: string;

@@ -3566,7 +3566,7 @@ it("default post-checkout, claimed: applies token + flips ACTIVE, leaves the cod
       productId: "pro_yearly",
       checkoutContextId: "ckctx_claimed",
       claimed: true,
-      redemptionCodes: ["redemption_for_the_phone"],
+      redemptionCodes: [{ code: "redemption_for_the_phone", claimed: true }],
       redirectUrl: "https://merchant.test/thanks?redemption_code=redemption_for_the_phone",
       entitlementsToken: "jwt.token.sig",
       transaction: { transactionId: "txn_1", productIdentifier: "pro_yearly" },
@@ -3631,7 +3631,7 @@ it("default post-checkout, unclaimed: never redeems the codes — grants nothing
     productId: "pro_yearly",
     checkoutContextId: "ckctx_unclaimed",
     claimed: false,
-    redemptionCodes: ["redemption_abc"],
+    redemptionCodes: [{ code: "redemption_abc", claimed: false }],
   };
   rig.complete(checkout);
   // Torn down synchronously — nothing to wait on.
@@ -3686,7 +3686,7 @@ it("handler.onPurchase replaces the default entirely: no entitlements, no redeem
       productId: "pro_yearly",
       checkoutContextId: "ckctx_override",
       claimed: false,
-      redemptionCodes: ["redemption_open_in_app"],
+      redemptionCodes: [{ code: "redemption_open_in_app", claimed: false }],
       redirectUrl: "https://merchant.test/thanks",
       deepLinks: { ios: "myapp://redeem", android: "myapp://redeem" },
       entitlementsToken: "jwt.token.sig",

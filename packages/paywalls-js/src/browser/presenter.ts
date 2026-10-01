@@ -15,6 +15,7 @@ import type {
 } from "../presenter.ts";
 import type { JsonValue } from "../types.ts";
 import { createPaywallHost, type HostMessage, type PaywallHost } from "./host/index.ts";
+import { redemptionCodesOf } from "./host/checkout.ts";
 import {
   asProductIdentifier,
   asTransactionId,
@@ -706,7 +707,6 @@ const readCheckoutCompletion = (
   );
   const transactionId = readTransactionField(evt, "transaction_id");
   const td = (evt["transaction_data"] ?? {}) as Record<string, unknown>;
-  const rawCodes = evt["redemption_codes"];
   const rawLinks = evt["deep_links"];
   const links =
     rawLinks && typeof rawLinks === "object"
@@ -734,9 +734,7 @@ const readCheckoutCompletion = (
         ...(typeof td["value"] === "number" && { value: td["value"] }),
       },
     }),
-    redemptionCodes: Array.isArray(rawCodes)
-      ? rawCodes.filter((c): c is string => typeof c === "string")
-      : [],
+    redemptionCodes: redemptionCodesOf(evt["redemption_codes"]),
     ...(redirectUrl !== null && { redirectUrl }),
     ...((ios !== null || android !== null) && {
       deepLinks: {

@@ -3,13 +3,16 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
-## Unreleased
+## 0.3.1 — 2026-10-01
 
 ### Fixed
 
+- Redemption codes from a completed web checkout reach the developer again. Since paywall-next ebeb6a1c9d the paywall sends `post_checkout_complete.redemption_codes` as `{ code, claimed }` objects, and 0.3.0 kept only bare strings, so `checkout.redemptionCodes` was always `[]` and `redemptionCodesReceived` / `onRedemptionCodesReceived` never fired
 - `identify()` with a different user while someone is already identified now resets first — fresh alias, vendor and device ids, subscription status, entitlements, attributes and assignments — exactly as the mobile SDKs do (iOS `reset(duringIdentify:)`). It used to keep the previous user's alias, and since subscriptions resolve through aliases, the next account signed in on a shared browser inherited the last one's subscription. Anonymous → identified still keeps the visitor's alias, and identifying the same user again changes nothing
 
-## Unreleased
+### Changed
+
+- **Breaking:** redemption codes are now `RedemptionCode` objects — `{ code, claimed }`, `claimed` saying per code whether the server already bound it to the buyer — wherever the SDK hands them out: `CheckoutCompletion.redemptionCodes`, the `redemptionCodesReceived` event's `codes`, and `onRedemptionCodesReceived(codes, info)`. They were `string[]`; read `.code` where you used the string
 
 ### Added
 
