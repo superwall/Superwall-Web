@@ -9,6 +9,12 @@ Versions apply to every published package in lockstep (see `scripts/version.ts`)
 
 - `identify()` with a different user while someone is already identified now resets first — fresh alias, vendor and device ids, subscription status, entitlements, attributes and assignments — exactly as the mobile SDKs do (iOS `reset(duringIdentify:)`). It used to keep the previous user's alias, and since subscriptions resolve through aliases, the next account signed in on a shared browser inherited the last one's subscription. Anonymous → identified still keeps the visitor's alias, and identifying the same user again changes nothing
 
+## Unreleased
+
+### Added
+
+- The SDK now hosts framework (headless) paywalls the way the web paywall app's controller hosts paywall.js ones. A framework paywall's iframe has no controller around it, so when its `ping` carries `host_controlled: true` the presenter does the controller's three jobs for that presentation, with the controller's payloads: sends `experiment` and `template_variables` with the user's identity and the products priced from `/api/products/variables` (kept 24 h, so a reopened paywall prices on its first frame); reports the lifecycle to the collector (the open batch, `paywall_close`, `user_attributes`, `paywall_page_view`, `stripeCheckout_*`, `transaction_start` for a prefetched session, `transaction_abandon`); and turns `stripe_checkout_complete` into `post_checkout_complete` through `/api/post-checkout-redirect`. paywall.js paywalls are untouched
+
 ## 0.3.0 — 2026-09-25
 
 ### Added

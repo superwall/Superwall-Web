@@ -1245,3 +1245,156 @@ it("stripe checkout start / abandon are emitted locally only (iframe tracks them
 it("declares that the paywall iframe tracks its own lifecycle events", () => {
   expect(createBrowserPresenter().tracksLifecycleEvents).toBe(true);
 });
+
+// ---------------------------------------------------------------------------
+// Hosting a framework paywall (browser/host.ts)
+// ---------------------------------------------------------------------------
+
+it("a framework paywall's host_controlled ping makes the SDK its host: priced templates, events, and the post-checkout lookup", async () => {
+  const collector = {
+    url: "https://web-api.superwall.test/api/proxy/events",
+    headers: { "x-public-api-key": "pk_test_abc" },
+    placementEventId: "pe_1",
+    identity: { userId: { type: "appUserId", appUserId: "user_1" }, deviceId: "d1" },
+    userAttributes: {},
+    deviceAttributes: {},
+    experimentSlice: {},
+    paywallSlice: { $paywall_identifier: "pw_framework" },
+    productSlice: {},
+    presentmentSlice: { $presented_by_event_name: "checkout" },
+    placementParamsSlice: {},
+  };
+  const calls: string[] = [];
+  const events: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/api/proxy/events")) {
+      const batch = JSON.parse(String(init?.body)) as { events: Array<{ event_name: string }> };
+      events.push(...batch.events.map((event) => event.event_name));
+    }
+    if (url.endsWith("/api/products/variables")) {
+      return Response.json({ products: { "stripe|test:price_1:no-trial": { price: "$9.99" } } });
+    }
+    if (url.includes("/api/post-checkout-redirect")) {
+      return Response.json({ behavior: "redeem", redirectUrl: "https://x.test/app-link" });
+    }
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+
+  try {
+    const presenter = createBrowserPresenter();
+    const presentation = presenter.present(
+      stubInfo("pw_framework"),
+      newCtx({
+        bootstrap: {
+          apiKey: "pk_test_abc",
+          apiBase: "https://web-api.superwall.test",
+          collector: "https://collector.superwall.test",
+          sdkVersion: "1.2.3",
+          clientSurface: "web-sdk",
+        },
+        initPayload: {
+          apiBase: "https://web-api.superwall.test",
+          clientSurface: "web-sdk",
+          products: [
+            {
+              reference_name: "primary",
+              sw_composite_product_id: "test:price_1:no-trial",
+              store_product: { store: "STRIPE" },
+            },
+          ],
+          checkoutContext: { identity: { appUserId: "user_1" }, experiment: {} },
+          collector,
+        },
+      }),
+    );
+    await tick();
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    const origin = new URL(iframe.src).origin;
+    const toIframe: unknown[] = [];
+    iframe.contentWindow!.postMessage = ((message: { payload?: string }) => {
+      if (typeof message?.payload === "string") {
+        const json = atob(message.payload.replace(/-/g, "+").replace(/_/g, "/"));
+        toIframe.push(...(JSON.parse(json) as unknown[]));
+      }
+    }) as Window["postMessage"];
+    const fromIframe = (data: unknown) =>
+      window.dispatchEvent(
+        new MessageEvent("message", { data, origin, source: iframe.contentWindow } as MessageEventInit),
+      );
+
+    fromIframe({
+      version: 1,
+      payload: {
+        events: [
+          { event_name: "page_view", type: "entry", page_node_id: "p1", flow_position: 0, page_name: "Plans" },
+        ],
+      },
+    });
+    await flushMessages();
+    fromIframe({ version: 1, payload: { events: [{ event_name: "ping", host_controlled: true }] } });
+    await flushMessages();
+    await flushMessages();
+
+    const names = toIframe.map((message) => (message as { event_name: string }).event_name);
+    expect(names).toContain("experiment");
+    expect(toIframe).toContainEqual(
+      expect.objectContaining({
+        event_name: "template_variables",
+        variables: expect.objectContaining({ products: [{ primary: { price: "$9.99" } }] }),
+      }),
+    );
+    expect(calls).toContain("https://web-api.superwall.test/api/proxy/events");
+    expect(events).toContain("paywall_page_view");
+
+    fromIframe({
+      event_name: "stripe_checkout_complete",
+      checkout_context_id: "ctx_1",
+      product_identifier: "primary",
+      claimed: true,
+      entitlements_token: "ent_1",
+    });
+    const result = await presentation;
+
+    expect(result.type).toBe("purchased");
+    if (result.type === "purchased") {
+      expect(result.checkout).toMatchObject({ claimed: true, checkoutContextId: "ctx_1" });
+    }
+    expect(calls.some((url) => url.includes("/api/post-checkout-redirect"))).toBe(true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+it("a paywall.js ping (no host_controlled) leaves hosting to its controller", async () => {
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try {
+    const presenter = createBrowserPresenter();
+    const presentation = presenter.present(
+      stubInfo("pw_classic"),
+      newCtx({ initPayload: { apiBase: "https://web-api.superwall.test", collector: {} } }),
+    );
+    await tick();
+    const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { version: 1, payload: { events: [{ event_name: "ping" }] } },
+        origin: new URL(iframe.src).origin,
+        source: iframe.contentWindow,
+      } as MessageEventInit),
+    );
+    await flushMessages();
+    expect(calls).toEqual([]);
+    presenter.dismiss();
+    await presentation;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
