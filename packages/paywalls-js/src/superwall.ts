@@ -199,8 +199,8 @@ export interface PaywallPresentationHandler {
    * `register()` stays pending) until you call `sw.dismiss()`; the result
    * then resolves as `purchased`, carrying the same `checkout`.
    *
-   * Built for buy-on-web, redeem-in-app: `checkout.redemptionCodes` are fresh
-   * and unclaimed, so show them, or hand `checkout.deepLinks.ios` / `.android`
+   * Built for buy-on-web, redeem-in-app: `checkout.redemptionCodes` are
+   * unspent (`{ code, claimed }`), so show them, or hand `checkout.deepLinks.ios` / `.android`
    * to an "Open in app" button. To grant access on the web yourself, call
    * `sw.redeem(code)` when `checkout.claimed` is `false`, or
    * `sw.purchases.refreshCustomerInfo()` when it's `true`.

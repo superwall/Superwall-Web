@@ -120,8 +120,8 @@ export interface PostCheckoutCompleteMessage {
     currency?: string;
     value?: number;
   };
-  /** Prefixed (`redemption_…`) codes, fresh and unclaimed. */
-  redemption_codes?: string[];
+  /** Prefixed (`redemption_…`) codes, each with its claim. */
+  redemption_codes?: Array<{ code: string; claimed: boolean }>;
   redirect_url?: string;
   /** Deep links for the buy-on-web, redeem-in-app case. */
   deep_links?: { ios?: string; android?: string };

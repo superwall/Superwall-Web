@@ -79,7 +79,7 @@ it("purchase() resolves on post_checkout_complete and leaves entitlements to the
         productId: "pro_yearly",
         checkoutContextId: "ckctx_test",
         claimed: false,
-        redemptionCodes: ["redemption_abc"],
+        redemptionCodes: [{ code: "redemption_abc", claimed: false }],
       },
     });
   });

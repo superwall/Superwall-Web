@@ -63,7 +63,7 @@ it("claimed: flips ACTIVE from config entitlement ids synchronously, applies the
       claimed: true,
       // Fresh codes the buyer can still use on their phone. There's no redeem
       // dep at all — the handler has no way to spend them.
-      redemptionCodes: ["redemption_for_the_phone"],
+      redemptionCodes: [{ code: "redemption_for_the_phone", claimed: true }],
       entitlementsToken: "jwt.token.sig",
     }),
     stub.deps,
@@ -113,7 +113,10 @@ it("unclaimed: grants nothing — no status, no token, no entitlements read; the
   applyCheckoutEntitlements(
     checkout({
       claimed: false,
-      redemptionCodes: ["redemption_a", "redemption_b"],
+      redemptionCodes: [
+        { code: "redemption_a", claimed: false },
+        { code: "redemption_b", claimed: false },
+      ],
       entitlementsToken: "jwt.token.sig",
     }),
     stub.deps,

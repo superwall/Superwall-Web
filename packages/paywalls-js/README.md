@@ -208,7 +208,8 @@ sw.register({
       showOpenInApp({
         ios: checkout.deepLinks?.ios,
         android: checkout.deepLinks?.android,
-        codes: checkout.redemptionCodes, // ["redemption_…"], pass along as-is
+        // [{ code: "redemption_…", claimed }] — pass `code` along as-is
+        codes: checkout.redemptionCodes.map((c) => c.code),
       });
     },
   },
@@ -241,6 +242,7 @@ call:
 ```ts
 sw.events.addEventListener("redemptionCodesReceived", (e) => {
   const { codes, claimed, productId, checkoutContextId, paywallInfo } = e.detail;
+  // codes: [{ code: "redemption_…", claimed }]
 });
 ```
 
@@ -301,7 +303,7 @@ const delegate = {
 
   // checkout + redemption
   onCheckoutCompleted(checkout, info) {},     // web checkout completed — full payload, notification only
-  onRedemptionCodesReceived(codes, info) {},  // a completed checkout carried codes (claimed or not)
+  onRedemptionCodesReceived(codes, info) {},  // a completed checkout carried codes: [{ code, claimed }]
   onWillRedeemLink() {},                      // about to redeem a code
   onDidRedeemLink(result) {},                 // { type: "success" | "expired" | "invalid" | "error", code, … }
 

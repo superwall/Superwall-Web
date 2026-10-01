@@ -14,6 +14,7 @@ import type {
   PaywallPresentationRequestStatusType,
   PaywallResult,
   Product,
+  RedemptionCode,
   RedemptionResult,
   RestoreType,
   StoreTransaction,
@@ -228,7 +229,7 @@ export interface LocalSuperwallEventMap {
    *  Bridged to `SuperwallDelegate.onRedemptionCodesReceived`. Local-only —
    *  the backend already records the redemption server-side. */
   redemptionCodesReceived: {
-    codes: string[];
+    codes: RedemptionCode[];
     /** Whether the server already bound the purchase to this device + user.
      *  See `CheckoutCompletion.claimed`. */
     claimed: boolean;
@@ -344,7 +345,7 @@ export interface SuperwallDelegate {
   onCheckoutCompleted?(checkout: CheckoutCompletion, info: PaywallInfo): void;
   /** A completed checkout carried redemption codes (claimed or not). Typed
    *  convenience around the local-only `redemptionCodesReceived` event. */
-  onRedemptionCodesReceived?(codes: string[], info: PaywallInfo): void;
+  onRedemptionCodesReceived?(codes: RedemptionCode[], info: PaywallInfo): void;
 
   // logging
   onLog?(

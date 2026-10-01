@@ -392,6 +392,15 @@ export interface ConfirmedAssignment {
   variant: Variant;
 }
 
+/** A redemption code from a completed web checkout. */
+export interface RedemptionCode {
+  /** Prefixed (`redemption_…`) code. Pass it to `sw.redeem(code)` / the
+   *  mobile SDK's redeem as-is. */
+  code: string;
+  /** Whether the server already bound this code's purchase to the buyer. */
+  claimed: boolean;
+}
+
 /** Payload of a completed web checkout — what the paywall posts once Stripe
  *  checkout AND its server-side post-checkout work are done. Handed to
  *  `handler.onPurchase` (which replaces the SDK's default handling) and
@@ -414,10 +423,11 @@ export interface CheckoutCompletion {
     currency?: string;
     value?: number;
   };
-  /** Prefixed (`redemption_…`) codes, fresh and unclaimed. Show them, or pass
-   *  one to `sw.redeem(code)` / the mobile SDK's redeem as-is. Empty when the
+  /** The checkout's codes, each with whether the server already claimed it.
+   *  The SDK never redeems them, so they're unspent: show them, or pass one's
+   *  `code` to `sw.redeem(code)` / the mobile SDK's redeem. Empty when the
    *  checkout minted none. */
-  redemptionCodes: string[];
+  redemptionCodes: RedemptionCode[];
   /** Where the checkout suggests the buyer lands next: the purchase button's
    *  redirect, else the app-level redirect, else the redemption page when the
    *  button asked for it. Carries `redemption_code=` + the checkout context
