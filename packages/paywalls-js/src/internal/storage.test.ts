@@ -93,6 +93,39 @@ it.effect("adapter throws → StorageService surfaces a tagged StorageGetError",
   });
 });
 
+it.effect("non-Error cause with prototype fields is described, not rendered as {}", () => {
+  // Firefox's XPCOM storage exceptions aren't `Error`s and keep `name` /
+  // `message` on the prototype, where `JSON.stringify` can't see them.
+  class XpcomLikeException {
+    get name() {
+      return "NS_ERROR_FILE_CORRUPTED";
+    }
+    get message() {
+      return "Component returned failure code: 0x8052000b";
+    }
+  }
+  const broken: StorageAdapter = {
+    get: () => {
+      throw new XpcomLikeException();
+    },
+    set: () => {},
+    remove: () => {},
+  };
+
+  return Effect.gen(function* () {
+    const result = yield* StorageService.get(ALIAS_KEY).pipe(
+      Effect.provide(StorageService.fromAdapter(broken)),
+      Effect.either,
+    );
+    expect(Either.isLeft(result)).toBe(true);
+    if (Either.isLeft(result)) {
+      expect(result.left.message).toBe(
+        `Failed to read storage key "${ALIAS_KEY}": NS_ERROR_FILE_CORRUPTED: Component returned failure code: 0x8052000b`,
+      );
+    }
+  });
+});
+
 it.effect("adapter rejects → tagged StorageSetError", () => {
   const broken: StorageAdapter = {
     get: () => null,

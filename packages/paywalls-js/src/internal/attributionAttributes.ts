@@ -59,6 +59,30 @@ export const collectCurrentAttribution = (): AttributionAttributes => {
   return result;
 };
 
+/** Decode the persisted first-touch attribution. Tolerant: corrupt JSON or a
+ *  non-object value reads as "nothing stored", and only string fields are
+ *  kept, so a bad entry is overwritten by this visit's attribution instead
+ *  of failing `configure()`. */
+export const parseStoredAttribution = (
+  raw: string | null,
+): AttributionAttributes => {
+  if (raw === null) return {};
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    return {};
+  }
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(decoded)) {
+    if (typeof v === "string") result[k] = v;
+  }
+  return result as AttributionAttributes;
+};
+
 /** First-touch merge: stored values always win. Current values fill gaps. */
 export const mergeFirstTouch = (
   stored: AttributionAttributes,

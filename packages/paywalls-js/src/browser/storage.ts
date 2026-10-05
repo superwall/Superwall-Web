@@ -74,8 +74,15 @@ export const createBrowserStorage = (
   return {
     get: (key) => {
       if (ls) {
-        const v = ls.getItem(key);
-        if (v !== null) return v;
+        try {
+          const v = ls.getItem(key);
+          if (v !== null) return v;
+        } catch {
+          // A browser can hand back `localStorage` and still throw on read —
+          // Firefox does when the profile's storage is corrupt
+          // (NS_ERROR_FILE_CORRUPTED). Treat it as empty so the cookie mirror,
+          // or a fresh default, takes over instead of failing SDK startup.
+        }
       }
       const cookieName = cookieFor(key);
       if (cookieName) {

@@ -3,6 +3,7 @@ import {
   collectCurrentAttribution,
   mergeFirstTouch,
   attributionToRecord,
+  parseStoredAttribution,
   type AttributionAttributes,
 } from "./attributionAttributes.ts";
 
@@ -92,6 +93,37 @@ it("collectCurrentAttribution: ignores unrecognised query params", () => {
   expect(result.utm_source).toBe("newsletter");
   expect((result as Record<string, unknown>).ref).toBeUndefined();
   expect((result as Record<string, unknown>).custom_param).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------
+// parseStoredAttribution
+// ---------------------------------------------------------------------------
+
+it("parseStoredAttribution: decodes a stored object", () => {
+  expect(
+    parseStoredAttribution(
+      JSON.stringify({ utm_source: "google", referrer: "https://ref.test" }),
+    ),
+  ).toEqual({ utm_source: "google", referrer: "https://ref.test" });
+});
+
+it("parseStoredAttribution: nothing stored reads as empty", () => {
+  expect(parseStoredAttribution(null)).toEqual({});
+});
+
+it.each(["{not json", "", "null", "42", '"utm"', '["utm_source"]'])(
+  "parseStoredAttribution: corrupt or non-object value %j reads as empty",
+  (raw) => {
+    expect(parseStoredAttribution(raw)).toEqual({});
+  },
+);
+
+it("parseStoredAttribution: drops non-string fields", () => {
+  expect(
+    parseStoredAttribution(
+      JSON.stringify({ utm_source: "google", gclid: 123, fbclid: null }),
+    ),
+  ).toEqual({ utm_source: "google" });
 });
 
 // ---------------------------------------------------------------------------
