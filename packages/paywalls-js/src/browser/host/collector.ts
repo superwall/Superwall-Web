@@ -5,6 +5,7 @@
 // reads the same block so both kinds of paywall report identically.
 
 import { isRecord, recordOf, stringOf, type Slice } from "./values.ts";
+import { randomUuid } from "../../internal/uuid.ts";
 
 export type UserId =
   | { type: "appUserId"; appUserId: string }
@@ -50,7 +51,7 @@ export const collectorOf = (value: unknown): Collector | undefined => {
   return {
     url,
     headers,
-    placementEventId: stringOf(value.placementEventId) ?? crypto.randomUUID(),
+    placementEventId: stringOf(value.placementEventId) ?? randomUuid(),
     identity: { userId },
     userAttributes: { ...recordOf(value.userAttributes) },
     deviceAttributes: { ...recordOf(value.deviceAttributes) },

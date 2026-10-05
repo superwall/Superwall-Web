@@ -320,6 +320,26 @@ it.effect("ConfigService.hydrateFromStorage returns null when no cache exists", 
   }).pipe(Effect.provide(layer));
 });
 
+// Valid JSON that isn't an object used to throw on `.payload` — a defect
+// that escaped configure()'s catchAll, so the SDK failed on every load and
+// never fetched a fresh config to overwrite it.
+it.effect.each(["null", "[]", '"config"', "42"])(
+  "ConfigService.hydrateFromStorage treats a cached %s as no cache",
+  (cached) => {
+    const { adapter, layer } = buildStack(
+      mockFetch(() => new Response("", { status: 204 })),
+    );
+    return Effect.gen(function* () {
+      yield* Effect.promise(() =>
+        Promise.resolve(adapter.set(STORAGE_KEYS.config, cached)),
+      );
+      yield* IdentityService.hydrate();
+      const c = yield* ConfigService;
+      expect(yield* c.hydrateFromStorage()).toBeNull();
+    }).pipe(Effect.provide(layer));
+  },
+);
+
 it.effect("ConfigService.getPlacement returns the parsed trigger when found", () => {
   const { layer } = buildStack(
     mockFetch(() => new Response(sampleConfig, { status: 200 })),

@@ -27,6 +27,7 @@ import {
 import type { JsonValue } from "../types.ts";
 import { toWireParameters } from "./analyticsParams.ts";
 import { ComputedProperties } from "./computed.ts";
+import { randomUuid } from "./uuid.ts";
 import {
   KEEPALIVE_MAX_BYTES,
   NetworkService,
@@ -84,7 +85,7 @@ const flushBatches = (
   return batches;
 };
 
-const newEventId = (): string => crypto.randomUUID();
+const newEventId = (): string => randomUuid();
 
 export interface EventBusImpl {
   readonly target: SuperwallEventTarget;

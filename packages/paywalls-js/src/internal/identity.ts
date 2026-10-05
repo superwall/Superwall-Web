@@ -2,9 +2,9 @@
 // and the SSR hydration algorithm (API.md §7.4). Per-field resolution:
 // stored value → seed value → generated locally (appUserId stays "" if
 // none supplied — never fabricated). After hydrate(), all resolved values
-// are written back to storage.
+// are written back to storage (best effort: hydrate never fails on storage).
 
-import { Effect, Layer, SubscriptionRef } from "effect";
+import { Effect, Layer, Stream, SubscriptionRef } from "effect";
 import { STORAGE_KEYS } from "../types.ts";
 import { makeActor } from "./actor.ts";
 import {
@@ -23,6 +23,8 @@ import {
   IdentityNotHydratedError,
 } from "./errors.ts";
 import { StorageService } from "./storage.ts";
+import { describeCause as describe } from "./describe.ts";
+import { randomUuid } from "./uuid.ts";
 
 export interface IdentitySnapshot {
   readonly aliasId: AliasId;
@@ -111,29 +113,45 @@ const DEVICE_KEY = asStorageKey(STORAGE_KEYS.deviceId);
 
 /** `$SuperwallAlias:<uuid-v4>` — wire format expected by the BE. */
 export const generateAlias = (): AliasId =>
-  asAliasId(`$SuperwallAlias:${crypto.randomUUID()}`);
+  asAliasId(`$SuperwallAlias:${randomUuid()}`);
 
-export const generateVendorId = (): VendorId => asVendorId(crypto.randomUUID());
+export const generateVendorId = (): VendorId => asVendorId(randomUuid());
 
-/** `sha256(vendorId)` truncated to 16 hex chars. */
-export const deriveDeviceId = (
-  vendorId: VendorId,
-): Effect.Effect<DeviceId, IdentityHydrationError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const bytes = new TextEncoder().encode(vendorId);
-      const hash = await crypto.subtle.digest("SHA-256", bytes);
-      const hex = Array.from(new Uint8Array(hash))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-      return asDeviceId(hex.slice(0, 16));
-    },
-    catch: (cause) =>
-      new IdentityHydrationError({
-        message: `sha256(vendorId) failed: ${describe(cause)}`,
-        cause,
-      }),
-  });
+/** Non-cryptographic 64-bit string hash (cyrb53's mixing, two 32-bit lanes)
+ *  as 16 hex chars. Only for `deriveDeviceId` when SubtleCrypto is missing. */
+const fallbackHash16 = (input: string): string => {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const hex = (n: number) => (n >>> 0).toString(16).padStart(8, "0");
+  return hex(h2) + hex(h1);
+};
+
+/** `sha256(vendorId)` truncated to 16 hex chars. SubtleCrypto only exists in
+ *  secure contexts — an `http://` page has none — so where it's missing or
+ *  fails, fall back to a non-cryptographic hash. The device id is an
+ *  analytics identifier; a different but stable value beats failing startup. */
+export const deriveDeviceId = (vendorId: VendorId): Effect.Effect<DeviceId> =>
+  Effect.tryPromise(async () => {
+    const bytes = new TextEncoder().encode(vendorId);
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    const hex = Array.from(new Uint8Array(hash))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    return asDeviceId(hex.slice(0, 16));
+  }).pipe(
+    Effect.catchTag("UnknownException", () =>
+      Effect.succeed(asDeviceId(fallbackHash16(vendorId))),
+    ),
+  );
 
 const make = Effect.gen(function* () {
   const storage = yield* StorageService;
@@ -169,10 +187,12 @@ const make = Effect.gen(function* () {
     dispatch(
       "IdentityService.hydrate",
       Effect.gen(function* () {
+        // An unreadable key reads as "not stored" (a fresh id is generated)
+        // rather than failing the SDK's startup.
         const [storedAlias, storedUser, storedVendor] = yield* Effect.all([
-          storage.get(ALIAS_KEY),
-          storage.get(USER_KEY),
-          storage.get(VENDOR_KEY),
+          storage.getOrNull(ALIAS_KEY),
+          storage.getOrNull(USER_KEY),
+          storage.getOrNull(VENDOR_KEY),
         ]);
 
         const aliasId =
@@ -197,15 +217,33 @@ const make = Effect.gen(function* () {
         } else {
           const provider = seed?.vendorIdProvider;
           if (provider) {
-            const provided = yield* Effect.tryPromise({
+            // The host's provider is outside our control (it may call a
+            // fingerprinting API that's down). If it fails, use a generated
+            // id rather than failing the SDK's startup.
+            vendorId = yield* Effect.tryPromise({
               try: async () => await provider(),
               catch: (cause) =>
                 new IdentityHydrationError({
                   message: `vendorIdProvider threw: ${describe(cause)}`,
                   cause,
                 }),
-            });
-            vendorId = asVendorId(provided);
+            }).pipe(
+              Effect.flatMap((provided) =>
+                typeof provided === "string" && provided !== ""
+                  ? Effect.succeed(asVendorId(provided))
+                  : Effect.fail(
+                      new IdentityHydrationError({
+                        message: `vendorIdProvider returned ${describe(provided)}, not a non-empty string`,
+                      }),
+                    ),
+              ),
+              Effect.catchTag("IdentityHydrationError", (error) =>
+                Effect.logWarning(
+                  "vendorIdProvider failed; using a generated vendor id",
+                  { error: error.message },
+                ).pipe(Effect.as(generateVendorId())),
+              ),
+            );
           } else {
             vendorId = generateVendorId();
           }
@@ -218,7 +256,15 @@ const make = Effect.gen(function* () {
           vendorId,
           deviceId,
         };
-        yield* persist(snap);
+        // Write-back is best effort: the snapshot lives in memory either way,
+        // and an unwritable store shouldn't stop the SDK starting.
+        yield* persist(snap).pipe(
+          Effect.catchAll((error) =>
+            Effect.logWarning("Failed to persist identity", {
+              error: error.message,
+            }),
+          ),
+        );
         yield* SubscriptionRef.set(ref, snap);
         return snap;
       }),
@@ -300,14 +346,15 @@ const make = Effect.gen(function* () {
 
   const currentPhase = () => SubscriptionRef.get(phaseRef);
 
-  /** Block until phase becomes Ready. */
-  const awaitReady: () => Effect.Effect<void> = () =>
-    Effect.gen(function* () {
-      const phase = yield* SubscriptionRef.get(phaseRef);
-      if (isReady(phase)) return;
-      yield* Effect.yieldNow();
-      yield* awaitReady();
-    });
+  /** Block until phase becomes Ready. `changes` emits the current phase
+   *  first, so this returns at once when already Ready — and otherwise
+   *  sleeps until the phase changes rather than spinning on it. */
+  const awaitReady = (): Effect.Effect<void> =>
+    phaseRef.changes.pipe(
+      Stream.filter(isReady),
+      Stream.take(1),
+      Stream.runDrain,
+    );
 
   return {
     hydrate,
@@ -339,10 +386,3 @@ export const identityWithStorage = (
   storage: Layer.Layer<StorageService>,
 ): Layer.Layer<IdentityService | StorageService> =>
   Layer.provideMerge(IdentityService.DefaultWithoutDependencies, storage);
-
-const describe = (cause: unknown): string =>
-  cause instanceof Error
-    ? cause.message
-    : typeof cause === "string"
-      ? cause
-      : JSON.stringify(cause);

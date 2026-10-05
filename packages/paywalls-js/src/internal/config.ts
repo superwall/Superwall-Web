@@ -703,12 +703,24 @@ const make = (apiKey: string) =>
         if (cached === null) return null;
 
         const decodedResult = yield* Effect.try({
-          try: () =>
-            JSON.parse(cached) as {
+          try: () => {
+            const parsed: unknown = JSON.parse(cached);
+            // Valid JSON of the wrong shape (`null`, an array, a string) is
+            // as unusable as a parse error: fall through to a fresh fetch,
+            // which overwrites it, instead of throwing on `.payload` below.
+            if (
+              typeof parsed !== "object" ||
+              parsed === null ||
+              Array.isArray(parsed)
+            ) {
+              throw new Error("cached config is not an object");
+            }
+            return parsed as {
               apiKey?: string;
               buildId?: string;
               payload?: JsonValue;
-            },
+            };
+          },
           catch: (e) => e,
         }).pipe(
           Effect.tapError((e) =>

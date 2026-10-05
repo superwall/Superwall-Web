@@ -11,6 +11,7 @@ import {
   SuperwallError,
 } from "../errors.ts";
 import * as Internal from "./errors.ts";
+import { describeCause as describe } from "./describe.ts";
 
 /** Translate an internal tagged error to its public counterpart. Unknown
  *  errors pass through. */
@@ -57,14 +58,3 @@ const asError = (cause: unknown): Error | undefined => {
   if (cause instanceof Error) return cause;
   return new Error(describe(cause));
 };
-
-const describe = (cause: unknown): string =>
-  typeof cause === "string"
-    ? cause
-    : (() => {
-        try {
-          return JSON.stringify(cause);
-        } catch {
-          return String(cause);
-        }
-      })();

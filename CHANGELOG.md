@@ -10,6 +10,14 @@ Versions apply to every published package in lockstep (see `scripts/version.ts`)
 - The SDK no longer breaks for the whole page session when `localStorage.getItem` throws. Firefox does this when a profile's storage is corrupt (`NS_ERROR_FILE_CORRUPTED`): the failed read during startup rejected `sw.ready`, and every later call (`identify`, `setAttributes`, `register`, …) rejected with the same `StorageGetError` until reload. The browser storage adapter now treats a failed read as empty and falls back to the cookie mirror ([#17](https://github.com/superwall/Superwall-Web/issues/17))
 - A corrupt stored first-touch attribution (`superwall.attribution`) no longer rejects `sw.ready` with a `SyntaxError`. It reads as empty and is overwritten with this visit's attribution
 - Storage errors that aren't `Error` instances (Firefox's storage exceptions) are now described by their `name` / `message` instead of printing as `{}`
+- `register()` no longer waits forever when startup fails. Any `configure()` failure — or a `reset()` that failed partway — left a pending marker that `register()` waits on, so every call hung (busy-polling) instead of settling. It now settles — e.g. with no config, it rejects with `PaywallNotAvailableError` (`no_config`)
+- The SDK starts in more environments where it used to reject `sw.ready`:
+  - in an iframe sandboxed without `allow-same-origin`, where `localStorage` and `document.cookie` both throw (it now runs on in-memory storage there)
+  - on `http://` pages and older browsers (before Safari 15.4 / Chrome 92), which lack `crypto.randomUUID` and `crypto.subtle`. Ids fall back to `crypto.getRandomValues`, and the device id to a stable non-cryptographic hash of the vendor id
+  - when the enrichment host returns a 200 that isn't `{ user, device }`; it's now an enrichment failure (`enrichment_fail`), as a non-200 already was
+  - when `identity.vendorIdProvider` throws or returns a non-string; a generated vendor id is used instead
+  - when the cached config (`superwall.config`) is valid JSON but not an object, e.g. `null`. That used to fail every page load, since the bad value was never replaced
+  - with a custom `StorageAdapter` whose `get` or `set` fails. Startup reads that fail read as empty, and identity write-back is best effort
 
 ## 0.3.1 — 2026-10-01
 
