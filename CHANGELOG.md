@@ -3,6 +3,14 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## 0.3.2 — 2026-10-05
+
+### Fixed
+
+- The SDK no longer breaks for the whole page session when `localStorage.getItem` throws. Firefox does this when a profile's storage is corrupt (`NS_ERROR_FILE_CORRUPTED`): the failed read during startup rejected `sw.ready`, and every later call (`identify`, `setAttributes`, `register`, …) rejected with the same `StorageGetError` until reload. The browser storage adapter now treats a failed read as empty and falls back to the cookie mirror ([#17](https://github.com/superwall/Superwall-Web/issues/17))
+- A corrupt stored first-touch attribution (`superwall.attribution`) no longer rejects `sw.ready` with a `SyntaxError`. It reads as empty and is overwritten with this visit's attribution
+- Storage errors that aren't `Error` instances (Firefox's storage exceptions) are now described by their `name` / `message` instead of printing as `{}`
+
 ## 0.3.1 — 2026-10-01
 
 ### Fixed

@@ -62,6 +62,7 @@ import {
   buildInitPayload,
   resolvePaywallWorkerHost,
 } from "./superwall.ts";
+import { createBrowserStorage } from "./browser/storage.ts";
 
 it("resolvePaywallWorkerHost maps each environment to its worker zone", () => {
   expect(resolvePaywallWorkerHost("release")).toBe("web-api.superwall.app");
@@ -389,6 +390,41 @@ it("subscriptionStatus is persisted and replayed on reopen (shared storage)", as
   await sw2.ready;
   expect(sw2.subscriptionStatus.value.status).toBe("ACTIVE");
   await sw2.dispose();
+});
+
+// Regression: superwall/Superwall-Web#17. Firefox with a corrupt profile hands
+// back `localStorage` and then throws (a non-Error) from every call. A failed
+// read during startup used to fail the cached runtime build, so `ready` and
+// every later SDK call rejected with the same StorageGetError until reload.
+it("starts and keeps working when localStorage.getItem throws", async () => {
+  const corrupt = (): never => {
+    throw { name: "NS_ERROR_FILE_CORRUPTED" };
+  };
+  const corruptLocalStorage: Storage = {
+    length: 0,
+    clear: corrupt,
+    getItem: corrupt,
+    key: () => null,
+    removeItem: corrupt,
+    setItem: corrupt,
+  };
+  const sw = make({
+    storage: createBrowserStorage({ localStorage: corruptLocalStorage }),
+  });
+  await expect(sw.ready).resolves.toBeUndefined();
+  await expect(sw.user.identify("u1")).resolves.toBeUndefined();
+  expect(sw.user.id.value).toBe("u1");
+  await sw.dispose();
+});
+
+it("a corrupt stored attribution doesn't fail ready and is overwritten", async () => {
+  const adapter = newAdapter();
+  await adapter.set(STORAGE_KEYS.attribution, "{not json");
+  const sw = make({ storage: adapter });
+  await expect(sw.ready).resolves.toBeUndefined();
+  const rewritten = await adapter.get(STORAGE_KEYS.attribution);
+  expect(() => JSON.parse(rewritten ?? "")).not.toThrow();
+  await sw.dispose();
 });
 
 it("reset() clears the cached subscriptionStatus so it doesn't replay", async () => {

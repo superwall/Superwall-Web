@@ -109,7 +109,7 @@ import {
   attributionToRecord,
   collectCurrentAttribution,
   mergeFirstTouch,
-  type AttributionAttributes,
+  parseStoredAttribution,
 } from "./internal/attributionAttributes.ts";
 import {
   encodeSlice,
@@ -1058,9 +1058,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         const storedRaw = yield* storage.get(
           asStorageKey(STORAGE_KEYS.attribution),
         );
-        const stored: AttributionAttributes = storedRaw
-          ? (JSON.parse(storedRaw) as AttributionAttributes)
-          : {};
+        const stored = parseStoredAttribution(storedRaw);
         const current = collectCurrentAttribution();
         const merged = mergeFirstTouch(stored, current);
         yield* storage

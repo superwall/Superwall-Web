@@ -108,3 +108,33 @@ it("custom localStorage override is honored (e.g. encrypted wrapper)", () => {
   adapter.set(STORAGE_KEYS.firstSeenAt, "ts");
   expect(m.get(STORAGE_KEYS.firstSeenAt)).toBe("ts");
 });
+
+// Firefox hands back a `localStorage` whose every call throws when the
+// profile's storage is corrupt, and the thrown value isn't an `Error`.
+const corruptLocalStorage: Storage = {
+  length: 0,
+  clear: () => {
+    throw { name: "NS_ERROR_FILE_CORRUPTED" };
+  },
+  getItem: () => {
+    throw { name: "NS_ERROR_FILE_CORRUPTED" };
+  },
+  key: () => null,
+  removeItem: () => {
+    throw { name: "NS_ERROR_FILE_CORRUPTED" };
+  },
+  setItem: () => {
+    throw { name: "NS_ERROR_FILE_CORRUPTED" };
+  },
+};
+
+it("get returns null instead of throwing when localStorage.getItem throws", () => {
+  const adapter = createBrowserStorage({ localStorage: corruptLocalStorage });
+  expect(adapter.get(STORAGE_KEYS.firstSeenAt)).toBeNull();
+});
+
+it("get falls back to the cookie mirror when localStorage.getItem throws", () => {
+  writeCookie("_sw_alias_id", "$SuperwallAlias:from_cookie");
+  const adapter = createBrowserStorage({ localStorage: corruptLocalStorage });
+  expect(adapter.get(STORAGE_KEYS.aliasId)).toBe("$SuperwallAlias:from_cookie");
+});
