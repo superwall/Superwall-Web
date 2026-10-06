@@ -3,6 +3,19 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## Unreleased
+
+### Fixed
+
+- `register()` no longer waits forever when startup fails. Any `configure()` failure — or a `reset()` that failed partway — left a pending marker that `register()` waits on, so every call hung (busy-polling) instead of settling. It now settles — e.g. with no config, it rejects with `PaywallNotAvailableError` (`no_config`)
+- The SDK starts in more environments where it used to reject `sw.ready`:
+  - in an iframe sandboxed without `allow-same-origin`, where `localStorage` and `document.cookie` both throw (it now runs on in-memory storage there)
+  - on `http://` pages and older browsers (before Safari 15.4 / Chrome 92), which lack `crypto.randomUUID` and `crypto.subtle`. Ids fall back to `crypto.getRandomValues`, and the device id to a stable non-cryptographic hash of the vendor id
+  - when the enrichment host returns a 200 that isn't `{ user, device }`; it's now an enrichment failure (`enrichment_fail`), as a non-200 already was
+  - when `identity.vendorIdProvider` throws or returns a non-string; a generated vendor id is used instead
+  - when the cached config (`superwall.config`) is valid JSON but not an object, e.g. `null`. That used to fail every page load, since the bad value was never replaced
+  - with a custom `StorageAdapter` whose `get` or `set` fails. Startup reads that fail read as empty, and identity write-back is best effort
+
 ## 0.3.2 — 2026-10-05
 
 ### Fixed

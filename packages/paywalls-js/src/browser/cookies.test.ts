@@ -53,3 +53,27 @@ it("deleteCookie accepts secure + sameSite + path attributes (P1)", () => {
   deleteCookie("strict_cookie", { sameSite: "Strict", path: "/" });
   expect(readCookie("strict_cookie")).toBeNull();
 });
+
+// In a document with an opaque origin (an iframe sandboxed without
+// `allow-same-origin`), touching `document.cookie` throws a SecurityError.
+// The helpers used to let it escape and fail SDK startup.
+it("helpers treat a throwing document.cookie as no cookies", () => {
+  const securityError = () => {
+    throw new DOMException("The document is sandboxed", "SecurityError");
+  };
+  Object.defineProperty(document, "cookie", {
+    configurable: true,
+    get: securityError,
+    set: securityError,
+  });
+  try {
+    expect(readCookie("_sw_alias_id")).toBeNull();
+    expect(() => writeCookie("_sw_alias_id", "v")).not.toThrow();
+    expect(() => deleteCookie("_sw_alias_id")).not.toThrow();
+  } finally {
+    // Drop the own property so the prototype's accessor applies again.
+    delete (document as { cookie?: string }).cookie;
+  }
+  writeCookie("after", "1");
+  expect(readCookie("after")).toBe("1");
+});

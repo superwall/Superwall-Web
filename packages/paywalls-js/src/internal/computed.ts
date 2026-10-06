@@ -110,8 +110,10 @@ const computeOne = (
 const make = Effect.gen(function* () {
   const storage = yield* StorageService;
 
-  // Corrupt JSON is silently dropped (tolerant-cache pattern).
-  const initial = yield* storage.get(HISTORY_KEY);
+  // Runs while the SDK's runtime is being built, where any failure is
+  // permanent for the page — so an unreadable key or corrupt JSON both start
+  // from an empty history (tolerant-cache pattern).
+  const initial = yield* storage.getOrNull(HISTORY_KEY);
   let parsed: EventRecord[] = [];
   if (initial !== null) {
     try {

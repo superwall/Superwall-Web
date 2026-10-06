@@ -1,4 +1,5 @@
-// Tiny cookie helpers. All functions are no-ops when `document` is undefined (SSR).
+// Tiny cookie helpers. All functions are no-ops when `document` is undefined
+// (SSR) or when `document.cookie` is unusable.
 
 export interface CookieWriteOptions {
   /** Cookie domain (e.g. `.example.com`). Default: current host. */
@@ -15,13 +16,31 @@ export interface CookieWriteOptions {
 
 const TWO_YEARS_SECONDS = 60 * 60 * 24 * 365 * 2;
 
-const hasDocument = (): boolean =>
-  typeof document !== "undefined" && typeof document.cookie === "string";
+// Reading or writing `document.cookie` throws a `SecurityError` in a document
+// with an opaque origin — e.g. an iframe sandboxed without
+// `allow-same-origin`. There, cookies simply aren't available: reads see
+// none and writes are dropped, rather than failing the SDK.
+const readDocumentCookie = (): string | null => {
+  if (typeof document === "undefined") return null;
+  try {
+    return typeof document.cookie === "string" ? document.cookie : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeDocumentCookie = (cookie: string): void => {
+  if (typeof document === "undefined") return;
+  try {
+    document.cookie = cookie;
+  } catch {}
+};
 
 export const readCookie = (name: string): string | null => {
-  if (!hasDocument()) return null;
+  const cookies = readDocumentCookie();
+  if (cookies === null) return null;
   const prefix = `${name}=`;
-  for (const part of document.cookie.split(";")) {
+  for (const part of cookies.split(";")) {
     const trimmed = part.trim();
     if (trimmed.startsWith(prefix)) {
       try {
@@ -39,7 +58,6 @@ export const writeCookie = (
   value: string,
   options: CookieWriteOptions = {},
 ): void => {
-  if (!hasDocument()) return;
   const parts: string[] = [`${name}=${encodeURIComponent(value)}`];
   parts.push(`Path=${options.path ?? "/"}`);
   parts.push(`Max-Age=${options.maxAge ?? TWO_YEARS_SECONDS}`);
@@ -49,7 +67,7 @@ export const writeCookie = (
     options.secure ??
     (typeof location !== "undefined" && location.protocol === "https:");
   if (secure) parts.push("Secure");
-  document.cookie = parts.join("; ");
+  writeDocumentCookie(parts.join("; "));
 };
 
 export const deleteCookie = (
@@ -59,7 +77,6 @@ export const deleteCookie = (
     "domain" | "path" | "secure" | "sameSite"
   > = {},
 ): void => {
-  if (!hasDocument()) return;
   // Browsers require `Secure` + `SameSite` to MATCH the original Set-Cookie
   // for deletion to take effect (especially `SameSite=None` on Safari/Chrome).
   const parts: string[] = [
@@ -74,5 +91,5 @@ export const deleteCookie = (
     options.secure ??
     (typeof location !== "undefined" && location.protocol === "https:");
   if (secure) parts.push("Secure");
-  document.cookie = parts.join("; ");
+  writeDocumentCookie(parts.join("; "));
 };

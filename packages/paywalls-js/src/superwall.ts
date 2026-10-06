@@ -111,6 +111,7 @@ import {
   mergeFirstTouch,
   parseStoredAttribution,
 } from "./internal/attributionAttributes.ts";
+import { randomUuid } from "./internal/uuid.ts";
 import {
   encodeSlice,
   experimentSliceFields,
@@ -527,17 +528,6 @@ interface InitPayloadInput {
   deviceAttributes: Record<string, unknown>;
 }
 
-const randomUuid = (): string => {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
-  }
-  // SSR / older runtime fallback — non-cryptographic, OK for event ids.
-  return `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-};
 
 /** Build the `#init=` payload for the paywall iframe. Shape per
  *  `packages/web-paywalls/src/schema/controller.ts` +
@@ -686,12 +676,13 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
 
 /** Browser → localStorage (persists across reloads); elsewhere → in-memory. */
 const createDefaultStorage = (): StorageAdapter => {
-  if (typeof localStorage !== "undefined") {
-    try {
-      return createBrowserStorage();
-    } catch {
-      // localStorage present but unusable (e.g. Safari private mode).
-    }
+  try {
+    // Inside the try: even `typeof localStorage` runs the getter, which
+    // throws a SecurityError in an iframe sandboxed without
+    // `allow-same-origin`. Storage is unavailable there, so use memory.
+    if (typeof localStorage !== "undefined") return createBrowserStorage();
+  } catch {
+    // localStorage present but unusable (e.g. Safari private mode).
   }
   return createMemoryStorage();
 };
@@ -841,7 +832,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     yield* IdentityService.hydrate(seed);
 
     const storage = yield* StorageService;
-    const storedAttrs = yield* storage.get(
+    const storedAttrs = yield* storage.getOrNull(
       asStorageKey(STORAGE_KEYS.userAttributes),
     );
     if (storedAttrs !== null) {
@@ -1038,7 +1029,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     });
 
     // Replay last-restore timestamp so consumers can read it pre-restore.
-    const cachedRestoreAt = yield* storage.get(
+    const cachedRestoreAt = yield* storage.getOrNull(
       asStorageKey(STORAGE_KEYS.lastRestoreAt),
     );
     if (cachedRestoreAt !== null) {
@@ -1195,12 +1186,16 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       }
     }
 
-    // Drain the initial Configuration pending item — register() blocks on
-    // phase=Ready until this clears.
-    yield* IdentityService.endPending(IdentityPending.Configuration);
     configuredSig.set(haveConfig);
     statusSig.set(haveConfig ? "configured" : "failed");
-  }).pipe(Effect.withSpan("Superwall.configure"));
+  }).pipe(
+    // Drain the initial Configuration pending item — register() blocks on
+    // phase=Ready until this clears. `ensuring` so a configure() that fails
+    // partway still drains it: register() then rejects (no config / identity)
+    // instead of waiting forever.
+    Effect.ensuring(IdentityService.endPending(IdentityPending.Configuration)),
+    Effect.withSpan("Superwall.configure"),
+  );
 
   /** Hand every trigger experiment to AssignmentService.chooseAllVariants. */
   const eagerAssign = Effect.fn("Superwall.eagerAssign")(function*(
@@ -1223,7 +1218,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const totalKey = asStorageKey(STORAGE_KEYS.totalPaywallViews);
       const lastViewKey = asStorageKey(STORAGE_KEYS.lastPaywallViewAt);
 
-      const stored = yield* storage.get(firstSeenKey);
+      const stored = yield* storage.getOrNull(firstSeenKey);
       if (stored !== null) {
         const ms = Number.parseInt(stored, 10);
         if (!Number.isNaN(ms)) firstSeenAtSig.set(ms);
@@ -1235,12 +1230,12 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           .pipe(Effect.catchAll(() => Effect.void));
       }
 
-      const total = yield* storage.get(totalKey);
+      const total = yield* storage.getOrNull(totalKey);
       if (total !== null) {
         const n = Number.parseInt(total, 10);
         if (!Number.isNaN(n)) totalPaywallViewsSig.set(n);
       }
-      const lastView = yield* storage.get(lastViewKey);
+      const lastView = yield* storage.getOrNull(lastViewKey);
       if (lastView !== null) {
         const ms = Number.parseInt(lastView, 10);
         if (!Number.isNaN(ms)) lastPaywallViewAtSig.set(ms);
@@ -1579,8 +1574,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       yield* computed.reset();
       const bus = yield* EventBus;
       yield* bus.publish("reset", {});
-      yield* IdentityService.endPending(IdentityPending.Reset);
-    });
+    }).pipe(
+      // A reset that fails partway must still drain Reset, or every later
+      // register() waits on it forever.
+      Effect.ensuring(IdentityService.endPending(IdentityPending.Reset)),
+    );
 
   const user: UserNamespace = {
     id: asReadable(idSig),
