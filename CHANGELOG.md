@@ -3,11 +3,11 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
-## Unreleased
+## 0.3.3 — 2026-10-16
 
 ### Fixed
 
-- The paywall a `register()` is about to present is no longer downloaded twice. Background cache warming used to mount a hidden preload iframe for it while the presented iframe requested the same document, and the two URLs differ, so both downloaded in full. Warming now waits until `sw.ready` has settled plus one task, so a `register()` issued right after `await sw.ready` starts first, and it stands down for as long as any `register()` is in flight. The browser presenter also cancels preload iframes that are still loading when it presents, and ignores preloads while a paywall is up
+- The paywall a `register()` is about to present is no longer downloaded twice. Background cache warming used to mount a hidden preload iframe for it while the presented iframe requested the same document, and the two URLs differ, so both downloaded in full. Warming now waits until `sw.ready` has settled plus one task, so a `register()` issued right after `await sw.ready` starts first, and it stands down for as long as any `register()` is in flight. The browser presenter also cancels preload iframes that are still loading when it presents, and ignores preloads while a paywall is up. In `example/preload-bench` (an 875 KB paywall plus two other live campaigns, cold loads), `register()` to paywall loaded drops from 11.65 s to 6.37 s on Slow 4G and from 2.83 s to 1.28 s on Fast 4G
 - `paywalls.shouldPreload: false` now turns automatic preloading off. It was declared but never read
 - The static config's `disable_preload` is honored: `all: true` turns off every preload, and `triggers` lists placements whose paywalls are never preloaded. It applies to automatic and explicit preloads alike
 - `placements.preloadFor(names)` and `placements.preloadAll()` now preload. Both were no-ops. They ignore `shouldPreload`, so with `shouldPreload: false` a site warms only the placements it names
