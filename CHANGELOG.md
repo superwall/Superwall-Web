@@ -3,6 +3,19 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## Unreleased
+
+### Fixed
+
+- The paywall a `register()` is about to present is no longer downloaded twice. Background cache warming used to mount a hidden preload iframe for it while the presented iframe requested the same document, and the two URLs differ, so both downloaded in full. Warming now waits until `sw.ready` has settled plus one task, so a `register()` issued right after `await sw.ready` starts first, and it stands down for as long as any `register()` is in flight. The browser presenter also cancels preload iframes that are still loading when it presents, and ignores preloads while a paywall is up
+- `paywalls.shouldPreload: false` now turns automatic preloading off. It was declared but never read
+- The static config's `disable_preload` is honored: `all: true` turns off every preload, and `triggers` lists placements whose paywalls are never preloaded. It applies to automatic and explicit preloads alike
+- `placements.preloadFor(names)` and `placements.preloadAll()` now preload. Both were no-ops. They ignore `shouldPreload`, so with `shouldPreload: false` a site warms only the placements it names
+
+### Changed
+
+- Automatic preloading only warms paywalls that a placement can present, and only the variant this user is assigned to. Holdouts, and paywalls that no placement references, are no longer warmed. Each preload runs the whole paywall (scripts, images, Stripe.js), so a site with several live campaigns should set `shouldPreload: false` and call `preloadFor()` for the placements it expects next
+
 ## 0.3.2 — 2026-10-05
 
 ### Fixed

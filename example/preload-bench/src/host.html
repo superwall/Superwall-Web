@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Preload bench host</title>
+  </head>
+  <body>
+    <h1>Onboarding</h1>
+    <script type="module">
+      // Host site from the customer report: createSuperwall(), await ready,
+      // then register the onboarding placement right away.
+      const bench = (window.__bench = { marks: {} });
+      const mark = (k) => (bench.marks[k] ??= performance.now());
+      addEventListener("message", (e) => {
+        if (e.data?.bench !== "paywall-load") return;
+        if (e.data.presented && e.data.id === "onboarding") {
+          mark("presentedLoaded");
+          window.__benchDone?.();
+        }
+      });
+
+      // Superwall API calls go to this server: config from /mock, every
+      // other endpoint answers 204.
+      const benchFetch = (input, init) => {
+        const url = new URL(typeof input === "string" ? input : input.url);
+        if (url.pathname === "/api/v1/static_config") {
+          return fetch("/mock/static_config", init);
+        }
+        if (url.pathname === "/api/v1/enrich") {
+          return Promise.resolve(Response.json({ user: {}, device: {} }));
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      };
+
+      const sdk = new URLSearchParams(location.search).get("sdk");
+      const { createSuperwall } = await import(`/sdk/${sdk}/index.js`);
+      mark("sdkLoaded");
+      const sw = createSuperwall({ apiKey: "pk_bench", fetch: benchFetch });
+      await sw.ready;
+      mark("ready");
+      mark("register");
+      sw.register({ placement: "web2app_onboarding" });
+    </script>
+  </body>
+</html>

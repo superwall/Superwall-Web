@@ -52,6 +52,8 @@ export const createBrowserPresenter = (
   options: BrowserPresenterOptions = {},
 ): PaywallPresenter => {
   let active: ActivePresentation | null = null;
+  /** Cancel hooks for preload iframes still loading. */
+  const inflightPreloads = new Set<() => void>();
 
   const present: PaywallPresenter["present"] = (info, ctx) => {
     if (typeof document === "undefined") {
@@ -67,6 +69,11 @@ export const createBrowserPresenter = (
     }
 
     warnHostPolicyOnce(ctx);
+    // Drop any preload still loading: removing its iframe aborts the request,
+    // so the presented paywall isn't downloaded twice in parallel (the two
+    // URLs differ and can't share a response) and doesn't share bandwidth
+    // with paywalls the user isn't looking at.
+    for (const cancel of [...inflightPreloads]) cancel();
     return new Promise<PaywallResult>((resolve, reject) => {
       const onTearDown = (a: ActivePresentation) => {
         if (active === a) active = null;
@@ -120,13 +127,14 @@ export const createBrowserPresenter = (
   };
 
   /** Warm a paywall by firing a hidden iframe. The iframe is removed once
-   *  the URL has loaded — bytes stay in the browser HTTP cache so the next
-   *  `present(info)` for the same URL avoids the network round-trip.
-   *  No-op on SSR. iOS Safari throttles hidden iframes; cache warming is
-   *  best-effort there. */
+   *  the URL has loaded — its scripts, styles and images stay in the browser
+   *  HTTP cache for the next `present(info)`. Cancelled if a paywall is
+   *  presented first. No-op on SSR or while a paywall is up. iOS Safari
+   *  throttles hidden iframes; cache warming is best-effort there. */
   const preload: NonNullable<PaywallPresenter["preload"]> = (info) =>
     new Promise<void>((resolve) => {
-      if (typeof document === "undefined") {
+      // Never warm alongside a presented paywall — it would compete with it.
+      if (typeof document === "undefined" || active !== null) {
         resolve();
         return;
       }
@@ -150,11 +158,13 @@ export const createBrowserPresenter = (
       const cleanup = () => {
         if (settled) return;
         settled = true;
+        inflightPreloads.delete(cleanup);
         try {
           iframe.remove();
         } catch {}
         resolve();
       };
+      inflightPreloads.add(cleanup);
       iframe.addEventListener("load", cleanup, { once: true });
       iframe.addEventListener("error", cleanup, { once: true });
       // Hard cap so a never-loading iframe doesn't leak.

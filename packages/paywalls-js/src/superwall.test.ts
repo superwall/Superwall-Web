@@ -1726,6 +1726,170 @@ it("sw.ready does not wait for paywall cache warming (cold + cached)", async () 
   }
 });
 
+// ---------------------------------------------------------------------------
+// paywall preloading — scope, opt-outs, and staying out of register()'s way
+// ---------------------------------------------------------------------------
+
+/** Two placements, three paywalls: `onboarding` → pw_onboarding,
+ *  `home` → pw_home, and pw_orphan that no placement references. */
+const PRELOAD_STATIC_CONFIG = {
+  ...CHECKOUT_STATIC_CONFIG,
+  trigger_options: (["onboarding", "home"] as const).map((name) => ({
+    event_name: name,
+    rules: [
+      {
+        experiment_id: `exp_${name}`,
+        experiment_group_id: "grp_test",
+        expression_cel: "",
+        variants: [
+          {
+            variant_id: `var_${name}`,
+            variant_type: "TREATMENT",
+            percentage: 100,
+            paywall_identifier: `pw_${name}`,
+          },
+        ],
+      },
+    ],
+  })),
+  paywall_responses: ["onboarding", "home", "orphan"].map((name) => ({
+    identifier: `pw_${name}`,
+    name,
+    url: `https://paywalls.superwall.test/pw_${name}`,
+  })),
+};
+
+const makeWithConfig = (
+  config: Record<string, unknown>,
+  override: Partial<Parameters<typeof createSuperwall>[0]> = {},
+): Superwall => {
+  const fakeFetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/static_config")) {
+      return Promise.resolve(new Response(JSON.stringify(config)));
+    }
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(new Response(JSON.stringify({ user: {}, device: {} })));
+    }
+    return Promise.resolve(new Response("", { status: 204 }));
+  }) as unknown as typeof fetch;
+  return createSuperwall({ apiKey: "pk_test", fetch: fakeFetch, storage: newAdapter(), ...override });
+};
+
+/** Record every preload iframe mounted while `body` runs (they remove
+ *  themselves on load, so a point-in-time query would miss them). */
+const recordPreloads = async (body: () => Promise<void>): Promise<string[]> => {
+  const seen: string[] = [];
+  const observer = new MutationObserver((records) => {
+    for (const r of records) {
+      r.addedNodes.forEach((n) => {
+        const id = (n as HTMLElement).dataset?.["swPreload"];
+        if (id) seen.push(id);
+      });
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  const spy = stubInertIframes();
+  try {
+    await body();
+    await new Promise((r) => setTimeout(r, 30));
+    observer.takeRecords().forEach((r) =>
+      r.addedNodes.forEach((n) => {
+        const id = (n as HTMLElement).dataset?.["swPreload"];
+        if (id) seen.push(id);
+      }),
+    );
+  } finally {
+    observer.disconnect();
+    spy.mockRestore();
+    document.querySelectorAll("[data-sw-preload]").forEach((n) => n.remove());
+  }
+  return seen.sort();
+};
+
+it("automatic preload warms only paywalls a placement can present", async () => {
+  const seen = await recordPreloads(async () => {
+    const sw = makeWithConfig(PRELOAD_STATIC_CONFIG);
+    await sw.ready;
+    await new Promise((r) => setTimeout(r, 20));
+    await sw.dispose();
+  });
+  expect(seen).toEqual(["pw_home", "pw_onboarding"]);
+});
+
+it("register() right after ready presents without a parallel preload", async () => {
+  let release!: () => void;
+  const presenter: PaywallPresenter = {
+    present: () =>
+      new Promise((r) => (release = () => r({ type: "declined" }))),
+    dismiss: () => release?.(),
+  };
+  const seen = await recordPreloads(async () => {
+    const sw = makeWithConfig(PRELOAD_STATIC_CONFIG);
+    await sw.ready;
+    const pending = sw.register({ placement: "onboarding", presenter });
+    await new Promise((r) => setTimeout(r, 30));
+    release();
+    await pending;
+    await sw.dispose();
+  });
+  expect(seen).toEqual([]);
+});
+
+it("paywalls.shouldPreload: false turns automatic preloading off", async () => {
+  const seen = await recordPreloads(async () => {
+    const sw = makeWithConfig(PRELOAD_STATIC_CONFIG, {
+      options: { paywalls: { shouldPreload: false } },
+    });
+    await sw.ready;
+    await new Promise((r) => setTimeout(r, 20));
+    await sw.dispose();
+  });
+  expect(seen).toEqual([]);
+});
+
+it("preloadFor() warms only the named placements, even with shouldPreload: false", async () => {
+  const seen = await recordPreloads(async () => {
+    const sw = makeWithConfig(PRELOAD_STATIC_CONFIG, {
+      options: { paywalls: { shouldPreload: false } },
+    });
+    await sw.ready;
+    // Resolves once the (inert) iframe settles — only the mount matters here.
+    void sw.placements.preloadFor(["onboarding"]);
+    await new Promise((r) => setTimeout(r, 20));
+    await sw.dispose();
+  });
+  expect(seen).toEqual(["pw_onboarding"]);
+});
+
+it("disable_preload.triggers skips those placements' paywalls", async () => {
+  const seen = await recordPreloads(async () => {
+    const sw = makeWithConfig({
+      ...PRELOAD_STATIC_CONFIG,
+      disable_preload: { all: false, triggers: ["home"] },
+    });
+    await sw.ready;
+    await new Promise((r) => setTimeout(r, 20));
+    await sw.placements.preloadAll();
+    await sw.dispose();
+  });
+  expect(seen).toEqual(["pw_onboarding"]);
+});
+
+it("disable_preload.all turns off automatic and explicit preloading", async () => {
+  const seen = await recordPreloads(async () => {
+    const sw = makeWithConfig({
+      ...PRELOAD_STATIC_CONFIG,
+      disable_preload: { all: true, triggers: [] },
+    });
+    await sw.ready;
+    await sw.placements.preloadFor(["onboarding"]);
+    await sw.placements.preloadAll();
+    await sw.dispose();
+  });
+  expect(seen).toEqual([]);
+});
+
 it("sw.ready does not wait for confirm_assignments", async () => {
   const { fetch, calls } = fetchHanging((url) =>
     url.includes("/api/v1/confirm_assignments"),

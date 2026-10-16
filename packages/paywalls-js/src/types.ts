@@ -557,6 +557,10 @@ export type IntegrationAttribute =
 
 export interface PaywallOptions {
   container?: HTMLElement | (() => HTMLElement);
+  /** Warm the paywalls this user is assigned to in the background once
+   *  config loads. Default `true`. Set `false` to warm only what you ask for
+   *  via `placements.preloadFor()` / `preloadAll()`. The dashboard's preload
+   *  setting (`disable_preload`) overrides both. */
   shouldPreload?: boolean;
   closeOnBackdrop?: boolean;
   zIndex?: number;

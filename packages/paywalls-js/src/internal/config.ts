@@ -49,6 +49,13 @@ export interface RawConfig {
    *  `#init=` hash so the controller can render the app name + icon
    *  on default/error chrome. */
   readonly application?: { readonly name?: string; readonly iconUrl?: string };
+  /** Dashboard preload kill-switch (`disable_preload`). `all` turns paywall
+   *  preloading off entirely; `triggers` lists placements whose paywalls must
+   *  not be preloaded. Absent ⇒ preloading allowed everywhere. */
+  readonly preloadingDisabled?: {
+    readonly all: boolean;
+    readonly triggers: ReadonlyArray<string>;
+  };
   /** Untyped backing payload — preserves fields we don't model. */
   readonly raw: Record<string, JsonValue>;
 }
@@ -462,6 +469,10 @@ const ApplicationWire = Schema.Struct({
   name: optStr,
   icon_url: optStr,
 });
+const DisablePreloadWire = Schema.Struct({
+  all: optBool,
+  triggers: Schema.optional(Schema.Unknown),
+});
 const Web2AppWire = Schema.Struct({
   url_schema: optStr,
   restore_access_url: optStr,
@@ -477,6 +488,13 @@ const toApplication = (
   if (a.name !== undefined) out.name = a.name;
   if (a.icon_url !== undefined) out.iconUrl = a.icon_url;
   return Object.keys(out).length > 0 ? { application: out } : {};
+};
+
+const toPreloadingDisabled = (
+  value: unknown,
+): NonNullable<RawConfig["preloadingDisabled"]> => {
+  const d = decodeOne(DisablePreloadWire, value);
+  return { all: d?.all === true, triggers: decodeItems(Schema.String, d?.triggers) };
 };
 
 const toWeb2App = (
@@ -544,6 +562,7 @@ export const parseConfig = (input: JsonValue): RawConfig => {
     })),
     locales,
     testModeUserIds: decodeItems(TestModeUserIdSchema, root["test_mode_user_ids"]),
+    preloadingDisabled: toPreloadingDisabled(root["disable_preload"]),
     ...toApplication(root["application"]),
     ...toWeb2App(root["web2app_config"]),
     raw: root,
