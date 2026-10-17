@@ -1220,6 +1220,22 @@ it("preload(): mounts a hidden iframe and removes it after load", async () => {
   ).toBeNull();
 });
 
+it("present() cancels a preload still loading, and preload() is a no-op while presenting", async () => {
+  const presenter = createBrowserPresenter();
+  const warming = presenter.preload!(stubInfo("pw_race"));
+  expect(document.querySelector('iframe[data-sw-preload="pw_race"]')).not.toBeNull();
+
+  const presentation = presenter.present(stubInfo("pw_race"), newCtx());
+  await warming;
+  expect(document.querySelector("iframe[data-sw-preload]")).toBeNull();
+
+  await presenter.preload!(stubInfo("pw_other"));
+  expect(document.querySelector("iframe[data-sw-preload]")).toBeNull();
+
+  presenter.dismiss();
+  await presentation;
+});
+
 // ---------------------------------------------------------------------------
 // Events the iframe controller already sends to the collector (SW-5975)
 // ---------------------------------------------------------------------------
