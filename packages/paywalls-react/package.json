@@ -42,7 +42,7 @@
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.0.0",
     "@testing-library/react": "^16.1.0",
-    "@types/bun": "latest",
+    "@types/bun": "1.4.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "react": "^19.0.0",
