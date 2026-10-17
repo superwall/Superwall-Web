@@ -1,11 +1,9 @@
 import { it, expect } from "@effect/vitest";
+import { vi } from "vitest";
 import { Effect, Either, Layer, Stream } from "effect";
 import { STORAGE_KEYS, type StorageAdapter } from "../types.ts";
-import { asStorageKey, asUserId } from "./brands.ts";
-import {
-  IdentityHydrationError,
-  IdentityNotHydratedError,
-} from "./errors.ts";
+import { asStorageKey, asUserId, type VendorId } from "./brands.ts";
+import { IdentityNotHydratedError } from "./errors.ts";
 import {
   deriveDeviceId,
   generateAlias,
@@ -27,6 +25,9 @@ const DEVICE_KEY = asStorageKey(STORAGE_KEYS.deviceId);
 /** Coerce a branded string back to plain `string` so `.toBe(literal)` works.
  *  Brands are internal correctness aids; tests compare against plain strings. */
 const s = (b: string | null | undefined): string | null | undefined => b as string | null | undefined;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Fresh layer per test so suites don't bleed via the in-memory adapter. */
 const freshStack = () => {
@@ -71,6 +72,27 @@ it.effect("deriveDeviceId differs across vendors", () => {
     const b = yield* deriveDeviceId(generateVendorId());
     expect(a).not.toBe(b);
   });
+});
+
+// SubtleCrypto and `crypto.randomUUID` only exist in secure contexts, so on
+// an `http://` page identity generation used to fail SDK startup.
+it.effect("identity generation works without SubtleCrypto or crypto.randomUUID", () => {
+  const real = globalThis.crypto;
+  const v = "11111111-2222-4333-8444-555555555555" as VendorId;
+  return Effect.gen(function* () {
+    const withSubtle = yield* deriveDeviceId(v);
+    vi.stubGlobal("crypto", { getRandomValues: real.getRandomValues.bind(real) });
+
+    expect(generateAlias()).toMatch(/^\$SuperwallAlias:/);
+    expect(s(generateVendorId())).toMatch(UUID_RE);
+    const a = yield* deriveDeviceId(v);
+    const b = yield* deriveDeviceId(v);
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+    expect(a).toBe(b);
+    expect(yield* deriveDeviceId(generateVendorId())).not.toBe(a);
+    // A different (non-SHA-256) hash, but stable for the vendor id.
+    expect(a).not.toBe(withSubtle);
+  }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllGlobals())));
 });
 
 // ---------------------------------------------------------------------------
@@ -190,21 +212,53 @@ it.effect("hydrate skips vendorIdProvider when storage already has a vendor", ()
   });
 });
 
-it.effect("vendorIdProvider that throws → IdentityHydrationError", () => {
+// A failing host provider used to fail hydrate, and with it SDK startup.
+it.effect("vendorIdProvider that throws → falls back to a generated vendor id", () => {
   const { stack } = freshStack();
   return Effect.gen(function* () {
-    const result = yield* IdentityService.hydrate({
+    const snap = yield* IdentityService.hydrate({
       vendorIdProvider: () => {
         throw new Error("fingerprint api down");
       },
-    }).pipe(Effect.provide(stack), Effect.either);
+    }).pipe(Effect.provide(stack));
 
-    expect(Either.isLeft(result)).toBe(true);
-    if (Either.isLeft(result)) {
-      expect(result.left).toBeInstanceOf(IdentityHydrationError);
-      expect((result.left as IdentityHydrationError).message).toContain("fingerprint api down");
-    }
+    expect(s(snap.vendorId)).toMatch(UUID_RE);
   });
+});
+
+it.effect("vendorIdProvider that resolves to a non-string → generated vendor id", () => {
+  const { stack } = freshStack();
+  return Effect.gen(function* () {
+    const snap = yield* IdentityService.hydrate({
+      vendorIdProvider: () => undefined as unknown as string,
+    }).pipe(Effect.provide(stack));
+
+    expect(s(snap.vendorId)).toMatch(UUID_RE);
+  });
+});
+
+// A custom adapter that can't read or write used to fail hydrate; identity
+// is now generated and held in memory instead.
+it.effect("hydrate succeeds when every storage call throws", () => {
+  const broken: StorageAdapter = {
+    get: () => {
+      throw new Error("storage unavailable");
+    },
+    set: () => {
+      throw new Error("storage unavailable");
+    },
+    remove: () => {
+      throw new Error("storage unavailable");
+    },
+  };
+  const stack = identityWithStorage(StorageService.fromAdapter(broken));
+  return Effect.gen(function* () {
+    const snap = yield* IdentityService.hydrate();
+    expect(s(snap.aliasId)).toMatch(/^\$SuperwallAlias:/);
+    expect(s(snap.vendorId)).toMatch(UUID_RE);
+    expect(s(snap.appUserId)).toBe("");
+    expect((yield* IdentityService.current()).aliasId).toBe(snap.aliasId);
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------
@@ -314,25 +368,26 @@ it.effect("observe() emits hydrate + identify + signOut transitions", () => {
 // downstream storage failure surfaces as the storage tagged error
 // ---------------------------------------------------------------------------
 
-it.effect("storage failure during hydrate persistence propagates as a tagged StorageSetError", () => {
-  let allowSets = 0;
+// hydrate() tolerates it (startup must not fail; see "hydrate succeeds when
+// every storage call throws"), but an explicit identify() still reports it.
+it.effect("storage failure during identify persistence propagates as a tagged StorageSetError", () => {
+  let failSets = false;
   const flaky: StorageAdapter = {
     get: () => null,
     set: (_k, _v) => {
-      if (allowSets-- > 0) return;
-      throw new Error("disk full");
+      if (failSets) throw new Error("disk full");
     },
     remove: () => {},
   };
 
   const stack = identityWithStorage(StorageService.fromAdapter(flaky));
   return Effect.gen(function* () {
-    const result = yield* IdentityService.hydrate().pipe(
-      Effect.provide(stack),
-      Effect.either,
-    );
+    yield* IdentityService.hydrate();
+    failSets = true;
+    const result = yield* IdentityService.identify("u1").pipe(Effect.either);
     expect(Either.isLeft(result)).toBe(true);
-  });
+    if (Either.isLeft(result)) expect(result.left._tag).toBe("StorageSetError");
+  }).pipe(Effect.provide(stack));
 });
 
 // ---------------------------------------------------------------------------

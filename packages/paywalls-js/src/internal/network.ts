@@ -15,6 +15,8 @@ import {
   NetworkRequestError,
 } from "./errors.ts";
 import { IdentityService } from "./identity.ts";
+import { describeCause as describe } from "./describe.ts";
+import { randomUuid } from "./uuid.ts";
 
 export { resolveHosts, isSandbox };
 export type { WebEntitlementsResponse };
@@ -57,18 +59,7 @@ const safeCall = <T>(read: (() => T) | undefined, fallback: T): T => {
 
 /** Per-request id. Mirrors iOS's `X-Request-Id`; lets a support ticket be
  *  traced to a single request in the backend logs. */
-const newRequestId = (): string => {
-  try {
-    if (typeof globalThis.crypto?.randomUUID === "function") {
-      return globalThis.crypto.randomUUID();
-    }
-  } catch {}
-  return `xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-};
+const newRequestId = (): string => randomUuid();
 
 const safeReadString = (read: () => string | undefined): string => {
   try {
@@ -444,8 +435,8 @@ const make = (config: NetworkConfig) =>
         }
 
         yield* Effect.annotateCurrentSpan({ "http.status_code": response.status });
-        return yield* Effect.tryPromise({
-          try: () => response.json() as Promise<EnrichmentResponse>,
+        const body = yield* Effect.tryPromise({
+          try: () => response.json() as Promise<unknown>,
           catch: (cause) =>
             new NetworkDecodingError({
               url,
@@ -453,6 +444,18 @@ const make = (config: NetworkConfig) =>
               cause,
             }),
         });
+        // Callers iterate `user` / `device`, so a 200 of the wrong shape (an
+        // error envelope, `{}`, `null` from a proxy) must be a typed failure,
+        // not a TypeError downstream that escapes their error handling.
+        if (!isEnrichmentResponse(body)) {
+          return yield* Effect.fail(
+            new NetworkDecodingError({
+              url,
+              message: "enrichment response is missing its user / device objects",
+            }),
+          );
+        }
+        return body;
       },
       // Hard 1s ceiling on the whole call. `timeoutFail` converts the timeout
       // into the same error channel as a network failure (not a defect), so
@@ -652,6 +655,12 @@ export interface EnrichmentResponse {
   readonly device: Record<string, JsonValue | null>;
 }
 
+const isPlainObject = (v: unknown): v is Record<string, JsonValue | null> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const isEnrichmentResponse = (body: unknown): body is EnrichmentResponse =>
+  isPlainObject(body) && isPlainObject(body.user) && isPlainObject(body.device);
+
 /** Body of `POST /api/v1/confirm_assignments`. Flat snake_case; `experiment_id`
  *  / `variant_id` are digit-strings (the BE schema is `z.string().regex(/^\d+$/)`
  *  — a numeric value fails validation). Max 100 entries per call. Idempotent. */
@@ -749,9 +758,3 @@ export const networkServiceLayer = (
     identityLayer,
   );
 
-const describe = (cause: unknown): string =>
-  cause instanceof Error
-    ? cause.message
-    : typeof cause === "string"
-      ? cause
-      : JSON.stringify(cause);

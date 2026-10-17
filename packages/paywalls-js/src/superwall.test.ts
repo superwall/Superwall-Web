@@ -427,6 +427,131 @@ it("a corrupt stored attribution doesn't fail ready and is overwritten", async (
   await sw.dispose();
 });
 
+// Startup resilience: each of these environments used to fail configure(),
+// rejecting `ready` and leaving every later register() waiting forever.
+
+it("starts in a sandboxed iframe, where localStorage and document.cookie both throw", async () => {
+  const securityError = () => {
+    throw new DOMException("The document is sandboxed", "SecurityError");
+  };
+  const lsDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get: securityError,
+  });
+  Object.defineProperty(document, "cookie", {
+    configurable: true,
+    get: securityError,
+    set: securityError,
+  });
+  try {
+    // No `storage` option: exercise the SDK's own default adapter choice.
+    const sw = _createSuperwall({ apiKey: "pk_test", fetch: noopFetch });
+    await expect(sw.ready).resolves.toBeUndefined();
+    await expect(sw.user.identify("u1")).resolves.toBeUndefined();
+    expect(sw.user.id.value).toBe("u1");
+    await sw.dispose();
+  } finally {
+    if (lsDescriptor) Object.defineProperty(globalThis, "localStorage", lsDescriptor);
+    delete (document as { cookie?: string }).cookie;
+  }
+});
+
+it("starts on an insecure (http://) page without crypto.randomUUID or SubtleCrypto", async () => {
+  const real = globalThis.crypto;
+  vi.stubGlobal("crypto", { getRandomValues: real.getRandomValues.bind(real) });
+  try {
+    const sw = make();
+    await expect(sw.ready).resolves.toBeUndefined();
+    expect(sw.user.aliasId.value).toMatch(/^\$SuperwallAlias:/);
+    await expect(sw.user.identify("u1")).resolves.toBeUndefined();
+    await sw.dispose();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("starts when the enrichment host returns 200 with the wrong shape", async () => {
+  const urls: string[] = [];
+  const fetch = ((input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    urls.push(url);
+    if (url.includes("/api/v1/enrich")) {
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    }
+    return noopFetch(input);
+  }) as unknown as typeof globalThis.fetch;
+  const sw = make({ fetch });
+  await expect(sw.ready).resolves.toBeUndefined();
+  expect(urls.some((u) => u.includes("/api/v1/enrich"))).toBe(true);
+  expect(sw.configurationStatus.value).toBe("configured");
+  await sw.dispose();
+});
+
+it("starts when identity.vendorIdProvider throws", async () => {
+  const sw = make({
+    identity: {
+      vendorIdProvider: () => {
+        throw new Error("fingerprint api down");
+      },
+    },
+  });
+  await expect(sw.ready).resolves.toBeUndefined();
+  await sw.dispose();
+});
+
+it("starts when the cached config is the JSON literal null, and replaces it", async () => {
+  const adapter = newAdapter();
+  await adapter.set(STORAGE_KEYS.config, "null");
+  const sw = make({ storage: adapter });
+  await expect(sw.ready).resolves.toBeUndefined();
+  expect(sw.configurationStatus.value).toBe("configured");
+  const cached = JSON.parse((await adapter.get(STORAGE_KEYS.config)) ?? "null");
+  expect(cached).toMatchObject({ buildId: "test_build" });
+  await sw.dispose();
+});
+
+it("starts with a custom StorageAdapter whose get always rejects", async () => {
+  const adapter = newAdapter();
+  const sw = make({
+    storage: {
+      ...adapter,
+      get: () => Promise.reject(new Error("IndexedDB unavailable")),
+    },
+  });
+  await expect(sw.ready).resolves.toBeUndefined();
+  await expect(sw.user.identify("u1")).resolves.toBeUndefined();
+  expect(sw.user.id.value).toBe("u1");
+  await sw.dispose();
+});
+
+it("a reset() that fails partway doesn't leave register() waiting forever", async () => {
+  const adapter = newAdapter();
+  let failRemoves = false;
+  const sw = make({
+    storage: {
+      ...adapter,
+      remove: (key) => {
+        if (failRemoves) throw new Error("disk full");
+        return adapter.remove(key);
+      },
+    },
+  });
+  await sw.ready;
+  failRemoves = true;
+  await expect(sw.reset()).rejects.toBeDefined();
+  // Settles (here: skipped, no such placement) instead of hanging.
+  const outcome = await Promise.race([
+    sw.register({ placement: "nope" }).then(
+      () => "settled",
+      () => "settled",
+    ),
+    new Promise((r) => setTimeout(() => r("hung"), 2000)),
+  ]);
+  expect(outcome).toBe("settled");
+  await sw.dispose();
+});
+
 it("reset() clears the cached subscriptionStatus so it doesn't replay", async () => {
   const adapter = newAdapter();
   const sw1 = make({ storage: adapter });

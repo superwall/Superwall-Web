@@ -368,6 +368,34 @@ it.effect("postEnrichment POSTs { user, device } to the enrichment host and merg
   }).pipe(Effect.provide(stack));
 });
 
+// The response was only cast, so a 200 of the wrong shape threw a TypeError
+// in the caller (`Object.entries(result.user)`), escaping its error handling
+// and failing SDK startup.
+it.effect.each([
+  "{}",
+  "null",
+  '{"user":null,"device":{}}',
+  '{"user":[],"device":{}}',
+  '{"error":"bad"}',
+])(
+  "postEnrichment fails with NetworkDecodingError for a %s body",
+  (body) => {
+    const { fetch } = mockFetch(() => new Response(body, { status: 200 }));
+    const stack = buildStack(fetch);
+    return Effect.gen(function* () {
+      yield* IdentityService.hydrate();
+      const net = yield* NetworkService;
+      const result = yield* net
+        .postEnrichment({ user: {}, device: {} })
+        .pipe(Effect.either);
+      expect(Either.isLeft(result)).toBe(true);
+      if (Either.isLeft(result)) {
+        expect(result.left).toBeInstanceOf(NetworkDecodingError);
+      }
+    }).pipe(Effect.provide(stack));
+  },
+);
+
 // Uses real clock (Effect-based 1s timeout needs real time — it.effect uses frozen TestClock)
 it("postEnrichment enforces a hard 1s timeout (NetworkRequestError, no hang)", async () => {
   const { fetch } = mockFetch(() => new Promise<Response>(() => {}));

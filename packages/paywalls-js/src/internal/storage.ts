@@ -13,6 +13,7 @@ import {
   StorageRemoveError,
   StorageClearError,
 } from "./errors.ts";
+import { describeCause as describe } from "./describe.ts";
 
 /** In-memory adapter — used as the Default and in tests. */
 export const createMemoryStorage = (): StorageAdapter => {
@@ -51,6 +52,22 @@ const make = (adapter: StorageAdapter) => {
           message: `Failed to read storage key "${key}": ${describe(cause)}`,
           cause,
         }),
+    );
+  });
+
+  // For startup reads: a failed read means "nothing stored", so the value is
+  // regenerated or re-fetched instead. One unreadable key (a corrupt browser
+  // profile, a custom adapter that rejects) must not stop the SDK starting.
+  const getOrNull = Effect.fn("StorageService.getOrNull")(function* (
+    key: StorageKey,
+  ) {
+    return yield* get(key).pipe(
+      Effect.catchTag("StorageGetError", (error) =>
+        Effect.logWarning("Storage read failed; treating it as empty", {
+          key,
+          error: error.message,
+        }).pipe(Effect.as(null)),
+      ),
     );
   });
 
@@ -101,7 +118,7 @@ const make = (adapter: StorageAdapter) => {
     );
   });
 
-  return { get, set, remove, clear } as const;
+  return { get, getOrNull, set, remove, clear } as const;
 };
 
 export class StorageService extends Effect.Service<StorageService>()(
@@ -120,22 +137,3 @@ export class StorageService extends Effect.Service<StorageService>()(
   }
 }
 
-// Browser storage errors aren't always `Error`s — Firefox throws XPCOM
-// exceptions whose `name`/`message` live on the prototype, so
-// `JSON.stringify` renders them as `{}`. Read those fields directly first.
-const describe = (cause: unknown): string => {
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === "string") return cause;
-  if (cause !== null && typeof cause === "object") {
-    const { name, message } = cause as { name?: unknown; message?: unknown };
-    const parts = [name, message].filter(
-      (p): p is string => typeof p === "string" && p !== "",
-    );
-    if (parts.length > 0) return parts.join(": ");
-  }
-  try {
-    return JSON.stringify(cause) ?? String(cause);
-  } catch {
-    return String(cause);
-  }
-};

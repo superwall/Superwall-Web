@@ -6,6 +6,7 @@
 import type { Collector } from "./collector.ts";
 import { storePrefixedOf, withoutStorePrefix, type HostedProduct, type ProductVariables } from "./products.ts";
 import { recordOf, type Slice } from "./values.ts";
+import { randomUuid } from "../../internal/uuid.ts";
 
 export type CollectorEvent = { event_id?: string; event_name: string; parameters: Slice };
 
@@ -80,7 +81,7 @@ export const deviceProperties = (now: Date = new Date()) => {
 
 export const createHostEvents = (context: HostEventsContext): HostEvents => {
   const { collector } = context;
-  const presentationId = crypto.randomUUID();
+  const presentationId = randomUuid();
   const { "x-alias-id": _aliasId, ...baseHeaders } = collector.headers;
   const { userId } = collector.identity;
   let headers: Record<string, string> = {
@@ -100,7 +101,7 @@ export const createHostEvents = (context: HostEventsContext): HostEvents => {
         body: JSON.stringify({
           events: events.map((event) => ({
             ...event,
-            event_id: event.event_id ?? crypto.randomUUID(),
+            event_id: event.event_id ?? randomUuid(),
             created_at: new Date().toISOString(),
             parameters: {
               ...event.parameters,
