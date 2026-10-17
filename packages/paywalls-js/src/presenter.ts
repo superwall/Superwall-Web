@@ -213,8 +213,10 @@ export interface PaywallPresenter {
    *  callback so a slow iframe load doesn't time out a still-queued code. */
   redeemDiscount?(code: string, onPosted?: () => void): void;
 
-  /** Optional: warm a paywall before it's needed. */
-  preload?(info: PaywallInfo): Promise<void>;
+  /** Optional: warm a paywall before it's needed. Resolve `false` when it
+   *  wasn't warmed (cancelled, timed out) so the SDK may try it again later;
+   *  any other value counts as warmed. */
+  preload?(info: PaywallInfo): Promise<boolean | void>;
 
   /** True when the presented paywall reports its own lifecycle analytics to
    *  the collector — `trigger_fire` (present), `paywall_open`, `paywall_close`

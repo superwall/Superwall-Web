@@ -53,7 +53,7 @@ export const createBrowserPresenter = (
 ): PaywallPresenter => {
   let active: ActivePresentation | null = null;
   /** Cancel hooks for preload iframes still loading. */
-  const inflightPreloads = new Set<() => void>();
+  const inflightPreloads = new Set<(loaded: boolean) => void>();
 
   const present: PaywallPresenter["present"] = (info, ctx) => {
     if (typeof document === "undefined") {
@@ -73,7 +73,7 @@ export const createBrowserPresenter = (
     // so the presented paywall isn't downloaded twice in parallel (the two
     // URLs differ and can't share a response) and doesn't share bandwidth
     // with paywalls the user isn't looking at.
-    for (const cancel of [...inflightPreloads]) cancel();
+    for (const cancel of [...inflightPreloads]) cancel(false);
     return new Promise<PaywallResult>((resolve, reject) => {
       const onTearDown = (a: ActivePresentation) => {
         if (active === a) active = null;
@@ -129,13 +129,14 @@ export const createBrowserPresenter = (
   /** Warm a paywall by firing a hidden iframe. The iframe is removed once
    *  the URL has loaded — its scripts, styles and images stay in the browser
    *  HTTP cache for the next `present(info)`. Cancelled if a paywall is
-   *  presented first. No-op on SSR or while a paywall is up. iOS Safari
-   *  throttles hidden iframes; cache warming is best-effort there. */
+   *  presented first. No-op on SSR or while a paywall is up. Resolves `true`
+   *  once loaded, `false` if it never warmed. iOS Safari throttles hidden
+   *  iframes; cache warming is best-effort there. */
   const preload: NonNullable<PaywallPresenter["preload"]> = (info) =>
-    new Promise<void>((resolve) => {
+    new Promise<boolean>((resolve) => {
       // Never warm alongside a presented paywall — it would compete with it.
       if (typeof document === "undefined" || active !== null) {
-        resolve();
+        resolve(false);
         return;
       }
       // Cache-warm only — debug flag irrelevant, no ctx available here.
@@ -155,20 +156,22 @@ export const createBrowserPresenter = (
         top: "-9999px",
       });
       let settled = false;
-      const cleanup = () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = (loaded: boolean) => {
         if (settled) return;
         settled = true;
         inflightPreloads.delete(cleanup);
+        clearTimeout(timer);
         try {
           iframe.remove();
         } catch {}
-        resolve();
+        resolve(loaded);
       };
       inflightPreloads.add(cleanup);
-      iframe.addEventListener("load", cleanup, { once: true });
-      iframe.addEventListener("error", cleanup, { once: true });
+      iframe.addEventListener("load", () => cleanup(true), { once: true });
+      iframe.addEventListener("error", () => cleanup(false), { once: true });
       // Hard cap so a never-loading iframe doesn't leak.
-      setTimeout(cleanup, 8_000);
+      timer = setTimeout(() => cleanup(false), 8_000);
       iframe.src = url;
       try {
         (options.container && typeof options.container !== "function"
@@ -176,7 +179,7 @@ export const createBrowserPresenter = (
           : document.body
         ).appendChild(iframe);
       } catch {
-        cleanup();
+        cleanup(false);
       }
     });
 

@@ -1807,33 +1807,51 @@ const recordPreloads = async (body: () => Promise<void>): Promise<string[]> => {
   return seen.sort();
 };
 
+/** Wait until `n` preload iframes are mounted (inert, so they stay). */
+const untilPreloads = async (n: number) => {
+  for (let i = 0; i < 200; i++) {
+    if (document.querySelectorAll("[data-sw-preload]").length >= n) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+/** Long enough for a background pass to have mounted, had it been going to. */
+const quietPeriod = () => new Promise((r) => setTimeout(r, 150));
+
 it("automatic preload warms only paywalls a placement can present", async () => {
   const seen = await recordPreloads(async () => {
     const sw = makeWithConfig(PRELOAD_STATIC_CONFIG);
     await sw.ready;
-    await new Promise((r) => setTimeout(r, 20));
+    await untilPreloads(2);
+    await quietPeriod();
     await sw.dispose();
   });
   expect(seen).toEqual(["pw_home", "pw_onboarding"]);
 });
 
-it("register() right after ready presents without a parallel preload", async () => {
+it("register() right after ready: no preload while it runs, warming resumes after", async () => {
   let release!: () => void;
   const presenter: PaywallPresenter = {
     present: () =>
       new Promise((r) => (release = () => r({ type: "declined" }))),
     dismiss: () => release?.(),
   };
+  let duringRegister: string[] = [];
   const seen = await recordPreloads(async () => {
     const sw = makeWithConfig(PRELOAD_STATIC_CONFIG);
     await sw.ready;
     const pending = sw.register({ placement: "onboarding", presenter });
-    await new Promise((r) => setTimeout(r, 30));
+    await quietPeriod();
+    duringRegister = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-sw-preload]"),
+      (n) => n.dataset["swPreload"]!,
+    );
     release();
     await pending;
+    await untilPreloads(2);
     await sw.dispose();
   });
-  expect(seen).toEqual([]);
+  expect(duringRegister).toEqual([]);
+  expect(seen).toEqual(["pw_home", "pw_onboarding"]);
 });
 
 it("paywalls.shouldPreload: false turns automatic preloading off", async () => {
@@ -1842,7 +1860,7 @@ it("paywalls.shouldPreload: false turns automatic preloading off", async () => {
       options: { paywalls: { shouldPreload: false } },
     });
     await sw.ready;
-    await new Promise((r) => setTimeout(r, 20));
+    await quietPeriod();
     await sw.dispose();
   });
   expect(seen).toEqual([]);
@@ -1856,7 +1874,8 @@ it("preloadFor() warms only the named placements, even with shouldPreload: false
     await sw.ready;
     // Resolves once the (inert) iframe settles — only the mount matters here.
     void sw.placements.preloadFor(["onboarding"]);
-    await new Promise((r) => setTimeout(r, 20));
+    await untilPreloads(1);
+    await quietPeriod();
     await sw.dispose();
   });
   expect(seen).toEqual(["pw_onboarding"]);
@@ -1869,8 +1888,10 @@ it("disable_preload.triggers skips those placements' paywalls", async () => {
       disable_preload: { all: false, triggers: ["home"] },
     });
     await sw.ready;
-    await new Promise((r) => setTimeout(r, 20));
+    await untilPreloads(1);
+    // Everything allowed is already warmed, so this mounts nothing new.
     await sw.placements.preloadAll();
+    await quietPeriod();
     await sw.dispose();
   });
   expect(seen).toEqual(["pw_onboarding"]);

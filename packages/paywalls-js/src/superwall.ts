@@ -1336,12 +1336,20 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     });
 
   const warmedPaywallUrls = new Set<string>();
-  /** `register()` calls in flight (deciding or presenting). Warming stands
-   *  down while any is open: a preload iframe for the paywall about to be
+  /** `register()` calls in flight (deciding or presenting). Warming waits
+   *  while any is open: a preload iframe for the paywall about to be
    *  presented downloads the same document in parallel (its URL differs, so
    *  the two can't share a response), and warming others steals bandwidth
    *  from the one the user is waiting on. */
   let registersInFlight = 0;
+  /** Settles whenever `registersInFlight` drops back to 0. */
+  let registersIdle: Promise<void> = Promise.resolve();
+  let markRegistersIdle: () => void = () => {};
+  /** Resolves once no `register()` is in flight. Re-checks after waking, as
+   *  another call may have started in between. */
+  const whenNoRegisterInFlight = async (): Promise<void> => {
+    while (registersInFlight > 0) await registersIdle;
+  };
   /** Resolves once `ready` settles. Automatic warming waits on it plus one
    *  macrotask, so a `register()` issued right after `await sw.ready` is
    *  counted in `registersInFlight` before any preload iframe mounts. */
@@ -1375,7 +1383,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           readySettled.then(() => new Promise<void>((r) => setTimeout(r, 0))),
         );
       }
-      if (disposed || registersInFlight > 0) return;
+      yield* Effect.promise(whenNoRegisterInFlight);
+      if (disposed) return;
       const presenter = yield* Effect.promise(() => getDefaultPresenter());
       if (!presenter?.preload) return;
       const cfg = yield* config.current();
@@ -1410,10 +1419,8 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       );
       // Skip URLs already warmed — the cached-config pass and the fresh-config
       // pass overlap now that neither is awaited.
-      const fresh = Arr.filter(
-        scope.kind === "auto" ? Arr.take(candidates, AUTO_WARM_LIMIT) : candidates,
-        (p) => !warmedPaywallUrls.has(p.url),
-      );
+      const unwarmed = Arr.filter(candidates, (p) => !warmedPaywallUrls.has(p.url));
+      const fresh = scope.kind === "auto" ? Arr.take(unwarmed, AUTO_WARM_LIMIT) : unwarmed;
       const infos = Arr.map(
         fresh,
         (p): PaywallInfo => ({
@@ -1433,13 +1440,18 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         Arr.map(infos, (info) =>
           Effect.tryPromise({
             // Runs in the background, so it can outlive the instance — don't
-            // mount iframes for a disposed SDK, and don't compete with a
-            // register() that started meanwhile. A skipped URL stays unmarked
-            // so a later pass can still warm it.
-            try: () => {
-              if (disposed || registersInFlight > 0) return Promise.resolve();
+            // mount iframes for a disposed SDK, and wait out any register()
+            // that started meanwhile. Check-and-mark right before mounting:
+            // overlapping passes computed their lists before either mounted.
+            try: async () => {
+              await whenNoRegisterInFlight();
+              if (disposed || warmedPaywallUrls.has(info.url)) return;
               warmedPaywallUrls.add(info.url);
-              return presenter.preload!(info);
+              // `false` = not warmed (cancelled by a present, timed out):
+              // leave it for a later pass or preloadFor().
+              if ((await presenter.preload!(info)) === false) {
+                warmedPaywallUrls.delete(info.url);
+              }
             },
             catch: () => undefined,
           }).pipe(Effect.catchAll(() => Effect.void)),
@@ -1926,11 +1938,13 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   const register: Superwall["register"] = async (args) => {
     // Counted for the whole call so cache warming stays out of the way of
     // the paywall this call is about to present.
-    registersInFlight++;
+    if (registersInFlight++ === 0) {
+      registersIdle = new Promise<void>((r) => (markRegistersIdle = r));
+    }
     try {
       return await registerPlacement(args);
     } finally {
-      registersInFlight--;
+      if (--registersInFlight === 0) markRegistersIdle();
     }
   };
 
@@ -3294,7 +3308,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* applyEntitlementsByProductId(config);
           yield* confirmAssignments(assignments);
           yield* config.preload();
-          yield* warmPaywalls(config);
+          // Background, like every other pass: it may wait out a presented
+          // paywall, which must not hold refreshConfiguration() open.
+          yield* Effect.forkDaemon(warmPaywalls(config));
         }),
       ),
 
