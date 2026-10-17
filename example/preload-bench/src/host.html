@@ -9,23 +9,30 @@
     <h1>Onboarding</h1>
     <script type="module">
       // Host site from the customer report: createSuperwall(), await ready,
-      // then register the onboarding placement right away.
-      const bench = (window.__bench = { marks: {} });
+      // then register a placement right away. Query params pick the variant:
+      //   sdk=before|after       which SDK build to load
+      //   register=<placement>   register right after ready (omit: don't)
+      //   shouldPreload=0        options.paywalls.shouldPreload = false
+      //   preloadFor=a,b         call placements.preloadFor([...]) after ready
+      //   registerDelay=<ms>     wait this long after ready before register
+      //   disable=all|a,b        mock config's disable_preload
+      //   key=pk_…               live: talk to the real Superwall backend
+      const q = new URLSearchParams(location.search);
+      const bench = (window.__bench = { marks: {}, errors: [] });
       const mark = (k) => (bench.marks[k] ??= performance.now());
       addEventListener("message", (e) => {
-        if (e.data?.bench !== "paywall-load") return;
-        if (e.data.presented && e.data.id === "onboarding") {
+        // Synthetic bench paywalls announce their own load.
+        if (e.data?.bench === "paywall-load" && e.data.presented) {
           mark("presentedLoaded");
           window.__benchDone?.();
         }
       });
 
-      // Superwall API calls go to this server: config from /mock, every
-      // other endpoint answers 204.
+      // Mock backend: config from this server, every other endpoint 204.
       const benchFetch = (input, init) => {
         const url = new URL(typeof input === "string" ? input : input.url);
         if (url.pathname === "/api/v1/static_config") {
-          return fetch("/mock/static_config", init);
+          return fetch(`/mock/static_config${location.search}`, init);
         }
         if (url.pathname === "/api/v1/enrich") {
           return Promise.resolve(Response.json({ user: {}, device: {} }));
@@ -33,14 +40,36 @@
         return Promise.resolve(new Response(null, { status: 204 }));
       };
 
-      const sdk = new URLSearchParams(location.search).get("sdk");
-      const { createSuperwall } = await import(`/sdk/${sdk}/index.js`);
-      mark("sdkLoaded");
-      const sw = createSuperwall({ apiKey: "pk_bench", fetch: benchFetch });
-      await sw.ready;
-      mark("ready");
-      mark("register");
-      sw.register({ placement: "web2app_onboarding" });
+      try {
+        const { createSuperwall } = await import(`/sdk/${q.get("sdk")}/index.js`);
+        mark("sdkLoaded");
+        const live = q.get("key");
+        const sw = createSuperwall({
+          apiKey: live ?? "pk_bench",
+          ...(live ? {} : { fetch: benchFetch }),
+          options: {
+            // Never charge anyone from a test run.
+            testModeBehavior: "always",
+            ...(q.get("shouldPreload") === "0" && { paywalls: { shouldPreload: false } }),
+          },
+        });
+        window.sw = sw;
+        await sw.ready;
+        mark("ready");
+        const preloadFor = q.get("preloadFor");
+        if (preloadFor) {
+          sw.placements.preloadFor(preloadFor.split(",")).catch((e) => bench.errors.push(String(e)));
+        }
+        const placement = q.get("register");
+        if (placement) {
+          const delay = Number(q.get("registerDelay") ?? 0);
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          mark("register");
+          sw.register({ placement }).catch((e) => bench.errors.push(String(e)));
+        }
+      } catch (e) {
+        bench.errors.push(String(e));
+      }
     </script>
   </body>
 </html>

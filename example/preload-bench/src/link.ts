@@ -44,12 +44,13 @@ export const createLink = () => {
         if (n <= 0) continue;
         try {
           f.controller.enqueue(f.body.subarray(f.sent, f.sent + n));
+          f.sent += n;
+          budget -= n;
+          f.onSent(n);
         } catch {
+          // The browser abandoned it; those bytes never went out.
           f.closed = true;
         }
-        f.sent += n;
-        budget -= n;
-        f.onSent(n);
         if (f.closed || f.sent >= f.body.length) {
           flows.delete(f);
           if (!f.closed) {

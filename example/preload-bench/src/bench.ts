@@ -9,12 +9,11 @@
 // paywalls (see fixtures.ts), then measures how long the presented paywall
 // takes to load and what else got downloaded meanwhile. Writes results.md.
 
-import { $ } from "bun";
 import { chromium, devices } from "playwright-core";
 import { parseArgs } from "node:util";
-import { rm } from "node:fs/promises";
-import { assets, staticConfig } from "./fixtures.ts";
-import { createLink, type LinkProfile } from "./link.ts";
+import { buildSdks } from "./build.ts";
+import type { LinkProfile } from "./link.ts";
+import { startServer, type Served } from "./server.ts";
 
 const { values: args } = parseArgs({
   options: {
@@ -25,89 +24,10 @@ const { values: args } = parseArgs({
 const RUNS = Number(args.runs);
 
 const here = import.meta.dir;
-const repo = (await $`git rev-parse --show-toplevel`.cwd(here).text()).trim();
-const buildDir = `${here}/../.build`;
-const host = await Bun.file(`${here}/host.html`).text();
+const { baseRev, headRev, dirty } = await buildSdks(args.base);
 
-// ── SDK builds ──────────────────────────────────────────────────────────────
-
-const bundle = async (entry: string, outdir: string) => {
-  const out = await Bun.build({
-    entrypoints: [entry],
-    outdir,
-    target: "browser",
-    format: "esm",
-    splitting: true,
-    minify: true,
-    conditions: ["@superwall/source"],
-  });
-  if (!out.success) throw new AggregateError(out.logs, `bundling ${entry} failed`);
-};
-
-await rm(buildDir, { recursive: true, force: true });
-// The base's sources go under this package so they resolve its node_modules.
-const baseSrc = `${buildDir}/base-src`;
-await $`mkdir -p ${baseSrc}`;
-await $`git -C ${repo} archive ${args.base} packages/paywalls-js/src packages/paywalls-js/package.json | tar -x -C ${baseSrc}`;
-const baseRev = (await $`git -C ${repo} rev-parse --short ${args.base}`.text()).trim();
-const headRev = (await $`git -C ${repo} rev-parse --short HEAD`.text()).trim();
-const dirty = (await $`git -C ${repo} status --porcelain packages/paywalls-js/src`.text()).trim() !== "";
-await bundle(`${baseSrc}/packages/paywalls-js/src/index.ts`, `${buildDir}/sdk/before`);
-await bundle(`${repo}/packages/paywalls-js/src/index.ts`, `${buildDir}/sdk/after`);
-
-// ── Server ──────────────────────────────────────────────────────────────────
-
-/** One request as the server saw it. `bytes` grows as the link sends. */
-interface Served {
-  readonly path: string;
-  /** Carries the SDK's present-time params — the paywall shown to the user. */
-  readonly presented: boolean;
-  bytes: number;
-}
-let served: Served[] = [];
-const link = createLink();
-
-const server = Bun.serve({
-  port: 0,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const send = async (body: string | Uint8Array | Blob, type: string) => {
-      const bytes =
-        typeof body === "string"
-          ? new TextEncoder().encode(body)
-          : body instanceof Blob
-            ? new Uint8Array(await body.arrayBuffer())
-            : body;
-      const entry: Served = {
-        path: url.pathname,
-        presented: url.searchParams.has("client_surface"),
-        bytes: 0,
-      };
-      served.push(entry);
-      return new Response(link.stream(bytes, (n) => (entry.bytes += n)), {
-        headers: {
-          "Content-Type": type,
-          "Content-Length": String(bytes.length),
-          "Cache-Control": "no-store",
-          "Access-Control-Allow-Origin": "*",
-        },
-      });
-    };
-    if (url.pathname === "/") return send(host, "text/html");
-    if (url.pathname === "/mock/static_config") {
-      // Paywalls live on a second origin (as on the real paywall CDN), so
-      // they get their own connection pool.
-      return send(JSON.stringify(staticConfig(`http://127.0.0.1:${url.port}`)), "application/json");
-    }
-    if (url.pathname.startsWith("/sdk/")) {
-      const file = Bun.file(`${buildDir}${url.pathname}`);
-      if (await file.exists()) return send(file, "text/javascript");
-    }
-    const asset = assets[url.pathname];
-    if (asset) return send(asset.body, asset.type);
-    return new Response("not found", { status: 404 });
-  },
-});
+const server = startServer();
+const link = server.link;
 
 // ── Measurement ─────────────────────────────────────────────────────────────
 
@@ -141,7 +61,7 @@ const browser = await chromium.launch();
 
 const runOnce = async (sdk: Sdk, profile: Profile): Promise<Run> => {
   link.setProfile(PROFILES[profile]);
-  served = [];
+  server.reset();
   const context = await browser.newContext({ ...devices["iPhone 13"] });
   try {
     const page = await context.newPage();
@@ -149,23 +69,26 @@ const runOnce = async (sdk: Sdk, profile: Profile): Promise<Run> => {
     const done = Promise.withResolvers<void>();
     await page.exposeBinding("__benchDone", () => {
       snapshot ??= {
-        onboardingDocRequests: served.filter(isOnboardingDoc).length,
-        otherPaywallBytes: sum(served.filter((s) => isPaywall(s) && !s.path.startsWith("/paywalls/onboarding"))),
-        paywallBytes: sum(served.filter(isPaywall)),
+        onboardingDocRequests: server.served.filter(isOnboardingDoc).length,
+        otherPaywallBytes: sum(server.served.filter((s) => isPaywall(s) && !s.path.startsWith("/paywalls/onboarding"))),
+        paywallBytes: sum(server.served.filter(isPaywall)),
       };
       done.resolve();
     });
-    await page.goto(`${server.url}?sdk=${sdk}`, { waitUntil: "commit" });
+    await page.goto(`${server.url}?sdk=${sdk}&register=web2app_onboarding`, { waitUntil: "commit" });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       done.promise,
-      Bun.sleep(120_000).then(() => Promise.reject(new Error(`${sdk}/${profile}: paywall never loaded`))),
-    ]);
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${sdk}/${profile}: paywall never loaded`)), 120_000);
+      }),
+    ]).finally(() => clearTimeout(timeout));
     const marks = await page.evaluate(
       () => (window as unknown as { __bench: { marks: Record<string, number> } }).__bench.marks,
     );
     if (process.env.BENCH_DEBUG) {
       console.log("  marks", marks);
-      for (const s of served) console.log(`  ${s.presented ? "P" : " "} ${s.path} ${s.bytes}`);
+      for (const s of server.served) console.log(`  ${s.presented ? "P" : " "} ${s.path} ${s.bytes}`);
     }
     return {
       registerToPaywall: marks["presentedLoaded"]! - marks["register"]!,

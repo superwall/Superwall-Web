@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "bench": "bun src/bench.ts"
+    "bench": "bun src/bench.ts",
+    "e2e": "bun src/e2e.ts"
   },
   "dependencies": {
     "@superwall/core": "workspace:*",
