@@ -7,6 +7,10 @@ name: Publish
 # already on npm — so merges that don't bump a version are no-ops. Bump the
 # version in a package's package.json to release it.
 #
+# After publishing, cuts the matching GitHub release (tag = the bare version,
+# notes = its CHANGELOG.md section) on the push that bumped the version; see
+# scripts/github-release.ts. Also idempotent.
+#
 # Auth is npm trusted publishing (OIDC) — no NPM_TOKEN secret. Each package on
 # npmjs.com is configured with a trusted publisher pointing at this repo,
 # workflow `publish.yml`, environment `Publish`. That requires:
@@ -35,12 +39,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: Publish
     permissions:
-      contents: read
+      contents: write # create the release tag + GitHub release
       id-token: write # required for npm trusted publishing (OIDC)
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The release step compares the version against the first parent's.
+          fetch-depth: 2
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -95,3 +102,15 @@ jobs:
             fi
           done
           echo "Published $published package(s)."
+
+      - name: Create GitHub release
+        # Runs only after a successful publish. On a dry run, prints the notes
+        # it would use and creates nothing.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$DRY_RUN" = "1" ]; then
+            bun run scripts/github-release.ts --dry-run
+          else
+            bun run scripts/github-release.ts
+          fi

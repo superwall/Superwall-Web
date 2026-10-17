@@ -194,6 +194,19 @@ test("parseConfig drops malformed entries silently", () => {
   expect(cfg.paywallResponses[0]!.identifier).toBe("kept");
 });
 
+test("parseConfig reads disable_preload, defaulting to enabled", () => {
+  expect(parseConfig({ build_id: "x" }).preloadingDisabled).toEqual({
+    all: false,
+    triggers: [],
+  });
+  expect(
+    parseConfig({
+      build_id: "x",
+      disable_preload: { all: true, triggers: ["home", 3, "onboarding"] },
+    }).preloadingDisabled,
+  ).toEqual({ all: true, triggers: ["home", "onboarding"] });
+});
+
 test("parseConfig throws ConfigParseError when the input isn't an object", () => {
   expect(() => parseConfig("nope" as never)).toThrow(ConfigParseError);
   expect(() => parseConfig(null as never)).toThrow(ConfigParseError);

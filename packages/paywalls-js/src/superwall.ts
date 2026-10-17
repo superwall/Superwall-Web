@@ -1331,24 +1331,91 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     });
 
   const warmedPaywallUrls = new Set<string>();
+  /** `register()` calls in flight (deciding or presenting). Warming waits
+   *  while any is open: a preload iframe for the paywall about to be
+   *  presented downloads the same document in parallel (its URL differs, so
+   *  the two can't share a response), and warming others steals bandwidth
+   *  from the one the user is waiting on. */
+  let registersInFlight = 0;
+  /** Settles whenever `registersInFlight` drops back to 0. */
+  let registersIdle: Promise<void> = Promise.resolve();
+  let markRegistersIdle: () => void = () => {};
+  /** Resolves once no `register()` is in flight. Re-checks after waking, as
+   *  another call may have started in between. */
+  const whenNoRegisterInFlight = async (): Promise<void> => {
+    while (registersInFlight > 0) await registersIdle;
+  };
+  /** Resolves once `ready` settles. Automatic warming waits on it plus one
+   *  macrotask, so a `register()` issued right after `await sw.ready` is
+   *  counted in `registersInFlight` before any preload iframe mounts. */
+  let markReadySettled!: () => void;
+  const readySettled = new Promise<void>((r) => (markReadySettled = r));
+  /** Automatic warming cap — each preload runs the whole paywall (scripts,
+   *  images, Stripe.js), so keep it small. */
+  const AUTO_WARM_LIMIT = 6;
 
-  /** Hand each cached paywall URL to the presenter's optional preload hook
-   *  so the browser warms the HTTP cache before first present. Best-effort,
-   *  bounded concurrency to avoid hammering on large catalogs. */
+  /** Which placements to warm: `auto` is the background pass after config
+   *  loads (honors `paywalls.shouldPreload`); `all` / `placements` back the
+   *  explicit `preloadAll()` / `preloadFor()`. */
+  type WarmScope =
+    | { readonly kind: "auto" }
+    | { readonly kind: "all" }
+    | { readonly kind: "placements"; readonly names: ReadonlyArray<string> };
+
+  /** Hand the paywalls reachable from the scoped placements to the
+   *  presenter's optional preload hook so the browser warms its cache
+   *  before first present. Only the variant this user is assigned to is
+   *  warmed (holdouts and paywalls no placement references are skipped), and
+   *  the dashboard's `disable_preload` always wins. Best-effort, bounded
+   *  concurrency to avoid hammering on large catalogs. */
   const warmPaywalls = Effect.fn("Superwall.warmPaywalls")(function* (
     config: ConfigServiceImpl,
+    scope: WarmScope = { kind: "auto" },
   ) {
+      if (scope.kind === "auto") {
+        if (opts.options?.paywalls?.shouldPreload === false) return;
+        yield* Effect.promise(() =>
+          readySettled.then(() => new Promise<void>((r) => setTimeout(r, 0))),
+        );
+      }
+      yield* Effect.promise(whenNoRegisterInFlight);
+      if (disposed) return;
       const presenter = yield* Effect.promise(() => getDefaultPresenter());
       if (!presenter?.preload) return;
       const cfg = yield* config.current();
       if (!cfg) return;
+      const disabled = cfg.preloadingDisabled;
+      if (disabled?.all) return;
+      const blocked = new Set(disabled?.triggers ?? []);
+      const wanted = scope.kind === "placements" ? new Set(scope.names) : null;
+      const triggers = Arr.filter(
+        cfg.triggerOptions,
+        (t) => !blocked.has(t.placementName) && (wanted === null || wanted.has(t.placementName)),
+      );
+      // eagerAssign has already picked a variant per experiment; warm only
+      // that one. Unassigned experiments fall back to every treatment.
+      const assignments = yield* AssignmentService;
+      const assigned = new Map(
+        Arr.map(yield* assignments.getAll(), (a) => [a.experimentId, a.variant] as const),
+      );
+      const paywallIds = new Set<string>();
+      for (const t of triggers) {
+        for (const rule of t.rules) {
+          const pick = assigned.get(rule.experiment.id);
+          const variants = pick ? [pick] : rule.experiment.variants;
+          for (const v of variants) {
+            if (v.type === "treatment" && v.paywallId) paywallIds.add(v.paywallId);
+          }
+        }
+      }
+      const candidates = Arr.filter(
+        cfg.paywallResponses,
+        (p) => Boolean(p.url) && paywallIds.has(p.identifier),
+      );
       // Skip URLs already warmed — the cached-config pass and the fresh-config
       // pass overlap now that neither is awaited.
-      const fresh = Arr.filter(
-        Arr.take(Arr.filter(cfg.paywallResponses, (p) => Boolean(p.url)), 6),
-        (p) => !warmedPaywallUrls.has(p.url),
-      );
-      for (const p of fresh) warmedPaywallUrls.add(p.url);
+      const unwarmed = Arr.filter(candidates, (p) => !warmedPaywallUrls.has(p.url));
+      const fresh = scope.kind === "auto" ? Arr.take(unwarmed, AUTO_WARM_LIMIT) : unwarmed;
       const infos = Arr.map(
         fresh,
         (p): PaywallInfo => ({
@@ -1368,8 +1435,19 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         Arr.map(infos, (info) =>
           Effect.tryPromise({
             // Runs in the background, so it can outlive the instance — don't
-            // mount iframes for a disposed SDK.
-            try: () => (disposed ? Promise.resolve() : presenter.preload!(info)),
+            // mount iframes for a disposed SDK, and wait out any register()
+            // that started meanwhile. Check-and-mark right before mounting:
+            // overlapping passes computed their lists before either mounted.
+            try: async () => {
+              await whenNoRegisterInFlight();
+              if (disposed || warmedPaywallUrls.has(info.url)) return;
+              warmedPaywallUrls.add(info.url);
+              // `false` = not warmed (cancelled by a present, timed out):
+              // leave it for a later pass or preloadFor().
+              if ((await presenter.preload!(info)) === false) {
+                warmedPaywallUrls.delete(info.url);
+              }
+            },
             catch: () => undefined,
           }).pipe(Effect.catchAll(() => Effect.void)),
         ),
@@ -1856,6 +1934,19 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
   };
 
   const register: Superwall["register"] = async (args) => {
+    // Counted for the whole call so cache warming stays out of the way of
+    // the paywall this call is about to present.
+    if (registersInFlight++ === 0) {
+      registersIdle = new Promise<void>((r) => (markRegistersIdle = r));
+    }
+    try {
+      return await registerPlacement(args);
+    } finally {
+      if (--registersInFlight === 0) markRegistersIdle();
+    }
+  };
+
+  const registerPlacement: Superwall["register"] = async (args) => {
       const { placement, params, handler, feature } = args;
       currentPresentationId = asPresentationId(randomUuid());
       try {
@@ -2368,12 +2459,28 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
         }),
       ),
 
+    // Explicit preloads ignore `paywalls.shouldPreload` (that only gates the
+    // automatic pass) but still honor the dashboard's `disable_preload`.
+    // No config → nothing to preload.
     preloadAll: async () => {
-      // No config → nothing to preload yet.
+      await readySettled;
+      await runPublic(
+        Effect.gen(function* () {
+          yield* warmPaywalls(yield* ConfigService, { kind: "all" });
+        }),
+      );
     },
 
-    preloadFor: async (_) => {
-      // No config → nothing to preload yet.
+    preloadFor: async (placementNames) => {
+      await readySettled;
+      await runPublic(
+        Effect.gen(function* () {
+          yield* warmPaywalls(yield* ConfigService, {
+            kind: "placements",
+            names: placementNames,
+          });
+        }),
+      );
     },
   };
 
@@ -3044,6 +3151,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       throw translateInternalError(cause);
     });
   void ready.catch(() => {});
+  void ready.then(markReadySettled, markReadySettled);
 
   const sw: Superwall = {
     apiKey: opts.apiKey,
@@ -3198,7 +3306,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           yield* applyEntitlementsByProductId(config);
           yield* confirmAssignments(assignments);
           yield* config.preload();
-          yield* warmPaywalls(config);
+          // Background, like every other pass: it may wait out a presented
+          // paywall, which must not hold refreshConfiguration() open.
+          yield* Effect.forkDaemon(warmPaywalls(config));
         }),
       ),
 

@@ -3,7 +3,14 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
-## Unreleased
+## 0.3.3 — 2026-10-16
+
+### Fixed
+
+- The paywall a `register()` is about to present is no longer downloaded twice. Background cache warming used to mount a hidden preload iframe for it while the presented iframe requested the same document, and the two URLs differ, so both downloaded in full. Warming now waits until `sw.ready` has settled plus one task, so a `register()` issued right after `await sw.ready` starts first. While any `register()` is in flight, including while its paywall is on screen, warming waits and resumes once the last one finishes. The browser presenter cancels preload iframes that are still loading when it presents, and ignores preloads while a paywall is up. A cancelled preload isn't counted as warmed, so a later pass or `preloadFor()` can warm it again. In `example/preload-bench` (an 875 KB paywall plus two other live campaigns, cold loads), `register()` to paywall loaded drops from 11.65 s to 6.37 s on Slow 4G and from 2.83 s to 1.28 s on Fast 4G
+- `paywalls.shouldPreload: false` now turns automatic preloading off. It was declared but never read
+- The static config's `disable_preload` is honored: `all: true` turns off every preload, and `triggers` lists placements whose paywalls are never preloaded. It applies to automatic and explicit preloads alike
+- `placements.preloadFor(names)` and `placements.preloadAll()` now preload. Both were no-ops. They ignore `shouldPreload`, so with `shouldPreload: false` a site warms only the placements it names. Like automatic warming, they wait while a `register()` is in flight, so their promise can stay pending until the paywall on screen closes
 
 ### Fixed
 
@@ -15,6 +22,12 @@ Versions apply to every published package in lockstep (see `scripts/version.ts`)
   - when `identity.vendorIdProvider` throws or returns a non-string; a generated vendor id is used instead
   - when the cached config (`superwall.config`) is valid JSON but not an object, e.g. `null`. That used to fail every page load, since the bad value was never replaced
   - with a custom `StorageAdapter` whose `get` or `set` fails. Startup reads that fail read as empty, and identity write-back is best effort
+
+### Changed
+
+- Automatic preloading only warms paywalls that a placement can present, and only the variant this user is assigned to, up to 6 per pass. Holdouts, and paywalls that no placement references, are no longer warmed. Each preload runs the whole paywall (scripts, images, Stripe.js), so a site with several live campaigns should set `shouldPreload: false` and call `preloadFor()` for the placements it expects next
+- `refreshConfiguration()` no longer waits for paywall warming to finish
+- `PaywallPresenter.preload()` may resolve `false` to say the paywall wasn't warmed (cancelled or timed out), so the SDK can try it again later. Any other value still counts as warmed, so existing custom presenters are unaffected
 
 ## 0.3.2 — 2026-10-05
 
