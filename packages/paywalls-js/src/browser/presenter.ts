@@ -3,6 +3,7 @@
 
 import type {
   CheckoutCompletion,
+  CustomCallbackResult,
   PaywallInfo,
   PaywallPresentationStyle,
   PaywallResult,
@@ -1086,6 +1087,40 @@ const handleInbound = (
         const actionName = readString(evt, "data") ?? readString(evt, "name");
         if (!actionName) break;
         ctx.emit("customPaywallAction", { name: actionName });
+        break;
+      }
+      // `{ event_name: "request_callback", request_id, name, behavior,
+      // variables? }` — answered with `callback_result` echoing `request_id`,
+      // same contract as the mobile SDKs. `behavior` only changes whether the
+      // paywall waits for the result; the SDK always replies.
+      case "request_callback": {
+        const requestId = readString(evt, "request_id");
+        const callbackName = readString(evt, "name");
+        if (requestId === null || callbackName === null) break;
+        const rawVars = evt["variables"];
+        const variables =
+          rawVars && typeof rawVars === "object" && !Array.isArray(rawVars)
+            ? (rawVars as Record<string, JsonValue>)
+            : undefined;
+        const pending: Promise<CustomCallbackResult> = ctx.onCustomCallback
+          ? ctx.onCustomCallback({
+              name: callbackName,
+              ...(variables !== undefined && { variables }),
+            })
+          : Promise.resolve({ status: "failure" });
+        void pending.then((result) => {
+          // The paywall may have closed while the handler ran.
+          if (!active.iframe.isConnected) return;
+          postAccept64(active, [
+            {
+              event_name: "callback_result",
+              request_id: requestId,
+              name: callbackName,
+              status: result.status,
+              ...(result.data !== undefined && { data: result.data }),
+            },
+          ]);
+        });
         break;
       }
       case "user_attribute_updated": {

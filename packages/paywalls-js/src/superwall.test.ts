@@ -1413,6 +1413,56 @@ it("register presents, awaits result, fires lifecycle events + handler callbacks
   await sw.dispose();
 });
 
+it("register: handler.onCustomCallback answers the presenter's custom callbacks; throws and bad results become failure", async () => {
+  const replies: unknown[] = [];
+  let sawHook: boolean | null = null;
+  const presenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      sawHook = ctx.onCustomCallback !== undefined;
+      replies.push(await ctx.onCustomCallback!({ name: "ok", variables: { n: 1 } }));
+      replies.push(await ctx.onCustomCallback!({ name: "boom" }));
+      replies.push(await ctx.onCustomCallback!({ name: "bad" }));
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  await sw.register({
+    placement: "checkout",
+    handler: {
+      onCustomCallback: async ({ name, variables }) => {
+        if (name === "boom") throw new Error("nope");
+        if (name === "bad") return {} as never;
+        return { status: "success", data: { echoed: variables?.["n"] ?? null } };
+      },
+    },
+  });
+  expect(sawHook).toBe(true);
+  expect(replies).toEqual([
+    { status: "success", data: { echoed: 1 } },
+    { status: "failure" },
+    { status: "failure" },
+  ]);
+  await sw.dispose();
+});
+
+it("register: no handler.onCustomCallback leaves ctx.onCustomCallback unset", async () => {
+  let sawHook: boolean | null = null;
+  const presenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      sawHook = ctx.onCustomCallback !== undefined;
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  await sw.register({ placement: "checkout", handler: { onPresent: () => {} } });
+  expect(sawHook).toBe(false);
+  await sw.dispose();
+});
+
 it("register fires trigger_fire with the placement + paywall result", async () => {
   const presenter = presenterThatResolves({ type: "declined" });
   const sw = makeWithPaywall({ presenter });

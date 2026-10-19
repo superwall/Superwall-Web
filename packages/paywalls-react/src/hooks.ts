@@ -4,6 +4,8 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type {
   AllSuperwallEvents,
+  CustomCallback,
+  CustomCallbackResult,
   CustomerInfo,
   CustomPaywallController,
   CustomPaywallState,
@@ -110,6 +112,11 @@ export interface PaywallPresentationHandlerHooks {
   onDismiss?(info: PaywallInfo, result: PaywallResult): void;
   onError?(error: Error): void;
   onSkip?(reason: PaywallSkippedReason): void;
+  /** Answer the paywall's custom callbacks — see
+   *  `PaywallPresentationHandler.onCustomCallback`. Iframe paywalls only. */
+  onCustomCallback?(
+    callback: CustomCallback,
+  ): CustomCallbackResult | Promise<CustomCallbackResult>;
 }
 
 export type PaywallState =
@@ -178,6 +185,14 @@ export const usePlacement = (
               /* swallow */
             }
           },
+          // Not swallowed: core maps a throw to a `failure` reply.
+          ...((handlerRef.current?.onCustomCallback || args.handler?.onCustomCallback) && {
+            onCustomCallback: (callback) => {
+              const fn =
+                handlerRef.current?.onCustomCallback ?? args.handler?.onCustomCallback;
+              return fn ? fn(callback) : { status: "failure" };
+            },
+          }),
         },
       });
       return r;

@@ -1,4 +1,4 @@
-import { it, expect, beforeEach } from "@effect/vitest";
+import { it, expect, beforeEach, vi } from "@effect/vitest";
 import type {
   CheckoutCompletion,
   PaywallInfo,
@@ -876,6 +876,94 @@ it("legacy `custom` message is forwarded via ctx.emit as customPaywallAction", a
 
   presenter.dismiss();
   await presentation;
+});
+
+it("request_callback runs ctx.onCustomCallback and replies callback_result with the request_id", async () => {
+  const calls: unknown[] = [];
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_a"),
+    newCtx({
+      onCustomCallback: async (callback) => {
+        calls.push(callback);
+        return { status: "success", data: { valid: true } };
+      },
+    }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const captured = captureOutbound(iframe);
+  dispatchFromPaywall(iframe, [
+    {
+      event_name: "request_callback",
+      request_id: "checkCode-blocking-1",
+      name: "checkCode",
+      behavior: "blocking",
+      variables: { code: "ABC" },
+    },
+  ]);
+  await flushMessages();
+
+  expect(calls).toEqual([{ name: "checkCode", variables: { code: "ABC" } }]);
+  const reply = captured.flat().find((e) => e.event_name === "callback_result");
+  expect(reply).toEqual({
+    event_name: "callback_result",
+    request_id: "checkCode-blocking-1",
+    name: "checkCode",
+    status: "success",
+    data: { valid: true },
+  });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("request_callback without ctx.onCustomCallback replies failure", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(stubInfo("pw_a"), newCtx());
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const captured = captureOutbound(iframe);
+  dispatchFromPaywall(iframe, [
+    { event_name: "request_callback", request_id: "r1", name: "x", behavior: "non-blocking" },
+    // Missing request_id: nothing to correlate a reply with — ignored.
+    { event_name: "request_callback", name: "y", behavior: "blocking" },
+  ]);
+  await flushMessages();
+
+  const replies = captured.flat().filter((e) => e.event_name === "callback_result");
+  expect(replies).toEqual([
+    { event_name: "callback_result", request_id: "r1", name: "x", status: "failure" },
+  ]);
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("request_callback drops the reply when the paywall closed before the handler resolved", async () => {
+  let finish!: (r: { status: "success" }) => void;
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_a"),
+    newCtx({ onCustomCallback: () => new Promise((r) => (finish = r)) }),
+  );
+  await tick();
+  const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+  const captured = captureOutbound(iframe);
+  dispatchFromPaywall(iframe, [
+    { event_name: "request_callback", request_id: "r1", name: "slow", behavior: "blocking" },
+  ]);
+  await flushMessages();
+  presenter.dismiss();
+  await presentation;
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  finish({ status: "success" });
+  await flushMessages();
+
+  expect(captured.flat().filter((e) => e.event_name === "callback_result")).toEqual([]);
+  // No attempt to post into the removed iframe.
+  expect(warn).not.toHaveBeenCalled();
+  warn.mockRestore();
 });
 
 it("user_attribute_updated (flat + envelope) reaches ctx.onUserAttributesUpdate", async () => {

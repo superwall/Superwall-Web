@@ -3,6 +3,12 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## Unreleased
+
+### Added
+
+- Custom callbacks from the paywall. A paywall `request_callback` now runs `handler.onCustomCallback` from `register()` (or `usePlacement`) and sends the result back as `callback_result`. This is the same contract the iOS and Android SDKs use. If no handler is supplied, or the handler throws or returns something that isn't a `{ status }` result, the paywall gets `failure`. Before this change the request was ignored and the paywall never got an answer. Custom presenters receive the handler as `ctx.onCustomCallback`
+
 ## 0.3.3 — 2026-10-16
 
 ### Fixed

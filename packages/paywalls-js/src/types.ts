@@ -494,11 +494,15 @@ export type PaywallPresentationRequestStatusReason =
 
 // Custom callbacks, computed properties, integration attributes
 
+/** A `request_callback` from the paywall, handed to
+ *  `PaywallPresentationHandler.onCustomCallback`. */
 export interface CustomCallback {
   name: string;
   variables?: Record<string, JsonValue>;
 }
 
+/** Sent back to the paywall as `callback_result`. The paywall branches on
+ *  `status` (its onSuccess / onFailure actions) and can read `data`. */
 export interface CustomCallbackResult {
   status: "success" | "failure";
   data?: Record<string, JsonValue>;

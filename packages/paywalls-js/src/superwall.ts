@@ -43,6 +43,8 @@ import {
   closeReasonShouldComplete,
   type PaywallCloseReason,
   type CheckoutCompletion,
+  type CustomCallback,
+  type CustomCallbackResult,
   type PaywallInfo,
   type PaywallPresentationStyle,
   type PaywallResult,
@@ -216,6 +218,16 @@ export interface PaywallPresentationHandler {
   onPurchase?(info: PaywallInfo, checkout: CheckoutCompletion): void | Promise<void>;
   onError?(error: Error): void;
   onSkip?(reason: PaywallSkippedReason): void;
+  /**
+   * Answer custom callbacks the paywall requests (a paywall action that waits
+   * on your app, e.g. validating a code). Resolve `{ status, data? }`; the
+   * paywall runs its onSuccess / onFailure branch and can read `data`.
+   * Without this, or if it throws, the paywall receives `failure`. Same
+   * contract as the mobile SDKs' `onCustomCallback`.
+   */
+  onCustomCallback?(
+    callback: CustomCallback,
+  ): CustomCallbackResult | Promise<CustomCallbackResult>;
 }
 
 export interface RegisterPlacementArgs {
@@ -1580,6 +1592,32 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       .catch(() => {});
   };
 
+  /** Run `handler.onCustomCallback`, mapping a throw or a malformed result to
+   *  `failure` so the paywall is never left waiting on a reply. */
+  const runCustomCallback = async (
+    onCustomCallback: NonNullable<PaywallPresentationHandler["onCustomCallback"]>,
+    callback: CustomCallback,
+  ): Promise<CustomCallbackResult> => {
+    try {
+      const result = await onCustomCallback(callback);
+      if (result?.status === "success" || result?.status === "failure") {
+        return result;
+      }
+      logViaRuntime(
+        "paywallView",
+        `handler.onCustomCallback(${callback.name}) returned an invalid result`,
+        JSON.stringify(result),
+      );
+    } catch (cause) {
+      logViaRuntime(
+        "paywallView",
+        `handler.onCustomCallback(${callback.name}) threw`,
+        cause,
+      );
+    }
+    return { status: "failure" };
+  };
+
   /** Fire-and-forget runner for internal effects whose failures should
    *  surface via Logger.warn (delegate `onLog`) rather than disappearing. */
   const runFireAndForget = (
@@ -2249,6 +2287,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           },
           // The iframe already sends `user_attributes` to the collector.
           onUserAttributesUpdate: (attrs) => mergeAttributes(attrs, false),
+          ...(handler?.onCustomCallback && {
+            onCustomCallback: (callback: CustomCallback) =>
+              runCustomCallback(handler.onCustomCallback!.bind(handler), callback),
+          }),
           ownsCheckoutTeardown: true,
           bootstrap,
           initPayload,

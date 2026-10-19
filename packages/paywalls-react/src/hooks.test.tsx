@@ -299,6 +299,44 @@ test("usePlacement reflects presented + dismissed state and routes handler callb
   expect(onDismissCount).toBe(1);
 });
 
+test("usePlacement forwards onCustomCallback to the presenter", async () => {
+  let reply: unknown = null;
+  let resolveDone!: () => void;
+  const done = new Promise<void>((r) => { resolveDone = r; });
+  const stubPresenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      reply = await ctx.onCustomCallback?.({ name: "checkCode", variables: { code: "A" } });
+      resolveDone();
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+
+  const Comp = () => {
+    const { register } = usePlacement({
+      onCustomCallback: ({ variables }) => ({
+        status: "success",
+        data: { code: variables?.["code"] ?? null },
+      }),
+    });
+    return (
+      <button onClick={() => void register({ placement: "checkout", presenter: stubPresenter })}>
+        go
+      </button>
+    );
+  };
+
+  const { getByText } = await renderAct(
+    <SuperwallProvider apiKey="pk_test_cc" fetch={noopFetch} storage={newAdapter()}>
+      <Comp />
+    </SuperwallProvider>,
+  );
+  await act(async () => { await flush(); });
+  await act(async () => { fireEvent.click(getByText("go")); });
+  await act(async () => { await done; await flush(); });
+  expect(reply).toEqual({ status: "success", data: { code: "A" } });
+});
+
 test("usePlacement: ACTIVE subscription → register returns skipped(userSubscribed)", async () => {
   // When the user is already entitled, register() skips the paywall with
   // PaywallSkippedReason.UserIsSubscribed (not a distinct "entitled" result —
