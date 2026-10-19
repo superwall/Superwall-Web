@@ -92,6 +92,34 @@ If you don't supply a handler, or it throws, the paywall gets `failure`. This
 works the same way as `onCustomCallback` in the iOS and Android SDKs. In React,
 pass `onCustomCallback` to `usePlacement({ ... })`.
 
+For type-checked handlers, declare your callbacks and answer them by name with
+`customCallbacks`. Names that aren't in the map fall through to
+`onCustomCallback`:
+
+```ts
+declare module "@superwall/paywalls-js" {
+  interface CustomCallbacks {
+    validateCode: { input: { code: string }; output: { ok: boolean } };
+  }
+}
+
+await sw.register({
+  placement: "campaign_trigger",
+  handler: {
+    customCallbacks: {
+      validateCode: async ({ code }) => ({          // code: string
+        status: "success",
+        data: { ok: await api.validate(code) },     // checked against output
+      }),
+    },
+  },
+});
+```
+
+Use inline object types or type aliases for `input` and `output`, not
+interfaces. The types are a promise you make, not runtime validation: callback
+names and variables come from the paywall editor.
+
 ## Subscription status & entitlements
 
 Status is reactive and persists across reloads — gate your UI on it.

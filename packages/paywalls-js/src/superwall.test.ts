@@ -1447,6 +1447,64 @@ it("register: handler.onCustomCallback answers the presenter's custom callbacks;
   await sw.dispose();
 });
 
+it("register: handler.customCallbacks answers by name before onCustomCallback", async () => {
+  const replies: unknown[] = [];
+  const fallback: string[] = [];
+  const presenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      replies.push(await ctx.onCustomCallback!({ name: "submitEmail", variables: { email: "a@b.co" } }));
+      // No variables sent: the named handler still gets an object.
+      replies.push(await ctx.onCustomCallback!({ name: "submitEmail" }));
+      replies.push(await ctx.onCustomCallback!({ name: "other" }));
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  await sw.register({
+    placement: "checkout",
+    handler: {
+      customCallbacks: {
+        submitEmail: (vars) => ({ status: "success", data: { ok: vars?.email === "a@b.co" } }),
+      },
+      onCustomCallback: ({ name }) => {
+        fallback.push(name);
+        return { status: "success" };
+      },
+    },
+  });
+  expect(replies).toEqual([
+    { status: "success", data: { ok: true } },
+    { status: "success", data: { ok: false } },
+    { status: "success" },
+  ]);
+  expect(fallback).toEqual(["other"]);
+  await sw.dispose();
+});
+
+it("register: customCallbacks alone replies failure for unlisted names, including Object.prototype keys", async () => {
+  const replies: unknown[] = [];
+  const presenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      replies.push(await ctx.onCustomCallback!({ name: "toString" }));
+      replies.push(await ctx.onCustomCallback!({ name: "missing" }));
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall({ presenter });
+  await sw.ready;
+  await sw.register({
+    placement: "checkout",
+    handler: {
+      customCallbacks: { submitEmail: () => ({ status: "success", data: { ok: true } }) },
+    },
+  });
+  expect(replies).toEqual([{ status: "failure" }, { status: "failure" }]);
+  await sw.dispose();
+});
+
 it("register: no handler.onCustomCallback leaves ctx.onCustomCallback unset", async () => {
   let sawHook: boolean | null = null;
   const presenter: PaywallPresenter = {

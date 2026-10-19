@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import type {
   AllSuperwallEvents,
   CustomCallback,
+  CustomCallbackHandlers,
   CustomCallbackResult,
   CustomerInfo,
   CustomPaywallController,
@@ -117,6 +118,9 @@ export interface PaywallPresentationHandlerHooks {
   onCustomCallback?(
     callback: CustomCallback,
   ): CustomCallbackResult | Promise<CustomCallbackResult>;
+  /** Typed per-name handlers — see
+   *  `PaywallPresentationHandler.customCallbacks`. Iframe paywalls only. */
+  customCallbacks?: CustomCallbackHandlers;
 }
 
 export type PaywallState =
@@ -150,6 +154,9 @@ export const usePlacement = (
 
   const register = useCallback(
     async (args: RegisterPlacementArgs): Promise<RegisterPlacementResult> => {
+      // Read once per register(), like the rest of the presentation.
+      const customCallbacks =
+        handlerRef.current?.customCallbacks ?? args.handler?.customCallbacks;
       const r = await sw.register({
         ...args,
         handler: {
@@ -193,6 +200,7 @@ export const usePlacement = (
               return fn ? fn(callback) : { status: "failure" };
             },
           }),
+          ...(customCallbacks !== undefined && { customCallbacks }),
         },
       });
       return r;
