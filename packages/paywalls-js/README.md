@@ -68,6 +68,58 @@ const result = await sw.register({
 // result.type: "presented" | "skipped" | "error"
 ```
 
+### Custom callbacks
+
+A paywall action can call into your app and wait for the answer, e.g. to
+check a code or look something up. Answer it with `handler.onCustomCallback`.
+Resolve `{ status: "success" | "failure", data? }`. The paywall runs its
+onSuccess or onFailure branch and can read `data`:
+
+```ts
+await sw.register({
+  placement: "campaign_trigger",
+  handler: {
+    onCustomCallback: async ({ name, variables }) => {
+      if (name !== "validateCode") return { status: "failure" };
+      const ok = await api.validate(variables?.code);
+      return { status: ok ? "success" : "failure", data: { ok } };
+    },
+  },
+});
+```
+
+If you don't supply a handler, or it throws, the paywall gets `failure`. This
+works the same way as `onCustomCallback` in the iOS and Android SDKs. In React,
+pass `onCustomCallback` to `usePlacement({ ... })`.
+
+For type-checked handlers, declare your callbacks and answer them by name with
+`customCallbacks`. Names that aren't in the map fall through to
+`onCustomCallback`:
+
+```ts
+declare module "@superwall/paywalls-js" {
+  interface CustomCallbacks {
+    validateCode: { input: { code: string }; output: { ok: boolean } };
+  }
+}
+
+await sw.register({
+  placement: "campaign_trigger",
+  handler: {
+    customCallbacks: {
+      validateCode: async ({ code }) => ({          // code: string
+        status: "success",
+        data: { ok: await api.validate(code) },     // checked against output
+      }),
+    },
+  },
+});
+```
+
+Use inline object types or type aliases for `input` and `output`, not
+interfaces. The types are a promise you make, not runtime validation: callback
+names and variables come from the paywall editor.
+
 ## Subscription status & entitlements
 
 Status is reactive and persists across reloads — gate your UI on it.

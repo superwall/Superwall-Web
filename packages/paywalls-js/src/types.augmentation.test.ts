@@ -4,6 +4,7 @@
 
 import { it, expect } from "@effect/vitest";
 import type {
+  CustomCallbackHandlers,
   CustomCallbacks,
   PlacementParams,
   UserAttributes,
@@ -40,4 +41,32 @@ it("CustomCallbacks augmentation produces a typed handler-map shape", () => {
   type Handler = NonNullable<CustomCallbacks["submitEmail"]["output"]>;
   const result: Handler = { ok: true };
   expect(result.ok).toBe(true);
+});
+
+it("CustomCallbackHandlers types each handler from its CustomCallbacks entry", async () => {
+  const handlers: CustomCallbackHandlers = {
+    submitEmail: ({ email }) => ({ status: "success", data: { ok: email.includes("@") } }),
+  };
+  expect(await handlers.submitEmail!({ email: "a@b.co" }, { name: "submitEmail" })).toEqual({
+    status: "success",
+    data: { ok: true },
+  });
+
+  const _wrongOutput: CustomCallbackHandlers = {
+    // @ts-expect-error — `ok` must be a boolean
+    submitEmail: () => ({ status: "success", data: { ok: "yes" } }),
+  };
+  const _wrongInput: CustomCallbackHandlers = {
+    // @ts-expect-error — `phone` isn't in submitEmail's input
+    submitEmail: ({ phone }) => ({ status: "failure", data: { phone } }),
+  };
+  const _unknownName: CustomCallbackHandlers = {
+    // @ts-expect-error — not declared on CustomCallbacks
+    notDeclared: () => ({ status: "failure" }),
+  };
+  // Failure data isn't tied to the output type.
+  const _failure: CustomCallbackHandlers = {
+    submitEmail: () => ({ status: "failure", data: { reason: "invalid" } }),
+  };
+  expect([_wrongOutput, _wrongInput, _unknownName, _failure]).toHaveLength(4);
 });

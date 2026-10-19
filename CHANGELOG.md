@@ -3,6 +3,17 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## 0.3.4 — 2026-10-19
+
+### Added
+
+- Custom callbacks from the paywall. A paywall `request_callback` now runs `handler.onCustomCallback` from `register()` (or `usePlacement`) and sends the result back as `callback_result`. This is the same contract the iOS and Android SDKs use, and like them it's per presentation (on the handler), not on the delegate. If no handler is supplied, or the handler throws or returns something that isn't a `{ status }` result, the paywall gets `failure`. Before this change the request was ignored and the paywall never got an answer. Custom presenters receive the handler as `ctx.onCustomCallback`
+- Typed custom callbacks. Declare callbacks on the `CustomCallbacks` interface (`declare module "@superwall/paywalls-js"`) and answer them with `handler.customCallbacks`, a map from callback name to handler. Each handler gets that callback's `input` as its variables, and its success `data` is checked against `output`. The map is checked first, and `onCustomCallback` handles any name that isn't in it. The types aren't runtime validation, since callback names and variables come from the paywall editor
+
+### Changed
+
+- `CustomCallbackDefinition`'s `input` and `output` are now optional `Record<string, JsonValue>` (previously required `unknown`). Entries must use inline object types or type aliases: an `interface` isn't assignable to `Record<string, JsonValue>`, so its handler is typed as `never`
+
 ## 0.3.3 — 2026-10-16
 
 ### Fixed

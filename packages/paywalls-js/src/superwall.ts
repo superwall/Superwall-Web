@@ -43,6 +43,9 @@ import {
   closeReasonShouldComplete,
   type PaywallCloseReason,
   type CheckoutCompletion,
+  type CustomCallback,
+  type CustomCallbackHandlers,
+  type CustomCallbackResult,
   type PaywallInfo,
   type PaywallPresentationStyle,
   type PaywallResult,
@@ -216,6 +219,25 @@ export interface PaywallPresentationHandler {
   onPurchase?(info: PaywallInfo, checkout: CheckoutCompletion): void | Promise<void>;
   onError?(error: Error): void;
   onSkip?(reason: PaywallSkippedReason): void;
+  /**
+   * Answer custom callbacks the paywall requests (a paywall action that waits
+   * on your app, e.g. validating a code). Resolve `{ status, data? }`; the
+   * paywall runs its onSuccess / onFailure branch and can read `data`.
+   * Without this, or if it throws, the paywall receives `failure`. Same
+   * contract as the mobile SDKs' `onCustomCallback`. Callbacks with an
+   * entry in `customCallbacks` go there instead.
+   */
+  onCustomCallback?(
+    callback: CustomCallback,
+  ): CustomCallbackResult | Promise<CustomCallbackResult>;
+  /**
+   * Typed per-name handlers for the callbacks declared on the
+   * `CustomCallbacks` augmentation. Checked before `onCustomCallback`, which
+   * stays the catch-all for names not listed here. Types aren't runtime
+   * validation: the paywall's callback names and variables come from the
+   * editor and can drift from your declaration.
+   */
+  customCallbacks?: CustomCallbackHandlers;
 }
 
 export interface RegisterPlacementArgs {
@@ -1580,6 +1602,51 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       .catch(() => {});
   };
 
+  /** Answer a paywall custom callback from `handler.customCallbacks[name]`,
+   *  else `handler.onCustomCallback`. A missing handler, a throw or a
+   *  malformed result becomes `failure` so the paywall always gets a reply. */
+  const runCustomCallback = async (
+    handler: PaywallPresentationHandler,
+    callback: CustomCallback,
+  ): Promise<CustomCallbackResult> => {
+    // Own-property lookup: a paywall-supplied name like "toString" must not
+    // reach Object.prototype.
+    const named = Object.prototype.hasOwnProperty.call(
+      handler.customCallbacks ?? {},
+      callback.name,
+    )
+      ? (handler.customCallbacks as Record<
+          string,
+          (
+            variables: Record<string, JsonValue>,
+            callback: { name: string },
+          ) => CustomCallbackResult | Promise<CustomCallbackResult>
+        >)[callback.name]
+      : undefined;
+    try {
+      const result = named
+        ? await named(callback.variables ?? {}, { name: callback.name })
+        : handler.onCustomCallback
+          ? await handler.onCustomCallback(callback)
+          : ({ status: "failure" } as const);
+      if (result?.status === "success" || result?.status === "failure") {
+        return result;
+      }
+      logViaRuntime(
+        "paywallView",
+        `handler.onCustomCallback(${callback.name}) returned an invalid result`,
+        JSON.stringify(result),
+      );
+    } catch (cause) {
+      logViaRuntime(
+        "paywallView",
+        `handler.onCustomCallback(${callback.name}) threw`,
+        cause,
+      );
+    }
+    return { status: "failure" };
+  };
+
   /** Fire-and-forget runner for internal effects whose failures should
    *  surface via Logger.warn (delegate `onLog`) rather than disappearing. */
   const runFireAndForget = (
@@ -2249,6 +2316,10 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           },
           // The iframe already sends `user_attributes` to the collector.
           onUserAttributesUpdate: (attrs) => mergeAttributes(attrs, false),
+          ...((handler?.onCustomCallback || handler?.customCallbacks) && {
+            onCustomCallback: (callback: CustomCallback) =>
+              runCustomCallback(handler, callback),
+          }),
           ownsCheckoutTeardown: true,
           bootstrap,
           initPayload,
