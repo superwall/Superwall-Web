@@ -230,6 +230,56 @@ it("iframe URL carries bootstrap params + client_surface=web-sdk when ctx.bootst
   await presentation;
 });
 
+it("iframe URL carries _sw_stripe_metadata as JSON when bootstrap has stripeMetadata", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_meta"),
+    newCtx({
+      bootstrap: {
+        apiKey: "pk_test_123",
+        apiBase: "https://api.superwall.me",
+        collector: "https://collector.superwall.me",
+        sdkVersion: "1.2.3",
+        clientSurface: "web-sdk",
+        stripeMetadata: { campaign: "spring & summer", ref: "a=b" },
+      },
+    }),
+  );
+  await tick();
+
+  const url = new URL((document.querySelector("iframe") as HTMLIFrameElement).src);
+  expect(JSON.parse(url.searchParams.get("_sw_stripe_metadata") ?? "null")).toEqual({
+    campaign: "spring & summer",
+    ref: "a=b",
+  });
+
+  presenter.dismiss();
+  await presentation;
+});
+
+it("iframe URL omits _sw_stripe_metadata without stripeMetadata", async () => {
+  const presenter = createBrowserPresenter();
+  const presentation = presenter.present(
+    stubInfo("pw_nometa"),
+    newCtx({
+      bootstrap: {
+        apiKey: "pk_test_123",
+        apiBase: "https://api.superwall.me",
+        collector: "https://collector.superwall.me",
+        sdkVersion: "1.2.3",
+        clientSurface: "web-sdk",
+      },
+    }),
+  );
+  await tick();
+
+  const url = new URL((document.querySelector("iframe") as HTMLIFrameElement).src);
+  expect(url.searchParams.has("_sw_stripe_metadata")).toBe(false);
+
+  presenter.dismiss();
+  await presentation;
+});
+
 it("post_checkout_complete (flat shape from controller's postMessageToHost) resolves purchased", async () => {
   // The in-iframe controller posts a flat `{event_name, ...}` message — NOT
   // the v1 envelope. Our handler accepts both shapes.

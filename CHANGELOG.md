@@ -3,6 +3,12 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## Unreleased
+
+### Added
+
+- `register({ stripeMetadata })` attaches your own metadata to the Stripe Checkout Session and subscription a paywall creates, on every payment path (hosted Checkout, embedded, card form, Apple Pay). It's sent as `checkoutContext.stripeMetadata` in the `#init=` payload (web-checkout apps) and as the `_sw_stripe_metadata` paywall URL param (Stripe apps). The SDK checks the server's limits first — at most 10 keys, keys 1–40 characters and not starting with `_sw_`, string values up to 500 characters — and returns `{ type: "error", error: InvalidStripeMetadataError }` instead of presenting, so a mistake shows up straight away rather than as a refused checkout or silently dropped metadata. `<SuperwallPaywall>` takes it as a `stripeMetadata` prop. Buyers can edit it, so don't grant access based on it
+
 ## 0.3.3 — 2026-10-16
 
 ### Fixed

@@ -17,7 +17,8 @@ export type SuperwallErrorCode =
   | "PRESENTER"
   | "STORAGE"
   | "PAYWALL_NOT_AVAILABLE"
-  | "DISCOUNT";
+  | "DISCOUNT"
+  | "INVALID_STRIPE_METADATA";
 
 export class SuperwallError extends Error {
   // Typed as string on the base so subclass literal tags remain assignable here.
@@ -154,6 +155,24 @@ export class DiscountError extends SuperwallError {
   constructor(reason: DiscountError["reason"], message: string) {
     super(message, "DISCOUNT");
     this.reason = reason;
+  }
+}
+
+/** Returned by `register({ stripeMetadata })` (as `{ type: "error" }` and via
+ *  `handler.onError`) when the metadata breaks the server's limits: at most
+ *  10 keys, keys 1–40 characters and not starting with `_sw_`, string values
+ *  up to 500 characters. Raised before anything is presented. */
+export class InvalidStripeMetadataError extends SuperwallError {
+  override readonly _tag = "InvalidStripeMetadataError" as const;
+  override readonly name = "InvalidStripeMetadataError";
+  readonly reason: "not_an_object" | "too_many_keys" | "invalid_key" | "reserved_key" | "invalid_value";
+  /** The offending key, for key/value violations. */
+  readonly key?: string;
+
+  constructor(reason: InvalidStripeMetadataError["reason"], message: string, key?: string) {
+    super(message, "INVALID_STRIPE_METADATA");
+    this.reason = reason;
+    if (key !== undefined) this.key = key;
   }
 }
 
