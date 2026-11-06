@@ -45,9 +45,13 @@ export interface UserAttributes extends Record<string, JsonValue> {}
 export interface PlacementParams {}
 export interface CustomCallbacks {}
 
+/** Shape of one `CustomCallbacks` entry: the paywall's `variables` and the
+ *  `data` you send back. Use inline object types or type aliases — an
+ *  `interface` isn't assignable to `Record<string, JsonValue>`, so an entry
+ *  using one types its handler as `never`. */
 export interface CustomCallbackDefinition {
-  input: unknown;
-  output: unknown;
+  input?: Record<string, JsonValue>;
+  output?: Record<string, JsonValue>;
 }
 
 export type ConfigurationStatus = "pending" | "configured" | "failed";
@@ -494,15 +498,41 @@ export type PaywallPresentationRequestStatusReason =
 
 // Custom callbacks, computed properties, integration attributes
 
+/** A `request_callback` from the paywall, handed to
+ *  `PaywallPresentationHandler.onCustomCallback`. */
 export interface CustomCallback {
   name: string;
   variables?: Record<string, JsonValue>;
 }
 
+/** Sent back to the paywall as `callback_result`. The paywall branches on
+ *  `status` (its onSuccess / onFailure actions) and can read `data`. */
 export interface CustomCallbackResult {
   status: "success" | "failure";
   data?: Record<string, JsonValue>;
 }
+
+type CustomCallbackName = keyof CustomCallbacks & string;
+type CustomCallbackDef<K extends CustomCallbackName> =
+  CustomCallbacks[K] extends CustomCallbackDefinition ? CustomCallbacks[K] : never;
+
+/** `CustomCallbackResult` whose success `data` is checked against the
+ *  callback's declared `output`. */
+export type TypedCustomCallbackResult<O> =
+  | { status: "success"; data?: O }
+  | { status: "failure"; data?: Record<string, JsonValue> };
+
+/** Per-name handlers typed from the `CustomCallbacks` augmentation — each
+ *  gets that callback's `input` and must return its `output`. Empty (`{}`)
+ *  until `CustomCallbacks` is augmented. */
+export type CustomCallbackHandlers = {
+  [K in CustomCallbackName]?: (
+    variables: CustomCallbackDef<K>["input"],
+    callback: { name: K },
+  ) =>
+    | TypedCustomCallbackResult<CustomCallbackDef<K>["output"]>
+    | Promise<TypedCustomCallbackResult<CustomCallbackDef<K>["output"]>>;
+};
 
 export interface ComputedPropertyRequest {
   type: ComputedPropertyRequestType;

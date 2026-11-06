@@ -5,6 +5,8 @@
 import type {
   JsonValue,
   CheckoutCompletion,
+  CustomCallback,
+  CustomCallbackResult,
   PaywallInfo,
   PaywallResult,
   PlacementParams,
@@ -49,6 +51,11 @@ export interface PresentationContext {
   /** Internal: merge attributes set inside the paywall into the host's
    *  user attributes. */
   readonly onUserAttributesUpdate?: (attributes: Record<string, JsonValue>) => void;
+  /** Answer a paywall `request_callback`. Set only when the caller passed
+   *  `handler.onCustomCallback`; never rejects (a throwing handler resolves
+   *  `failure`). When absent, presenters reply `failure` — same as the
+   *  mobile SDKs with no handler registered. */
+  readonly onCustomCallback?: (callback: CustomCallback) => Promise<CustomCallbackResult>;
   /** Internal: the SDK owns what happens after `post_checkout_complete` —
    *  its default handling, or the developer's `handler.onPurchase` — including
    *  tearing the overlay down (the paywall no longer posts `close` after a
