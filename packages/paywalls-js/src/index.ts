@@ -29,6 +29,7 @@ export {
   type RegisterPlacementArgs,
   type RegisterPlacementResult,
 } from "./superwall.ts";
+export type { StripeMetadata } from "./internal/stripeMetadata.ts";
 export type {
   PaywallPresenter,
   PresentationContext,

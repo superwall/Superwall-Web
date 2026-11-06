@@ -163,6 +163,10 @@ export interface PaywallBootstrap {
   readonly collector: string;
   readonly sdkVersion: string;
   readonly clientSurface: "web-sdk";
+  /** Developer Stripe metadata from `register({ stripeMetadata })`, already
+   *  validated. STRIPE apps read it from the `_sw_stripe_metadata` URL
+   *  param; WEBAPP apps from `checkoutContext.stripeMetadata` in `#init=`. */
+  readonly stripeMetadata?: Readonly<Record<string, string>>;
 }
 
 /** Purchase lifecycle messages emitted by the paywall iframe's
