@@ -1224,7 +1224,7 @@ import type {
   PaywallPresenter,
   PresentationContext,
 } from "./presenter.ts";
-import { PaywallAlreadyPresentedError, PresenterError } from "./errors.ts";
+import { InvalidStripeMetadataError, PaywallAlreadyPresentedError, PresenterError } from "./errors.ts";
 import type {
   CheckoutCompletion,
   PaywallInfo,
@@ -1272,6 +1272,67 @@ it("register with a per-call presenter override uses it (no create-time presente
   const r = await sw.register({ placement: "checkout", presenter });
   expect(r.type).toBe("presented");
   expect(presenter.presented.length).toBe(1);
+  await sw.dispose();
+});
+
+it("register({ stripeMetadata }) ships it in checkoutContext and the bootstrap", async () => {
+  let seen: PresentationContext | undefined;
+  const presenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      seen = ctx;
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall();
+  await sw.ready;
+  const metadata: Record<string, string> = { campaign: "spring" };
+  const r = await sw.register({ placement: "checkout", presenter, stripeMetadata: metadata });
+  // Mutating the caller's object afterwards doesn't change what was sent.
+  metadata["campaign"] = "changed";
+  expect(r.type).toBe("presented");
+  const checkoutContext = seen?.initPayload?.["checkoutContext"] as Record<string, unknown>;
+  expect(checkoutContext["stripeMetadata"]).toEqual({ campaign: "spring" });
+  expect(seen?.bootstrap?.stripeMetadata).toEqual({ campaign: "spring" });
+  await sw.dispose();
+});
+
+it("register without stripeMetadata leaves it out of checkoutContext and the bootstrap", async () => {
+  let seen: PresentationContext | undefined;
+  const presenter: PaywallPresenter = {
+    present: async (_info, ctx) => {
+      seen = ctx;
+      return { type: "declined" };
+    },
+    dismiss: () => {},
+  };
+  const sw = makeWithPaywall();
+  await sw.ready;
+  await sw.register({ placement: "checkout", presenter, stripeMetadata: {} });
+  const checkoutContext = seen?.initPayload?.["checkoutContext"] as Record<string, unknown>;
+  expect("stripeMetadata" in checkoutContext).toBe(false);
+  expect(seen?.bootstrap?.stripeMetadata).toBeUndefined();
+  await sw.dispose();
+});
+
+it("register with invalid stripeMetadata returns InvalidStripeMetadataError without presenting", async () => {
+  const presenter = presenterThatResolves({ type: "declined" });
+  const sw = makeWithPaywall();
+  await sw.ready;
+  let handlerError: Error | undefined;
+  const r = await sw.register({
+    placement: "checkout",
+    presenter,
+    stripeMetadata: { _sw_user_id: "spoof" },
+    handler: { onError: (e) => { handlerError = e; } },
+  });
+  expect(r.type).toBe("error");
+  if (r.type === "error") {
+    expect(r.error).toBeInstanceOf(InvalidStripeMetadataError);
+    expect((r.error as InvalidStripeMetadataError).reason).toBe("reserved_key");
+  }
+  expect(handlerError).toBeInstanceOf(InvalidStripeMetadataError);
+  expect(presenter.presented).toHaveLength(0);
   await sw.dispose();
 });
 

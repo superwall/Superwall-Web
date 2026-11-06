@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import type { PlacementParams } from "@superwall/paywalls-js";
+import type { PlacementParams, StripeMetadata } from "@superwall/paywalls-js";
 import { createBrowserPresenter } from "@superwall/paywalls-js/browser";
 import type { PaywallPresentationHandlerHooks } from "./hooks.ts";
 import { useSuperwall } from "./hooks.ts";
@@ -7,6 +7,10 @@ import { useSuperwall } from "./hooks.ts";
 export interface SuperwallPaywallProps extends PaywallPresentationHandlerHooks {
   placement: string;
   params?: PlacementParams;
+  /** Stripe metadata for a checkout from this paywall — see
+   *  `register({ stripeMetadata })`. Read when the paywall is registered;
+   *  changing it later doesn't re-register. */
+  stripeMetadata?: StripeMetadata;
   /** Rendered when the user is entitled — i.e. the feature block fires. */
   children?: ReactNode;
   /** Rendered while the paywall is loading. Swapped out the moment the paywall presents. */
@@ -32,6 +36,7 @@ export interface SuperwallPaywallProps extends PaywallPresentationHandlerHooks {
 export function SuperwallPaywall({
   placement,
   params,
+  stripeMetadata,
   children,
   loading = null,
   inline = false,
@@ -47,6 +52,9 @@ export function SuperwallPaywall({
 
   const handlersRef = useRef({ onPresent, onDismiss, onSkip, onError });
   handlersRef.current = { onPresent, onDismiss, onSkip, onError };
+  // A ref, so an inline object literal doesn't re-register on every render.
+  const stripeMetadataRef = useRef(stripeMetadata);
+  stripeMetadataRef.current = stripeMetadata;
 
   const presenter = useMemo(
     () =>
@@ -61,6 +69,7 @@ export function SuperwallPaywall({
     sw.register({
       placement,
       ...(params && { params }),
+      ...(stripeMetadataRef.current && { stripeMetadata: stripeMetadataRef.current }),
       feature: () => { if (!cancelled) setUnlocked(true); },
       ...(presenter && { presenter }),
       handler: {

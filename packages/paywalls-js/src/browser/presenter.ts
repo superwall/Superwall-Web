@@ -17,6 +17,7 @@ import type {
 import type { JsonValue } from "../types.ts";
 import { createPaywallHost, type HostMessage, type PaywallHost } from "./host/index.ts";
 import { redemptionCodesOf } from "./host/checkout.ts";
+import { STRIPE_METADATA_QUERY_PARAM } from "../internal/stripeMetadata.ts";
 import {
   asProductIdentifier,
   asTransactionId,
@@ -290,6 +291,12 @@ const buildPaywallUrl = (
       }
       if (bootstrap.hostOrigin) {
         url.searchParams.set("host_origin", bootstrap.hostOrigin);
+      }
+      if (bootstrap.stripeMetadata && Object.keys(bootstrap.stripeMetadata).length > 0) {
+        url.searchParams.set(
+          STRIPE_METADATA_QUERY_PARAM,
+          JSON.stringify(bootstrap.stripeMetadata),
+        );
       }
       // SDK-built payload takes precedence; fallback shape is the legacy
       // bootstrap-derived hash (used by tests that don't construct the

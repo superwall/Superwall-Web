@@ -67,6 +67,28 @@ const result = await sw.register({
 });
 // result.type: "presented" | "skipped" | "error"
 ```
+### Stripe metadata
+
+Attach your own metadata to the Stripe Checkout Session and subscription a
+paywall creates:
+
+  stripeMetadata: { campaign: "spring_sale", referrer: "newsletter" },
+});
+```
+
+It applies on every payment path (hosted Checkout, embedded, card form,
+Apple Pay). Limits: at most 10 keys; keys 1–40 characters and not starting
+with `_sw_`; string values up to 500 characters. Anything else returns
+`{ type: "error", error: InvalidStripeMetadataError }` (and calls
+`handler.onError`) before the paywall is shown.
+
+On a key clash, Superwall's own `_sw_*` keys and your app's user-ID metadata
+field win, then `stripeMetadata`, then a checkout config's metadata or the
+paywall editor's custom metadata.
+
+> The metadata travels through the browser, so a buyer can change it. Use it
+> for attribution and bookkeeping, not to decide who gets access.
+
 
 ### Custom callbacks
 

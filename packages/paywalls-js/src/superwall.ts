@@ -24,6 +24,7 @@ import type {
   SurveyPresenter,
 } from "./presenter.ts";
 import { createCustomPaywallPresenter } from "./internal/customPaywallPresenter.ts";
+import { validateStripeMetadata, type StripeMetadata } from "./internal/stripeMetadata.ts";
 import { presentSurveyIfAvailable } from "./internal/survey.ts";
 import { asReadable, createSignal, type Readable } from "./signal.ts";
 import {
@@ -261,6 +262,24 @@ export interface RegisterPlacementArgs {
    *  is also set. See `@superwall/paywalls-react`'s `SuperwallCustomPaywall`
    *  for the React wrapper. */
   paywall?: CustomPaywallRenderer;
+  /**
+   * Your own Stripe metadata for a checkout started from this paywall. It
+   * lands on the Checkout Session and the subscription, on every payment
+   * path (hosted Checkout, embedded, card form, Apple Pay).
+   *
+   * Limits: at most 10 keys; keys 1–40 characters and not starting with
+   * `_sw_`; string values up to 500 characters. A violation returns
+   * `{ type: "error", error: InvalidStripeMetadataError }` (and calls
+   * `handler.onError`) before anything is presented.
+   *
+   * On a key clash, Superwall's `_sw_*` keys and the app's user-ID metadata
+   * field win over these, and these win over a checkout config's metadata
+   * or the paywall editor's custom metadata.
+   *
+   * It travels through the browser, so a buyer can edit it — don't grant
+   * access based on it.
+   */
+  stripeMetadata?: StripeMetadata;
 }
 
 export interface PaywallOverrides {
@@ -541,6 +560,8 @@ interface InitPayloadInput {
     hostOrigin?: string;
     cancelUrl?: string;
   };
+  /** Already validated (see `validateStripeMetadata`); omitted when empty. */
+  stripeMetadata?: Record<string, string>;
   aliasId: string | undefined;
   appUserId: string | undefined;
   deviceId: string | undefined;
@@ -573,6 +594,7 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
     email,
     userAttributes,
     deviceAttributes,
+    stripeMetadata,
   } = input;
   const placementEventId = randomUuid();
   const presentedByEventId = randomUuid();
@@ -654,6 +676,8 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
       timezoneOffset: (deviceAttributes["timezoneOffset"] as number) ?? 0,
     },
     products: {},
+    // WEBAPP apps read developer Stripe metadata from here.
+    ...(stripeMetadata && { stripeMetadata }),
   };
   return {
     placementSessionToken: bootstrap.apiKey,
@@ -2017,6 +2041,9 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const { placement, params, handler, feature } = args;
       currentPresentationId = asPresentationId(randomUuid());
       try {
+        // Validate up front so a bad value fails before any work or events,
+        // and snapshot it so later mutation can't change what is sent.
+        const stripeMetadata = validateStripeMetadata(args.stripeMetadata);
         // Block until identity is Ready — closes the race where an
         // in-flight identify/reset/configure lets audience eval read stale data.
         await runtime.runPromise(IdentityService.awaitReady());
@@ -2244,6 +2271,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           collector: `https://${hosts.collector}`,
           sdkVersion: SDK_VERSION,
           clientSurface: "web-sdk" as const,
+          ...(stripeMetadata && { stripeMetadata }),
         };
 
         const initPayload = buildInitPayload({
@@ -2255,6 +2283,7 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
           decision: decision as { kind: "paywall"; experiment: Experiment },
           application,
           bootstrap,
+          ...(stripeMetadata && { stripeMetadata }),
           aliasId: idSnap?.aliasId as string | undefined,
           appUserId: appUserIdRaw,
           deviceId: idSnap?.vendorId as string | undefined,
