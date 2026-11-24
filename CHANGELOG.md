@@ -3,6 +3,12 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## 0.3.5 — 2026-11-24
+
+### Fixed
+
+- Web purchases on framework (headless) paywalls carry the paywall's attribution again. The SDK never sent these paywalls `paywall_open`, and sent `experiment` after the templates that start the checkout prefetch, so the checkout context they post said paywall `0` and sometimes experiment `0`. The server builds `transaction_complete` from that context, so revenue counted but paywall, campaign and experiment conversions read 0. A framework paywall now gets `experiment` and then `paywall_open` (database id, identifier and name) before its templates. paywall.js paywalls get the same messages as before. Purchases made with earlier versions keep `0`
+
 ## 0.3.4 — 2026-10-19
 
 ### Added
