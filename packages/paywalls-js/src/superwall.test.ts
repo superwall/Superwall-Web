@@ -3929,6 +3929,24 @@ it("default iframe presenter: the iframe's device_attributes carry the vendor / 
   await sw.dispose();
 });
 
+it("default iframe presenter: the iframe reports with the install date, so its paywall_open lands in install cohorts", async () => {
+  const { fetch } = recordingCheckoutFetch();
+  const sw = _createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  const iframe = await mountedIframe();
+  const init = JSON.parse(atob(new URL(iframe.src).hash.slice("#init=".length))) as {
+    collector: { url: string; headers: Record<string, string>; deviceAttributes: Record<string, unknown> };
+  };
+  const installDate = init.collector.headers["x-app-install-date"];
+  expect(installDate).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  expect(init.collector.deviceAttributes["$appInstallDate"]).toBe(installDate);
+  expect(new URL(init.collector.url).hostname).toBe(resolvePaywallWorkerHost("release"));
+  sw.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
 // ---------------------------------------------------------------------------
 // public redeem() — redemption codes from a completed web checkout
 // ---------------------------------------------------------------------------

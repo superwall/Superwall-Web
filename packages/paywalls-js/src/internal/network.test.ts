@@ -197,6 +197,40 @@ it.effect("X-App-Install-Date is left out while the install date is unknown", ()
   });
 });
 
+it.effect("X-App-Install-Date only goes to the environment's Superwall hosts", () => {
+  const { fetch, calls } = mockFetch(({ url }) =>
+    new Response(
+      url.includes("/redeem") ? JSON.stringify({ codes: [] })
+        : url.includes("/enrich") ? JSON.stringify({ user: {}, device: {} })
+        : "{}",
+    ),
+  );
+  const stack = buildStack(fetch, {
+    appInstallDate: () => "2026-11-01T10:00:00.000Z",
+  });
+  const superwallHosts = new Set(Object.values(resolveHosts("release")));
+
+  return Effect.gen(function* () {
+    yield* IdentityService.hydrate();
+    const net = yield* NetworkService;
+    yield* net.getStaticConfig();
+    yield* net.postEvents([
+      { event_id: "e1", event_name: "first_seen", parameters: {}, created_at: "2026-11-01T10:00:00.000Z" },
+    ]);
+    yield* net.postEnrichment({ user: {}, device: {} });
+    yield* net.postConfirmAssignments({ assignments: [{ experiment_id: "x", variant_id: "v" }] });
+    yield* net.postRedeem({ deviceId: "d", codes: [{ code: "c" }] });
+    yield* net.getWebEntitlements({ deviceId: "d" });
+
+    expect(calls).toHaveLength(6);
+    for (const call of calls) {
+      expect(superwallHosts.has(new URL(call.url).hostname)).toBe(true);
+      const headers = call.init?.headers as Record<string, string>;
+      expect(headers["X-App-Install-Date"]).toBe("2026-11-01T10:00:00.000Z");
+    }
+  }).pipe(Effect.provide(stack));
+});
+
 it.effect("a throwing getter degrades to the header's default", () => {
   const { fetch } = mockFetch(() => new Response("{}"));
   const stack = buildStack(fetch, {

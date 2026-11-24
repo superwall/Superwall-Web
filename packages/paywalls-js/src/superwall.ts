@@ -641,6 +641,12 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
       "x-vendor-id": vendorId ?? "",
       "x-platform": "web",
       "x-sdk-version": bootstrap.sdkVersion,
+      // The iframe sends its own `paywall_open`; the proxy forwards this header
+      // so those events land in install cohorts too.
+      ...(typeof deviceAttributes.appInstallDate === "string" &&
+        deviceAttributes.appInstallDate !== "" && {
+          "x-app-install-date": deviceAttributes.appInstallDate,
+        }),
     },
     placementEventId,
     identity: { userId, deviceId: deviceId ?? "" },
