@@ -779,6 +779,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
       const s = subStatusSig.value;
       return s.status === "ACTIVE" ? s.entitlements.map((e) => e.id) : [];
     },
+    // Same value as `$appInstallDate` in the device attributes.
+    appInstallDate: () => {
+      const ms = firstSeenAtSig.value;
+      return ms != null ? new Date(ms).toISOString() : undefined;
+    },
   };
   const networkLayer = networkServiceLayer(networkConfig, identityLayer);
   const computedLayer = computedPropertiesLayer(storageLayer);

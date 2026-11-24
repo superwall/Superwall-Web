@@ -46,6 +46,10 @@ export interface NetworkConfig {
   readonly configRetryCount?: () => number;
   /** `X-Entitlements` — ids of the user's active entitlements. */
   readonly activeEntitlementIds?: () => ReadonlyArray<string>;
+  /** `X-App-Install-Date` — ISO time of the browser's first `configure()`.
+   *  Ingest copies it to `meta.appInstallDate`, which install-cohorted charts
+   *  read. Left out while unknown. */
+  readonly appInstallDate?: () => string | undefined;
 }
 
 const safeCall = <T>(read: (() => T) | undefined, fallback: T): T => {
@@ -217,6 +221,10 @@ const make = (config: NetworkConfig) =>
         ).join(","),
         ...extra,
       };
+      const installDate = safeCall(config.appInstallDate, "");
+      if (installDate && !("X-App-Install-Date" in headers)) {
+        headers["X-App-Install-Date"] = installDate;
+      }
       return headers;
     });
 
