@@ -3,6 +3,12 @@
 All notable changes to the `@superwall/*` web SDK packages are documented here.
 Versions apply to every published package in lockstep (see `scripts/version.ts`).
 
+## Unreleased
+
+### Fixed
+
+- Every request now sends `X-App-Install-Date`, the ISO time of the browser's first `configure()` (the same value as the `$appInstallDate` device attribute). Ingest reads install dates only from this header, so web apps had no install cohorts and install-cohorted dashboard charts, such as Paywall rate, read 0%. The header is left out until the first-seen time is known. Events sent by earlier versions still have no install date
+
 ## 0.3.4 — 2026-10-19
 
 ### Added
