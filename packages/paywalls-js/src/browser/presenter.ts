@@ -830,7 +830,6 @@ const handleInbound = (
     switch (name) {
       case "ping":
       case "template_params_and_user_attributes": {
-        sendTemplates(info, ctx, active);
         if (evt["host_controlled"] === true && !active.host && ctx.initPayload) {
           active.host = createPaywallHost({
             initPayload: ctx.initPayload,
@@ -842,6 +841,12 @@ const handleInbound = (
             send: (messages) => postAccept64(active, messages),
           });
         }
+        // A hosted paywall gets its attribution before its templates: the
+        // products in them start its checkout prefetch, and a session
+        // prefetched before `experiment` / `paywall_open` arrive records
+        // paywall and experiment `0`, which `transaction_complete` inherits.
+        active.host?.announce();
+        sendTemplates(info, ctx, active);
         active.host?.open();
         for (const early of active.earlyHostMessages.splice(0)) active.host?.observe(early);
         // The iframe is now mounted + ready for host commands. Flush any

@@ -43,8 +43,15 @@ export interface PaywallHostInput {
 }
 
 export interface PaywallHost {
-  /** The paywall asked for its templates: send identity, experiment and
-   *  priced products, and report the open. */
+  /** Send the paywall's attribution (`experiment`, then `paywall_open`) once.
+   *  The presenter calls it before it sends the templates: a framework
+   *  paywall starts prefetching checkout sessions as soon as it has its
+   *  products, and each session's checkout context, which the server builds
+   *  `transaction_complete` from, records the attribution the paywall had at
+   *  that moment. */
+  announce(): void;
+  /** The paywall asked for its templates: send attribution (when `announce`
+   *  hasn't yet), identity and priced products, and report the open. */
   open(): void;
   /** Report what a lifecycle message from the paywall means. */
   observe(message: HostMessage): void;
@@ -72,6 +79,7 @@ export const createPaywallHost = (input: PaywallHostInput): PaywallHost | null =
   const checkoutContext = recordOf(input.initPayload.checkoutContext);
   const identity = recordOf(checkoutContext.identity);
   const experiment = recordOf(checkoutContext.experiment);
+  const paywall = recordOf(checkoutContext.paywall);
   const products = hostedProductsOf(input.initPayload.products);
   const hostOrigin = stringOf(input.initPayload.hostOrigin);
   const events = createHostEvents({
@@ -84,6 +92,7 @@ export const createPaywallHost = (input: PaywallHostInput): PaywallHost | null =
     paywallManagedPaymentsOverride: stringOf(checkoutContext.paywallManagedPaymentsOverride) ?? null,
   });
   const prefetched = new Set<string>();
+  let announced = false;
   let opened = false;
 
   const templateVariables = () => ({
@@ -113,19 +122,36 @@ export const createPaywallHost = (input: PaywallHostInput): PaywallHost | null =
     ]);
   };
 
+  const announce = () => {
+    if (announced) return;
+    announced = true;
+    input.send([
+      {
+        event_name: "experiment",
+        experimentId: String(experiment.experimentId ?? "0"),
+        variantId: String(experiment.variantId ?? "0"),
+        campaignId: String(experiment.campaignId ?? "0"),
+      },
+      // What the native SDKs send a paywall on open. The framework keeps it
+      // as `snapshot.paywall` and puts it in every checkout context; without
+      // it the context carries paywall `0`.
+      {
+        event_name: "paywall_open",
+        paywall_id: String(paywall.paywallId ?? "0"),
+        paywall_identifier: stringOf(paywall.paywallIdentifier) ?? "",
+        paywall_name: stringOf(paywall.paywallName) ?? "",
+      },
+    ]);
+  };
+
   return {
+    announce,
+
     open: () => {
       if (opened) return;
       opened = true;
-      input.send([
-        {
-          event_name: "experiment",
-          experimentId: String(experiment.experimentId ?? "0"),
-          variantId: String(experiment.variantId ?? "0"),
-          campaignId: String(experiment.campaignId ?? "0"),
-        },
-        { event_name: "template_variables", variables: templateVariables() },
-      ]);
+      announce();
+      input.send([{ event_name: "template_variables", variables: templateVariables() }]);
       void priceProducts(apiBase, input.apiKey, products, applyVariables);
       events.trackOpen();
     },
