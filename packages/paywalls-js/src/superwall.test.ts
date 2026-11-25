@@ -3096,6 +3096,63 @@ it("counters: firstSeenAt bootstrapped on first run + totalPaywallViews incremen
   await sw2.dispose();
 });
 
+it("X-App-Install-Date: the first_seen request carries the first-seen time, unchanged across runs", async () => {
+  const adapter = newAdapter();
+  const installDates: string[] = [];
+  const eventHeaders: Array<{ names: string[]; installDate: string | null }> = [];
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/api/v1/events")) {
+      const body = JSON.parse(init?.body as string) as {
+        events: Array<{ event_name: string }>;
+      };
+      eventHeaders.push({
+        names: body.events.map((e) => e.event_name),
+        installDate: new Headers(init?.headers).get("x-app-install-date"),
+      });
+      return new Response("", { status: 204 });
+    }
+    if (url.includes("/api/v1/enrich")) {
+      const body = JSON.parse(init?.body as string) as {
+        device: { appInstallDate: string };
+      };
+      installDates.push(body.device.appInstallDate);
+      return new Response(JSON.stringify({ user: {}, device: {} }));
+    }
+    if (url.includes("/api/v1/static_config")) {
+      return new Response(
+        JSON.stringify({
+          build_id: "b1",
+          trigger_options: [],
+          paywall_responses: [],
+          products: [],
+          toggles: [],
+          localization: { locales: [{ locale: "en-US" }] },
+        }),
+      );
+    }
+    return new Response("", { status: 204 });
+  }) as unknown as typeof globalThis.fetch;
+
+  const sw1 = createSuperwall({ apiKey: "pk_test", fetch, storage: adapter });
+  await sw1.ready;
+  await sw1.dispose();
+  const firstRun = eventHeaders.find((r) => r.names.includes("first_seen"));
+  expect(firstRun).toBeDefined();
+  // Same value as `$appInstallDate`, which ingest reads as meta.appInstallDate.
+  expect(firstRun!.installDate).toBe(installDates[0]!);
+  expect(Number.isNaN(Date.parse(firstRun!.installDate!))).toBe(false);
+
+  // A later page load reports the same install date, not a new one.
+  const sent = eventHeaders.length;
+  const sw2 = createSuperwall({ apiKey: "pk_test", fetch, storage: adapter });
+  await sw2.ready;
+  await sw2.dispose();
+  const later = eventHeaders.slice(sent);
+  expect(later.length).toBeGreaterThan(0);
+  for (const r of later) expect(r.installDate).toBe(firstRun!.installDate);
+});
+
 it("entitlements.byProductIds: returns config-derived entitlements before any purchase", async () => {
   const fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -3867,6 +3924,24 @@ it("default iframe presenter: the iframe's device_attributes carry the vendor / 
   expect(vendorId).not.toBe("");
   expect(init.collector.deviceAttributes["$vendorId"]).toBe(vendorId);
   expect(init.collector.deviceAttributes["$deviceId"]).not.toBe("");
+  sw.dismiss();
+  await reg;
+  await sw.dispose();
+});
+
+it("default iframe presenter: the iframe reports with the install date, so its paywall_open lands in install cohorts", async () => {
+  const { fetch } = recordingCheckoutFetch();
+  const sw = _createSuperwall({ apiKey: "pk_test", fetch, storage: newAdapter() });
+  await sw.ready;
+  const reg = sw.register({ placement: "checkout" });
+  const iframe = await mountedIframe();
+  const init = JSON.parse(atob(new URL(iframe.src).hash.slice("#init=".length))) as {
+    collector: { url: string; headers: Record<string, string>; deviceAttributes: Record<string, unknown> };
+  };
+  const installDate = init.collector.headers["x-app-install-date"];
+  expect(installDate).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  expect(init.collector.deviceAttributes["$appInstallDate"]).toBe(installDate);
+  expect(new URL(init.collector.url).hostname).toBe(resolvePaywallWorkerHost("release"));
   sw.dismiss();
   await reg;
   await sw.dispose();

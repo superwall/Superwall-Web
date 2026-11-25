@@ -641,6 +641,10 @@ export const buildInitPayload = (input: InitPayloadInput): Record<string, unknow
       "x-vendor-id": vendorId ?? "",
       "x-platform": "web",
       "x-sdk-version": bootstrap.sdkVersion,
+      ...(typeof deviceAttributes.appInstallDate === "string" &&
+        deviceAttributes.appInstallDate !== "" && {
+          "x-app-install-date": deviceAttributes.appInstallDate,
+        }),
     },
     placementEventId,
     identity: { userId, deviceId: deviceId ?? "" },
@@ -778,6 +782,11 @@ export const createSuperwall = (opts: CreateSuperwallOptions): Superwall => {
     activeEntitlementIds: () => {
       const s = subStatusSig.value;
       return s.status === "ACTIVE" ? s.entitlements.map((e) => e.id) : [];
+    },
+    // Same value as `$appInstallDate` in the device attributes.
+    appInstallDate: () => {
+      const ms = firstSeenAtSig.value;
+      return ms != null ? new Date(ms).toISOString() : undefined;
     },
   };
   const networkLayer = networkServiceLayer(networkConfig, identityLayer);
