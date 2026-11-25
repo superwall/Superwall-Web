@@ -1491,7 +1491,11 @@ it("a framework paywall's host_controlled ping makes the SDK its host: priced te
               store_product: { store: "STRIPE" },
             },
           ],
-          checkoutContext: { identity: { appUserId: "user_1" }, experiment: {} },
+          checkoutContext: {
+            identity: { appUserId: "user_1" },
+            experiment: { experimentId: "207076", variantId: "711240", campaignId: "c1" },
+            paywall: { paywallId: "295780", paywallIdentifier: "pw_framework", paywallName: "Framework" },
+          },
           collector,
         },
       }),
@@ -1525,7 +1529,22 @@ it("a framework paywall's host_controlled ping makes the SDK its host: priced te
     await flushMessages();
 
     const names = toIframe.map((message) => (message as { event_name: string }).event_name);
-    expect(names).toContain("experiment");
+    // Attribution goes first: the products in the templates start the
+    // paywall's checkout prefetch, whose context must already carry it.
+    expect(names.slice(0, 3)).toEqual(["experiment", "paywall_open", "products"]);
+    expect(toIframe[0]).toEqual({
+      event_name: "experiment",
+      experimentId: "207076",
+      variantId: "711240",
+      campaignId: "c1",
+    });
+    expect(toIframe[1]).toEqual({
+      event_name: "paywall_open",
+      paywall_id: "295780",
+      paywall_identifier: "pw_framework",
+      paywall_name: "Framework",
+    });
+    expect(names.filter((name) => name === "paywall_open")).toHaveLength(1);
     expect(toIframe).toContainEqual(
       expect.objectContaining({
         event_name: "template_variables",
@@ -1569,6 +1588,13 @@ it("a paywall.js ping (no host_controlled) leaves hosting to its controller", as
     );
     await tick();
     const iframe = document.querySelector("iframe") as HTMLIFrameElement;
+    const toIframe: Array<{ event_name: string }> = [];
+    iframe.contentWindow!.postMessage = ((message: { payload?: string }) => {
+      if (typeof message?.payload === "string") {
+        const json = atob(message.payload.replace(/-/g, "+").replace(/_/g, "/"));
+        toIframe.push(...(JSON.parse(json) as Array<{ event_name: string }>));
+      }
+    }) as Window["postMessage"];
     window.dispatchEvent(
       new MessageEvent("message", {
         data: { version: 1, payload: { events: [{ event_name: "ping" }] } },
@@ -1578,6 +1604,15 @@ it("a paywall.js ping (no host_controlled) leaves hosting to its controller", as
     );
     await flushMessages();
     expect(calls).toEqual([]);
+    // Exactly the templates it always got: its controller sends the
+    // attribution itself.
+    expect(toIframe.map((message) => message.event_name)).toEqual([
+      "products",
+      "template_variables",
+      "template_substitutions_prefix",
+      "template_substitutions",
+      "page_styles",
+    ]);
     presenter.dismiss();
     await presentation;
   } finally {

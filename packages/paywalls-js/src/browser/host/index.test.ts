@@ -29,6 +29,7 @@ const INIT = {
   checkoutContext: {
     identity: { appUserId: "user_1", aliasId: "$SuperwallAlias:a1", email: "ada@example.com" },
     experiment: { experimentId: "e1", variantId: "v1", campaignId: "c1" },
+    paywall: { paywallId: "271256", paywallIdentifier: "paywall-simple-v2", paywallName: "Simple v2" },
     managedPayments: true,
   },
   collector: COLLECTOR,
@@ -85,7 +86,7 @@ describe("createPaywallHost", () => {
     expect(createPaywallHost({ initPayload: { collector: COLLECTOR }, apiKey: "pk", send })).toBeNull();
   });
 
-  it("opens once, like the controller: experiment and identity, priced products, the open batch", async () => {
+  it("opens once, like the controller: attribution and identity, priced products, the open batch", async () => {
     const paywall = host();
 
     paywall.open();
@@ -94,6 +95,12 @@ describe("createPaywallHost", () => {
 
     expect(sent[0]).toEqual({ event_name: "experiment", experimentId: "e1", variantId: "v1", campaignId: "c1" });
     expect(sent[1]).toEqual({
+      event_name: "paywall_open",
+      paywall_id: "271256",
+      paywall_identifier: "paywall-simple-v2",
+      paywall_name: "Simple v2",
+    });
+    expect(sent[2]).toEqual({
       event_name: "template_variables",
       variables: {
         user: { plan: "none", appUserId: "user_1", aliasId: "$SuperwallAlias:a1", email: "ada@example.com" },
@@ -101,7 +108,7 @@ describe("createPaywallHost", () => {
         params: { source: "result" },
       },
     });
-    expect(sent.slice(2)).toEqual([
+    expect(sent.slice(3)).toEqual([
       { event_name: "products", products: [{ product: "primary", productId: "test:price_1:no-trial" }] },
       {
         event_name: "template_variables",
@@ -123,6 +130,7 @@ describe("createPaywallHost", () => {
 
     expect(sent).toEqual([
       { event_name: "experiment", experimentId: "0", variantId: "0", campaignId: "0" },
+      { event_name: "paywall_open", paywall_id: "0", paywall_identifier: "", paywall_name: "" },
       { event_name: "template_variables", variables: { user: {}, device: {}, params: {} } },
     ]);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/api/products/variables"))).toBe(false);
@@ -138,7 +146,32 @@ describe("createPaywallHost", () => {
     host().open();
     await settle();
 
-    expect(sent.map((message) => message.event_name)).toEqual(["experiment", "template_variables"]);
+    expect(sent.map((message) => message.event_name)).toEqual(["experiment", "paywall_open", "template_variables"]);
+  });
+
+  it("announces attribution once, before the open, without sending it again on open", async () => {
+    const paywall = host();
+
+    paywall.announce();
+    expect(sent).toEqual([
+      { event_name: "experiment", experimentId: "e1", variantId: "v1", campaignId: "c1" },
+      {
+        event_name: "paywall_open",
+        paywall_id: "271256",
+        paywall_identifier: "paywall-simple-v2",
+        paywall_name: "Simple v2",
+      },
+    ]);
+    expect(eventNames()).toEqual([]);
+
+    paywall.announce();
+    paywall.open();
+    await settle();
+
+    const names = sent.map((message) => message.event_name);
+    expect(names.filter((name) => name === "experiment")).toHaveLength(1);
+    expect(names.filter((name) => name === "paywall_open")).toHaveLength(1);
+    expect(names.slice(0, 3)).toEqual(["experiment", "paywall_open", "template_variables"]);
   });
 
   it("routes each lifecycle message to its event, with transaction_start only for a prefetched session", async () => {

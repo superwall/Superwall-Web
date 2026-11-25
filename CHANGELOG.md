@@ -9,6 +9,12 @@ Versions apply to every published package in lockstep (see `scripts/version.ts`)
 
 - Every request now sends `X-App-Install-Date`, the ISO time of the browser's first `configure()` (the same value as the `$appInstallDate` device attribute). Ingest reads install dates only from this header, so web apps had no install cohorts and install-cohorted dashboard charts, such as Paywall rate, read 0%. The paywall iframe reports its own `paywall_open` through the paywall worker, so its events carry the same date as `x-app-install-date`. The header is left out until the first-seen time is known and only goes to Superwall's own hosts (or a custom environment's). Events sent by earlier versions still have no install date
 
+## 0.3.5 — 2026-11-24
+
+### Fixed
+
+- Web purchases on framework (headless) paywalls carry the paywall's attribution again. The SDK never sent these paywalls `paywall_open`, and sent `experiment` after the templates that start the checkout prefetch, so the checkout context they post said paywall `0` and sometimes experiment `0`. The server builds `transaction_complete` from that context, so revenue counted but paywall, campaign and experiment conversions read 0. A framework paywall now gets `experiment` and then `paywall_open` (database id, identifier and name) before its templates. paywall.js paywalls get the same messages as before. Purchases made with earlier versions keep `0`
+
 ## 0.3.4 — 2026-10-19
 
 ### Added
